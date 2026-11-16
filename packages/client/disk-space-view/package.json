@@ -1,0 +1,68 @@
+{
+  "name": "@matrix1001/dsh-application-harness-disk-space-view",
+  "description": "Disk-space application view: scan progress, the space treemap, largest items, duplicate groups and the reversible trash",
+  "version": "0.1.0",
+  "engines": {
+    "dsh": ">=0.2.2-rc.2 <0.3.0-0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/matrix1001/dsh-application-harness.git",
+    "directory": "packages/client/disk-space-view"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [],
+      "platform": "web"
+    },
+    "appRow": {
+      "id": "client-ui-disk-space",
+      "name": "@matrix1001/dsh-application-harness-disk-space-view",
+      "appId": "disk-space"
+    }
+  },
+  "scripts": {
+    "bundle": "tsdown",
+    "watch": "tsdown --watch"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "lib/types/**/*.d.ts"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.1.0"
+  },
+  "devDependencies": {
+    "@matrix1001/dsh-application-harness-client-applications": "workspace:*",
+    "@matrix1001/dsh-application-harness-client-chrome": "workspace:*",
+    "@matrix1001/dsh-application-harness-host-bridge": "workspace:*",
+    "@deepseek-ai/cordis": "4.1.0",
+    "@deepseek-ai/dsh-client-locale": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-client-ui-slots": "0.2.2-rc.2",
+    "@testing-library/react": "^16.1.0",
+    "@types/react": "~18.3.1",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "author": "matrix1001"
+}

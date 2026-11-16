@@ -1,0 +1,43 @@
+{
+  // Host aggregate (one of the two check units; see tsconfig.json). packages/client
+  // type-checks in tsconfig.client.json: the two sides merge cordis Context under
+  // the same keys, one program cannot see both.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rewriteRelativeImportExtensions": false
+  },
+  "include": [
+
+
+  ],
+  // Under packages/client a test file names the face it covers: `*.client.*`
+  // belongs to the Client aggregate, `*.host.spec.ts` to this one. The two
+  // suffixes are mutually exclusive, so each aggregate excludes the other's
+  // and the package test glob above needs no per-file entry.
+  "exclude": [
+    "packages/client/*/src/**",
+    "packages/*/*/tests/**/*.client.ts",
+    "packages/*/*/tests/**/*.client.tsx",
+    "packages/*/*/tests/**/*.client.spec.ts",
+    "packages/*/*/tests/**/*.client.spec.tsx"
+  ],
+  "references": [
+    { "path": "./packages/typert/protocol" },
+    { "path": "./packages/bundle/app-harness" },
+    { "path": "./packages/application/runtime" },
+    { "path": "./packages/application/host-bridge" },
+    { "path": "./packages/application/tool-bridge" },
+    { "path": "./packages/application/context" },
+    { "path": "./packages/application/store" },
+    { "path": "./packages/application/http" },
+    { "path": "./packages/examples/notes" },
+    { "path": "./packages/examples/tasks" },
+    { "path": "./packages/examples/calendar" },
+    { "path": "./packages/examples/inbox" },
+    { "path": "./packages/examples/usage" },
+    { "path": "./packages/examples/disk-space" },
+    { "path": "./packages/examples/git-browser" },
+    { "path": "./packages/examples/workspace-review" }
+  ]
+}

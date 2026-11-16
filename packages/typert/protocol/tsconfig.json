@@ -1,0 +1,26 @@
+{
+  // Registration shell for the typert generator: src/ is a vendored snapshot
+  // that follows the platform checkout's packages/typert/protocol/src (MIT);
+  // this project emits its declarations into lib/types, the build plane
+  // tsconfig.base.json resolves the package name to. The shell stays a
+  // registered project so the generator recognizes its type-meta symbols, but
+  // its Context augmentation is removed locally so discovery does not treat it
+  // as a contributor. The snapshot is platform code checked under its own
+  // tsconfig upstream, so the strict family is relaxed here (the tests program
+  // never loads these files).
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib/types",
+    "strict": false,
+    "noUncheckedIndexedAccess": false,
+    "exactOptionalPropertyTypes": false,
+    "noImplicitOverride": false,
+    "noFallthroughCasesInSwitch": false,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  },
+  "include": [
+    "src"
+  ]
+}
