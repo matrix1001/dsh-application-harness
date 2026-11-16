@@ -1,0 +1,7 @@
+{
+  "name": "web-application-example",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "description": "Runnable demo: an application overlay over the web profile — linkage ledger, disk-space anchor, and browser application panel"
+}

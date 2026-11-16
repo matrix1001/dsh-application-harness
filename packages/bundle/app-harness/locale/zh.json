@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "application-harness",
+    "description": "为 DeepSeek Harness 提供应用运行、页面、权限和 AI 调用能力。"
+  }
+}

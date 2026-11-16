@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "paths": {
+      "@matrix1001/dsh-application-harness-tool-bridge": [
+        "./packages/application/tool-bridge/src/index.ts"
+      ],
+      "@matrix1001/dsh-application-harness-host-bridge": [
+        "./packages/application/host-bridge/src/index.ts"
+      ],
+      "@matrix1001/dsh-application-harness-host-bridge/types": [
+        "./packages/application/host-bridge/src/types.ts"
+      ],
+      "@matrix1001/dsh-application-harness-host-bridge/client": [
+        "./packages/application/host-bridge/src/client.ts"
+      ],
+    }
+  }
+}

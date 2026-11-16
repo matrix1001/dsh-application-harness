@@ -1,0 +1,41 @@
+# Keyless tooled application composition: the phase-1 platform subset plus the
+# tools registry, the application tool bridge, and the notes row. The bridge
+# registers ONE `applications` tool (view/read/call) for every conversation and
+# executes a call through the runtime's one call path, `ctx.applications.call`,
+# as the `ai` caller, so a model-shaped tool call lands in the application's own
+# history as the ai actor — the phase-2 acceptance — without an agent loop
+# anchor.
+#
+# 本组合经 `include`（`./cordis.yml`）+ `patches[0].insert` 挂载五行（`system-prompt`、
+# `tools`、`tool-executor-native`、`app-tool-bridge`），**没有自己的
+# 行列表**；机械行有效行集 = include 源的 `application-runtime` + 本补丁新增的
+# `app-tool-bridge`。其余是平台行，不算机械行。机械行集由
+# `scripts/verify-example-compositions.mjs` 门禁守护——门禁对 include+insert
+# 形状显式展开后按下面 `machinery-rowset` 声明与 bundle patch 的机械行 id/name
+# 比对；经 include 进入的示例行（notes）同属门禁的 dsh.appRow
+# 对照。声明缺失/漂移即 release:check 失败。
+# machinery-rowset: application-runtime, app-store, app-tool-bridge
+- id: base
+  name: '@deepseek-ai/cordis-plugin-include'
+  config:
+    path: ./cordis.yml
+    patches:
+      - insert:
+          # The tools registry `inject`s systemPrompt to wire its schema
+          # sections. That is a service dependency, not a list position: entries
+          # start concurrently and list order guarantees nothing — `tools`
+          # simply waits (PENDING) until the service is provided, so either
+          # order activates the same way. The rows below are ordered for
+          # reading, not for mounting.
+          - id: system-prompt
+            name: '@deepseek-ai/dsh-system-prompt'
+          - id: tools
+            name: '@deepseek-ai/dsh-tools'
+          # Tool execution is an explicit plugin on the 0.2.2 line: `tools`
+          # registers and resolves, the executor owns dispatch and cancellation.
+          - id: tool-executor-native
+            name: '@deepseek-ai/dsh-tool-executor-native'
+          # The tooled smoke extends the keyless notes row with the platform
+          # tool face, proving an AI-open operation becomes a tool.
+          - id: app-tool-bridge
+            name: '@matrix1001/dsh-application-harness-tool-bridge'

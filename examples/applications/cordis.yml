@@ -1,0 +1,64 @@
+# Keyless application composition: the platform subset only — no dsh-base, no
+# llm/session/agent anchor services. The application runtime (ctx.applications)
+# is mounted by the `application-runtime` row; the in-memory store and the notes
+# row register their services on it, and the runtime owns the lifecycle
+# (mounted = started). The store uses its explicit `:memory:` mode, so a smoke
+# boot writes no database file anywhere.
+#
+# ⚠️ 这里的 `application-runtime` 行**重复**了 bundle patch
+# （`packages/bundle/app-harness/cordis.patch.yml` 即规范来源）。本组合是
+# **keyless**（无模型/桥/tool-bridge/client——所以无工具调用）；`--tooled`
+# smoke 会另行挂入 tool-bridge（review #⑧、#⑩）。
+# 机械行集由 `scripts/verify-example-compositions.mjs` 门禁守护——按下面
+# `machinery-rowset` 声明与 bundle patch 的机械行 id/name 比对；有意精简须在此
+# 声明，声明缺失/漂移即 release:check 失败。示例行（notes）也由
+# 门禁与各包 `dsh.appRow` 声明比对（id+name，配置不比对）——示例行的第二份
+# 拷贝由门禁锚回真源。
+# machinery-rowset: application-runtime, app-store
+- id: timer
+  name: '@deepseek-ai/cordis-plugin-timer'
+# Platform 0.1.6-alpha.2 replaced the vendored `@deepseek-ai/cordis-plugin-hmr`
+# with `@deepseek-ai/dsh-hmr` (module replacement + Include refresh + profile
+# config reload share one queue); the migration note says to swap the module
+# name. Here the row only module-watches this composition's `root` — the value
+# is the default, kept explicit so the example shows the shape the platform's
+# own base bundle mounts.
+- id: hmr
+  name: '@deepseek-ai/dsh-hmr'
+  config:
+    root:
+      - .
+- id: typert-registry
+  name: '@deepseek-ai/dsh-typert-registry'
+- id: jobs
+  name: '@deepseek-ai/dsh-jobs-local'
+# Platform 0.1.7-alpha.1 folded the file-backed provider into
+# `@deepseek-ai/dsh-settings` (the `settings-file` package is gone from the
+# line; the base bundle's `settings` row mounts this name). The row is gated on
+# `profileContext` exactly as dsh-base gates it: this composition boots from a
+# bare cordis loader with no profile boot context, so without the gate the row
+# waits forever on `configEditor`/`profileContext` instead of being honestly
+# disabled.
+- id: settings
+  name: '@deepseek-ai/dsh-settings'
+  disabled: !!js "!ctx.get('profileContext')"
+- id: credentials
+  name: '@deepseek-ai/dsh-credentials-local'
+- id: subprocess
+  name: '@deepseek-ai/dsh-subprocess-local'
+
+# The application runtime: mounts applications, owns their lifecycle, and runs
+# every call through the one run channel (identity, checks, parameter
+# validation, permission, execution). No data path is configured: history is
+# the runtime's own in-memory window and business documents belong to the
+# applications (neither example row below configures one).
+- id: application-runtime
+  name: '@matrix1001/dsh-application-harness-runtime'
+
+- id: app-store
+  name: '@matrix1001/dsh-application-harness-store'
+
+# The notes row needs the store's applicationStore service; the store stays
+# memory-only here, so the smoke leaves no database behind.
+- id: notes
+  name: '@matrix1001/dsh-application-harness-notes'
