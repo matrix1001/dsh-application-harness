@@ -1,0 +1,156 @@
+# 部署声明：等级、平台版本、服务、应用、客户端能力与执行来源。
+# verify-deployment-descriptor.mjs 将这些声明与 bundle patch、各包的
+# dsh.appRow 和 profile 生成结果双向核对。配置字段由脚本读取；使用方式见 README。
+
+schemaVersion: 1
+
+# 部署等级：Local = 单机、单用户、单进程（当前唯一交付形态）。框架不持有工作区
+# 账本：业务数据由各应用自己的文档承载（见下面的 workspaceFiles / homeFiles）。
+# 另两级（Managed / Shared）在本仓未实现，显式列出以表明能力边界。
+deployment:
+  level: local
+  levels:
+    local:
+      description: 单机单用户单进程；业务数据 = 各应用自己的文档（框架无账本）
+      implemented: true
+    managed:
+      description: 由外部管理器持有进程与数据；本仓未实现
+      implemented: false
+    shared:
+      description: 多用户/多宿主共享存储；本仓未实现
+      implemented: false
+
+# 平台版本：声明线（本仓 pin）。执行线随 checkout、registry 线随 npm，
+# 三线差异由 scripts/verify-execution-line.mjs 在 release:check 内对照。
+platform:
+  declaredLine: 0.2.2-rc.2
+  executionSource: checkout | registry
+  note: 日常部署自平台 checkout 启动（执行线 = checkout）；CI 用 registry 线。
+
+# 服务集合：bundle patch 的机制行（id → 包名，逐行对照
+# packages/bundle/app-harness/cordis.patch.yml）。门禁按 id 前缀把 `client-`/`ui-`
+# 前缀的客户端插件行（客户端机制行与视图行）和生成段的应用行排除在
+# 「机制行」之外：前者由下面的 client.packages、后者由 applications 声明覆盖，
+# 都不进本清单。
+services:
+  - id: application-runtime
+    package: '@matrix1001/dsh-application-harness-runtime'
+  - id: app-store
+    package: '@matrix1001/dsh-application-harness-store'
+  - id: app-tool-bridge
+    package: '@matrix1001/dsh-application-harness-tool-bridge'
+  - id: app-context
+    package: '@matrix1001/dsh-application-harness-context'
+  - id: app-bridge
+    package: '@matrix1001/dsh-application-harness-host-bridge'
+  - id: app-http
+    package: '@matrix1001/dsh-application-harness-http'
+
+# 应用集合：由各包 package.json 的 dsh.appRow 声明，经
+# scripts/generate-bundle-patch.mjs 聚合进 bundle patch 生成段。
+applications:
+  - id: notes
+    package: '@matrix1001/dsh-application-harness-notes'
+  - id: tasks
+    package: '@matrix1001/dsh-application-harness-tasks'
+  - id: calendar
+    package: '@matrix1001/dsh-application-harness-calendar'
+  - id: inbox
+    package: '@matrix1001/dsh-application-harness-inbox'
+  - id: usage
+    package: '@matrix1001/dsh-application-harness-usage'
+  - id: disk-space
+    package: '@matrix1001/dsh-application-harness-disk-space'
+  - id: git-browser
+    package: '@matrix1001/dsh-application-harness-git-browser'
+  - id: workspace-review
+    package: '@matrix1001/dsh-application-harness-workspace-review'
+
+# 客户端能力：客户端插件包（各自有 dsh.client 半与自己的 bundle）。
+client:
+  packages:
+    - '@matrix1001/dsh-application-harness-client-applications'
+    - '@matrix1001/dsh-application-harness-notes-view'
+    - '@matrix1001/dsh-application-harness-tasks-view'
+    - '@matrix1001/dsh-application-harness-calendar-view'
+    - '@matrix1001/dsh-application-harness-inbox-view'
+    - '@matrix1001/dsh-application-harness-usage-view'
+    - '@matrix1001/dsh-application-harness-disk-space-view'
+    - '@matrix1001/dsh-application-harness-git-browser-view'
+    - '@matrix1001/dsh-application-harness-workspace-review-view'
+  # 静态库：没有 dsh.client 半，被视图包直接值导入并内联进各自 bundle
+  # （purity gate 的 INLINE_WORKSPACE 白名单）。
+  inlined:
+    - '@matrix1001/dsh-application-harness-client-chrome'
+    - '@matrix1001/dsh-application-harness-client-object-reference'
+  capabilities:
+    - application-views   # 视图注册表 ctx.applicationViews（视图声明自己的页面）
+    - remote-consumer     # 只经 host bridge 的 applications Remote 命名空间调用/监听
+    - reconnect-reread    # 断线重连后重读列表与历史，不自行折叠
+
+# 执行来源：本仓三种可运行组合各自的位置（verify-example-compositions 对照）。
+execution:
+  compositions:
+    - path: examples/applications/cordis.yml
+      kind: keyless
+    - path: examples/applications/tooled.cordis.yml
+      kind: keyless-tooled
+    - path: examples/web-application/cordis.yml
+      kind: browser-overlay
+  profile:
+    generator: scripts/setup.mjs
+    bundleLayer: '@matrix1001/dsh-application-harness'
+    # 新 profile 的初始用户层为空；刷新时保留平台和用户已有设置。
+    userPatch: empty
+
+# 家目录业务文件（harness home，cwd 无关）：持久化存储与应用自有配置这类「跟人走」
+# 的数据。真源 = bundle patch 行的 config（应用自己的走 dsh.appRow.config），经
+# dshHomePath 解析到 harness home。与上面 workspaceFiles 的绑定同样做双向核对：
+# 每条声明都必须能在 bundle patch 或包 dsh.appRow.config 找到绑定，反之出现的每个
+# dshHomePath(...) 与 `${process.cwd()}/<相对路径>` 也必须在这里列出。
+# **其他组合文件不在扫描面内**（例如 execution.compositions 列出的
+# examples/*/cordis.yml），它们的路径绑定不参与此处的双向检查。
+homeFiles:
+  - path: dshHomePath('application-harness/app-data.sqlite')
+    owner: '@matrix1001/dsh-application-harness-store'
+    declaredBy: bundle patch row app-store (config.dbPath)
+  - path: dshHomePath('application-harness/app-conversation.json')
+    owner: '@matrix1001/dsh-application-harness-host-bridge'
+    declaredBy: bundle patch row app-bridge (config.conversationPath)
+  - path: dshHomePath('application-harness/grants.json')
+    owner: '@matrix1001/dsh-application-harness-host-bridge'
+    declaredBy: bundle patch row app-bridge (config.grantsPath)
+  - path: dshHomePath('application-harness/policies.json')
+    owner: '@matrix1001/dsh-application-harness-host-bridge'
+    declaredBy: bundle patch row app-bridge (config.policiesPath)
+  - path: dshHomePath('application-harness/activation.json')
+    owner: '@matrix1001/dsh-application-harness-host-bridge'
+    declaredBy: bundle patch row app-bridge (config.activationPath)
+  - path: dshHomePath('application-harness/model-selections.json')
+    owner: '@matrix1001/dsh-application-harness-host-bridge'
+    declaredBy: bundle patch row app-bridge (config.modelSelectionsPath)
+  - path: dshHomePath('application-harness/model-usage.json')
+    owner: '@matrix1001/dsh-application-harness-host-bridge'
+    declaredBy: bundle patch row app-bridge (config.modelUsagePath)
+  - path: dshHomePath('application-harness/model-limits.json')
+    owner: '@matrix1001/dsh-application-harness-host-bridge'
+    declaredBy: bundle patch row app-bridge (config.modelLimitsPath)
+  - path: dshHomePath('application-harness/development.json')
+    owner: '@matrix1001/dsh-application-harness-host-bridge'
+    declaredBy: bundle patch row app-bridge (config.developmentPath)
+  - path: dshHomePath('application-harness/onboarding.json')
+    owner: '@matrix1001/dsh-application-harness-host-bridge'
+    declaredBy: bundle patch row app-bridge (config.onboardingPath)
+  - path: dshHomePath('application-harness/history.jsonl')
+    owner: '@matrix1001/dsh-application-harness-host-bridge'
+    declaredBy: bundle patch row app-bridge (config.historyPath)
+  - path: dshHomePath('application-harness/tasks.jsonl')
+    owner: '@matrix1001/dsh-application-harness-host-bridge'
+    declaredBy: bundle patch row app-bridge (config.tasksPath)
+  - path: dshHomePath('application-harness/secrets.json')
+    owner: '@matrix1001/dsh-application-harness-host-bridge'
+    declaredBy: bundle patch row app-bridge (config.secretsPath)
+  - path: dshHomePath('application-harness/disk-space/index.db')
+    owner: '@matrix1001/dsh-application-harness-disk-space'
+    declaredBy: dsh.appRow.config.databasePath
+

@@ -1,0 +1,1324 @@
+/* The application area: navigation column, header strip, business surface and
+ * the management dialog. Semantic aliases only (the shared --dsw-* tokens), no
+ * literal colors.
+ *
+ * Deliberately no `container-type` anywhere: layout containment would make the
+ * area a containing block for `position: fixed` descendants, and the
+ * applications' own overlays (menus, dialogs, the disk-analysis picker) anchor
+ * to the viewport. Narrowness is measured with a ResizeObserver and turned into
+ * classes, never into a CSS container. */
+
+.area {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-base);
+}
+
+/* ---- the navigation column ------------------------------------------------ */
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 204px;
+  min-width: 0;
+  padding: 10px 8px;
+  gap: var(--app-space-inline);
+  border-right: 1px solid var(--dsw-alias-border-l2);
+  overflow: hidden auto;
+}
+
+.nav[data-nav-state='collapsed'] {
+  display: none;
+}
+
+.navDrawer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 20;
+  width: min(260px, 82%);
+  border-right: 1px solid var(--dsw-alias-border-l2);
+  box-shadow: var(--dsw-elevation-prominent, 0 10px 30px rgb(0 0 0 / 20%));
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+.drawerBackdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  background: var(--dsw-alias-bg-mask-1, rgb(0 0 0 / 25%));
+}
+
+.navHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--app-space-inline);
+  padding: 2px 4px 6px;
+}
+
+.navTitle {
+  font-size: var(--app-font-body);
+  font-weight: 600;
+}
+
+.navIconButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: var(--dsw-radius-sm, 6px);
+  color: var(--dsw-alias-label-secondary);
+  background: transparent;
+  cursor: pointer;
+}
+
+.navIconButton:hover {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.navList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-hairline);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.navRow {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-group);
+  width: 100%;
+  min-height: var(--app-row-standard, 36px);
+  padding: 7px 8px;
+  border: none;
+  border-radius: var(--dsw-radius-sm, 6px);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: var(--app-font-body);
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.navRow:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.navRow[aria-current='page'] {
+  background: var(--dsw-alias-interactive-bg-active, var(--dsw-alias-bg-layer-1));
+  font-weight: 600;
+}
+
+/* One navigation row: the button plus its pointer-only reorder handle. */
+.navItem {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-hairline);
+  border-radius: var(--dsw-radius-sm, 6px);
+}
+
+.navItem > .navRow {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+}
+
+.navItem[data-dragging='true'] {
+  opacity: 0.45;
+}
+
+/* The insertion line: the row the drop will land before (and the list's own
+   bottom edge when the drop lands last). */
+.navItem[data-drop-before='true'] {
+  box-shadow: inset 0 2px 0 var(--dsw-alias-state-business-primary);
+}
+
+.navList[data-drop-end='true'] {
+  box-shadow: inset 0 -2px 0 var(--dsw-alias-state-business-primary);
+}
+
+.dragHandle {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: stretch;
+  width: 18px;
+  /* Secondary, not tertiary: this glyph is text and must clear the AA floor on
+     the base surface (the stylesheet guard enforces it). */
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--app-font-caption);
+  line-height: 1;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+  border-radius: var(--dsw-radius-sm, 6px);
+}
+
+.dragHandle:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.dragHandle:active {
+  cursor: grabbing;
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.navName {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- the application glyph (one renderer, every place) --------------------- */
+
+.appIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+
+/* Semantic tones resolve to the theme's own state variables: the registration
+   names a meaning, the theme decides what it looks like in light and dark. */
+.toneNeutral {
+  color: var(--dsw-alias-label-secondary);
+}
+
+.toneBusiness {
+  color: var(--dsw-alias-state-business-primary);
+}
+
+.toneSuccess {
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.toneWarn {
+  color: var(--dsw-alias-state-warn-primary);
+}
+
+.toneError {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.navCount {
+  flex: none;
+  padding: 0 5px;
+  border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: 8px;
+  color: var(--dsw-alias-label-primary);
+  font-size: var(--app-font-caption);
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.navStatus {
+  flex: none;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--app-font-caption);
+}
+
+.navStatus[data-status='failed'] {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.navHint {
+  margin: 0;
+  padding: 4px 8px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--app-font-meta);
+}
+
+.navFoot {
+  margin-top: auto;
+  padding-top: 6px;
+}
+
+.navManage {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-group);
+  width: 100%;
+  padding: 7px 8px;
+  border: none;
+  border-radius: var(--dsw-radius-sm, 6px);
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: var(--app-font-body);
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.navManage:hover {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+/* ---- the frame: header + surface ------------------------------------------ */
+
+.frame {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-inline);
+  flex: none;
+  height: var(--app-header-height);
+  padding: 0 10px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+}
+
+/* The header is one row of controls that must shrink, never push: the spacer
+   takes what is left, the name truncates, and every icon button keeps its own
+   size (a squeezed header may never turn a label into a column of characters —
+   the 320px case). */
+.headerSpacer {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--app-space-inline);
+  min-width: 0;
+  max-width: 100%;
+  padding: 5px 8px;
+  border: none;
+  border-radius: var(--dsw-radius-sm, 6px);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: var(--app-font-subtitle);
+  font-weight: 600;
+  background: transparent;
+  cursor: pointer;
+}
+
+.switcher:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.switcherName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.headerIconButton {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: var(--dsw-radius-sm, 6px);
+  color: var(--dsw-alias-label-secondary);
+  background: transparent;
+  cursor: pointer;
+}
+
+/* The shell's one status entry: a compact label in the header, never a row in
+   the page (a notice appearing must not move the content below it). */
+.headerStatus {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--app-space-inline);
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: min(320px, 40vw);
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-sm, 6px);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: var(--app-font-meta);
+  cursor: pointer;
+}
+
+.headerStatus:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.headerStatus[data-tone='warning'] {
+  color: var(--dsw-alias-state-warn-label);
+}
+
+.headerStatus[data-tone='error'] {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.headerStatusText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.headerIconButton:hover {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.headerCount {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  min-width: 15px;
+  padding: 0 3px;
+  border-radius: 8px;
+  color: var(--dsw-alias-label-primary);
+  font-size: var(--app-font-caption);
+  background: var(--dsw-alias-state-warn-tertiary, var(--dsw-alias-bg-layer-1));
+  border: 1px solid var(--dsw-alias-border-l3);
+}
+
+.surface {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-group);
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  padding: var(--app-page-block) var(--app-page-inline) var(--app-page-bottom);
+  overflow: auto;
+}
+
+/* The content column holds the business page and the settled outcome in ONE
+   flow, exactly as the applications' own pages were laid out before this area
+   existed: the page is a flex item of this column. While the page is a `flow`
+   one (contract.ts, `contentLayout` — the default) this column deliberately
+   claims no free space: the page is an ordinary block and the outer `.surface`
+   scrolls it, so a `flex: 1 1 auto` here would take the space from the page.
+   A page that declared `fill` claims exactly that space instead, below. */
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-block);
+  min-width: 0;
+}
+
+/* A `fill` page: the column takes the height that is really left beside the
+   framework's notices and hands it down (the page's own root container eats it
+   with its own `flex`/`min-height: 0`), so the application's list or body
+   scrolls inside the page — the outer `.surface` no longer scrolls the work. */
+.contentFill {
+  flex: 1 1 auto;
+  min-height: 0;
+  /* A flex item's `min-width: auto` would let one wide child (a 320px board
+     column, a long toolbar) widen the whole column past the window; the page
+     owns its own horizontal scrolling instead. */
+  min-width: 0;
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--app-space-group);
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-state-warn-primary);
+  border-radius: var(--dsw-radius-sm, 6px);
+  color: var(--dsw-alias-label-primary);
+  font-size: var(--app-font-body);
+  background: var(--dsw-alias-state-warn-tertiary);
+}
+
+.running {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--app-font-meta);
+}
+
+/* A permission the runtime refused: a notice, not an error — the page below it
+   is intact and the way out is two clicks. */
+.refused {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--app-space-group);
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-sm, 6px);
+  color: var(--dsw-alias-label-primary);
+  font-size: var(--app-font-body);
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.refused > span:first-child {
+  min-width: 0;
+}
+
+.progress {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-tight);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--app-font-meta);
+}
+
+.progressText {
+  margin-left: 6px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.error {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-sm, 6px);
+  color: var(--dsw-alias-state-error-primary);
+  font-size: var(--app-font-body);
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.outcomeWrap {
+  /* Inside the content column, after the page: a sibling of the page would be
+     overlapped by the page's own (deliberately unclipped) overflow. */
+  flex: none;
+}
+
+.state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--app-space-group);
+  padding: 16px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: var(--dsw-radius-sm, 6px);
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.state p {
+  margin: 0;
+  font-size: var(--app-font-body);
+}
+
+.stateReason {
+  color: var(--dsw-alias-label-secondary);
+}
+
+.stateActions {
+  display: flex;
+  gap: var(--app-space-group);
+}
+
+/* ---- the management dialog ------------------------------------------------ */
+
+.dialog {
+  width: min(720px, 100%);
+  height: min(620px, 100%);
+  max-height: 100%;
+  gap: 0;
+  padding: 0;
+}
+
+.manage {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+.manageHead {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-group);
+  flex: none;
+  padding: 14px 12px 10px 16px;
+}
+
+.manageHeading {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: var(--app-space-hairline);
+}
+
+.manageTitle {
+  margin: 0;
+  overflow: hidden;
+  font-size: var(--app-font-subtitle);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.manageSub {
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--app-font-meta);
+}
+
+.manageIconButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  margin-left: auto;
+  border: none;
+  border-radius: var(--dsw-radius-sm, 6px);
+  color: var(--dsw-alias-label-secondary);
+  background: transparent;
+  cursor: pointer;
+}
+
+.manageHead > .manageIconButton:first-child {
+  margin-left: 0;
+}
+
+.manageIconButton:hover {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.manageTabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--app-space-hairline);
+  flex: none;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+}
+
+.manageTabs button {
+  padding: 7px 10px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: var(--app-font-body);
+  background: transparent;
+  cursor: pointer;
+}
+
+.manageTabs button[aria-selected='true'] {
+  border-bottom-color: var(--dsw-alias-state-business-primary);
+  color: var(--dsw-alias-label-primary);
+}
+
+.manageBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-section);
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  padding: 14px 16px 16px;
+  overflow: auto;
+}
+
+/* The settings tab owns its scrolling: the application's settings layout
+   scrolls its own content under a visible action bar, so the dialog's body
+   stops being a scroller (two vertical scrollbars in one form is exactly what
+   §5/S1 rules out) and hands the height down instead. */
+.manageBody[data-manage-tab='settings'] {
+  overflow: hidden;
+  padding-bottom: 0;
+}
+
+.settingsHost {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+
+.manageSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-group);
+  min-width: 0;
+}
+
+/* The list: rows of ~64px at the default type size, separated by hairlines —
+   the prototype's two-line rows. Rows are rows, not cards: no border, no
+   shadow, and no rounding to make each one a floating chip. */
+.manageRows {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.manageRows > li + li {
+  border-top: 1px solid var(--dsw-alias-border-l1);
+}
+
+.manageRow {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-group);
+  width: 100%;
+  min-height: 60px;
+  padding: 8px 6px;
+  border: none;
+  border-radius: var(--dsw-radius-sm, 6px);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: var(--app-font-body);
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.manageRow:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.manageRowName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A row carries what the prototype shows: the glyph, the name over the real
+   description, the real status and the way in. Nothing invented to fill it. */
+.manageRowMain {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-hairline);
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.manageRowDesc {
+  overflow: hidden;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--app-font-meta);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.manageRowGap {
+  flex: 1 1 auto;
+}
+
+.manageRowHint,
+.manageRowStatus {
+  flex: none;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--app-font-meta);
+}
+
+.manageRowChevron {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary));
+}
+
+/* The detail tabs: a WAI-ARIA tablist whose arrow keys move the SELECTION and
+   the DOM focus together (the same model the shared TabBar implements). */
+.manageTabPanel {
+  display: contents;
+}
+
+.manageRowStatus[data-status='failed'] {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.caption {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--app-font-meta);
+}
+
+.settingsBody {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.infoRows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-tight);
+  margin: 0;
+}
+
+.infoRow {
+  display: flex;
+  gap: var(--app-space-group);
+  font-size: var(--app-font-body);
+}
+
+.infoRow dt {
+  flex: 0 0 72px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.infoRow dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.debug {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-group);
+  align-items: flex-start;
+}
+
+.dataList {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-tight);
+}
+
+.dataItem {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--app-space-group);
+  align-items: baseline;
+  font-size: var(--app-font-meta);
+  color: var(--mutedStrong);
+}
+
+.dataPath {
+  flex: 1 1 100%;
+  font-size: var(--app-font-caption);
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.dataActions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--app-space-group);
+  margin-top: 8px;
+}
+
+.hiddenFile {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+
+.debugToggle {
+  padding: 5px 10px;
+  border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-sm, 6px);
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: var(--app-font-meta);
+  background: transparent;
+  cursor: pointer;
+}
+
+.debugToggle[aria-expanded='true'] {
+  color: var(--dsw-alias-label-primary);
+}
+
+.debug > .form {
+  align-self: stretch;
+}
+
+/* A narrow area: the navigation is a drawer over the frame (see narrow.ts for
+   how the width is measured — the area's own box, not the window). */
+.area[data-narrow='true'] {
+  position: relative;
+}
+
+.area[data-narrow='true'] .frame {
+  min-width: 0;
+}
+
+.area[data-narrow='true'] .header {
+  padding: 0 6px;
+}
+
+.area[data-narrow='true'] .navRow {
+  min-height: var(--app-row-touch, 44px);
+}
+
+@media (max-width: 720px) {
+  .dialog {
+    width: 100%;
+    height: 100%;
+  }
+}
+
+/* ---- the first-run permission card --------------------------------------- */
+
+.onboarding {
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: var(--dsw-radius-sm, 6px);
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+}
+
+.onboardingTitle {
+  margin: 0 0 8px;
+  font-size: var(--app-font-subtitle);
+  font-weight: 600;
+}
+
+.onboardingNeeds {
+  display: grid;
+  gap: var(--app-space-tight);
+  margin: 0;
+  padding-left: 18px;
+  font-size: var(--app-font-body);
+}
+
+.onboardingPurpose {
+  color: var(--dsw-alias-label-secondary);
+}
+
+.onboardingPeer {
+  margin: 8px 0 0;
+  font-size: var(--app-font-meta);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.onboardingFailure {
+  margin: 8px 0 0;
+  font-size: var(--app-font-meta);
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.onboardingActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--app-space-group);
+  margin-top: 10px;
+}
+
+@media (max-width: 720px) {
+  .onboardingActions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+/* ---- the application-owned right conversation pane ----------------------- */
+
+.frame {
+  position: relative;
+}
+
+.frameBody {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+.conversationPane {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 390px;
+  width: 390px;
+  min-width: 300px;
+  min-height: 0;
+  border-left: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.conversationPane > * {
+  min-height: 0;
+}
+
+.conversationPane > :last-child {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.conversationPaneHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-inline);
+  flex: none;
+  height: 44px;
+  padding: 0 8px 0 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+}
+
+.conversationPaneTitle {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-primary);
+  font-size: var(--app-font-body);
+  font-weight: 600;
+}
+
+.conversationPaneContext {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: var(--app-font-caption);
+  text-align: left;
+  cursor: pointer;
+}
+
+.conversationPaneContext:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.conversationEmpty {
+  margin: 20px 14px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--app-font-body);
+  line-height: 1.6;
+}
+
+.area[data-narrow='true'] .conversationPane {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  width: auto;
+  min-width: 0;
+  flex-basis: auto;
+  border-left: none;
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.dataRestore {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-inline);
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid var(--dsh-border-weak, rgb(0 0 0 / 10%));
+  border-radius: 8px;
+}
+
+.resultDetails {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-inline);
+}
+
+.navTools {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-tight);
+  padding: 6px 8px;
+}
+.navSearch, .navFilter {
+  width: 100%;
+  min-height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--app-border, var(--dsw-alias-border-l2));
+  border-radius: var(--dsw-radius-sm, 6px);
+  color: var(--app-text, var(--dsw-alias-label-primary));
+  background: var(--app-panel, var(--dsw-alias-bg-base));
+  font: inherit;
+  font-size: var(--app-font-meta, 12px);
+}
+
+.statusBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--app-space-tight);
+  font-size: var(--app-font-meta);
+  white-space: nowrap;
+}
+.statusDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentcolor;
+}
+
+/* ---- the floating shell notice stack ------------------------------------
+   Shell statuses (connection, error, refusal, progress) float over the
+   content; they never insert a row, so the page below does not move. */
+
+.shellNotices {
+  position: fixed;
+  top: 60px;
+  right: 16px;
+  /* Below the app navigation drawer (20) and the page header (6): a shell
+     notice must never cover a navigation row. */
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-tight);
+  width: min(420px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+.shellNotice {
+  /* Click-through: the shell status never blocks a control underneath. */
+  pointer-events: none;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--app-space-group);
+  padding: 6px 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-left: 3px solid var(--dsw-alias-state-business-primary);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-2);
+  box-shadow: var(--dsw-elevation-prominent, 0 4px 14px rgb(0 0 0 / 12%));
+  font-size: var(--app-font-meta);
+  line-height: var(--app-line-normal);
+  color: var(--dsw-alias-label-primary);
+}
+
+.shellNotice[data-tone='error'] {
+  border-left-color: var(--dsw-alias-state-error-primary);
+}
+
+.shellNotice[data-tone='warning'] {
+  border-left-color: var(--dsw-alias-state-warn-primary);
+}
+
+.shellNoticeText {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.shellNoticeAction {
+  pointer-events: auto;
+  flex: none;
+  padding: 0 2px;
+  border: 0;
+  background: transparent;
+  color: var(--dsw-alias-link);
+  font: inherit;
+  cursor: pointer;
+}
+
+.shellNoticeMore {
+  margin: 0;
+  text-align: right;
+  font-size: var(--app-font-caption);
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* The first-run prompt's body: a long capability list scrolls inside the card
+   instead of pushing the card past the viewport. */
+.onboardingContent {
+  max-height: min(60vh, 420px);
+  overflow: auto;
+}
+
+/* First-use setup for the application conversation's dedicated workspace. */
+.conversationSetup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-block);
+  width: min(460px, calc(100vw - 64px));
+  padding: 18px;
+}
+
+.conversationSetupTitle {
+  margin: 0;
+  font-size: var(--app-font-subtitle);
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+}
+
+.conversationSetupBody {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--app-font-body);
+  line-height: 1.6;
+}
+
+.conversationSetupField {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-inline);
+  font-size: var(--app-font-meta);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.conversationSetupField input {
+  min-width: 0;
+  flex: 1 1 auto;
+  padding: 7px 9px;
+  border: 1px solid var(--dsw-alias-border-l4);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+}
+
+.conversationSetupPathRow {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-group);
+}
+
+.conversationSetupHint {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--app-font-caption);
+  line-height: 1.5;
+}
+
+.conversationSetupError {
+  margin: 0;
+  color: var(--dsw-alias-state-error-primary);
+  font-size: var(--app-font-meta);
+  overflow-wrap: anywhere;
+}
+
+.conversationSetupActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--app-space-group);
+}
+
+/* The narrow frame: the same three insets, scaled for a phone. */
+@media (max-width: 720px) {
+  .surface {
+    padding: var(--app-space-block) var(--app-space-section) var(--app-space-page);
+  }
+}
+
+.statusDegraded {
+  margin-left: 4px;
+  color: var(--dsw-alias-state-warning-primary);
+  font-size: var(--app-font-meta);
+}
+
+.infoActivation {
+  display: flex;
+  justify-content: flex-end;
+  margin: 8px 0;
+}
+
+/* ---- development session dialog ------------------------------------------- */
+
+.develop {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-group);
+  padding: var(--app-space-page);
+}
+.developHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.developHint {
+  margin: 0;
+  color: var(--app-text-muted);
+  font-size: var(--app-font-small);
+}
+.developField {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-tight);
+  font-size: var(--app-font-small);
+}
+.developField input {
+  padding: var(--app-space-tight) var(--app-space-group);
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius-control);
+  background: var(--app-surface);
+  color: var(--app-text);
+}
+.developError {
+  margin: 0;
+  color: var(--app-danger);
+  font-size: var(--app-font-small);
+}
+.developActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--app-space-group);
+}
+.developId {
+  overflow-wrap: anywhere;
+  font-size: var(--app-font-small);
+}
+
+/* ---- shared object reference ---------------------------------------------- */
+
+.objectRef {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--app-space-tight);
+  padding: var(--app-space-tight) var(--app-space-group);
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius-control);
+  background: var(--app-surface);
+  color: var(--app-text);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+.objectRef:hover {
+  border-color: var(--app-accent);
+}
+.objectRef[data-unavailable='true'] {
+  color: var(--app-text-muted);
+  cursor: default;
+}
+.objectRefTitle {
+  font-weight: 600;
+}
+.objectRefSummary,
+.objectRefId {
+  color: var(--app-text-muted);
+  font-size: var(--app-font-small);
+}

@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: typecheck · test:coverage · build · publint · smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.22.0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.9.0
+          cache: pnpm
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck (host + typert contracts + client + tests)
+        run: pnpm run typecheck:release
+
+      - name: Test + coverage gate (per-file 100% on packages/*/*/src)
+        run: pnpm run test:coverage
+
+      - name: Build (host + typert generation + client bundles)
+        run: pnpm run build
+
+      # The script plane (T1/T2 deployment + launch helpers) runs under
+      # `node --test`, not vitest: vitest collects packages/*/*/tests only, so a
+      # scripts test would otherwise never execute (2026-09-13 批 C).
+      - name: Script-plane tests (node --test)
+        # Keep the failing test visible as an annotation: the step's own log is
+        # not public, and "exit code 1" alone makes a red script plane
+        # undiagnosable from the run page.
+        run: |
+          set +e
+          pnpm run test:scripts > "$RUNNER_TEMP/script-tests.log" 2>&1
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            grep -i -E 'error|✖|not ok|ERR_|expected|actual|code:' "$RUNNER_TEMP/script-tests.log" | head -120 | while IFS= read -r line; do
+              echo "::error title=Script-plane failure::$line"
+            done
+            {
+              echo '### Script-plane test failure'
+              echo '```text'
+              tail -200 "$RUNNER_TEMP/script-tests.log"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            tail -120 "$RUNNER_TEMP/script-tests.log"
+          fi
+          exit "$status"
+
+      - name: Publish lint (publint)
+        run: pnpm -r exec publint
+
+      # The declaration gates (arch-review 批 K ci-gate-omits-declaration-gates):
+      # release:check ran these locally only, so "CI green" could outrun a
+      # declaration drift — all repo-internal static checks, ~10s together.
+      # The launch preflight (`launch-apps --check-only`) stays in release:check:
+      # it needs a platform checkout that this job does not have.
+      - name: Declaration gates (composition/manifest/rows)
+        run: |
+          node scripts/verify-example-compositions.mjs
+          node scripts/verify-machinery-rows.mjs
+          node scripts/verify-deployment-descriptor.mjs
+          node scripts/verify-layer-deps.mjs
+          node scripts/verify-platform-package-set.mjs
+          node scripts/verify-execution-line.mjs
+          node scripts/platform-line.mjs --check
+          node scripts/verify-api-snapshot.mjs
+          node scripts/vendor-platform-src.mjs --self-test
+          node scripts/vendor-platform-src.mjs --check
+          node scripts/verify-platform-modules.mjs
+          node scripts/generate-bundle-patch.mjs --check
+          node scripts/verify-inject-contract.mjs
+          node scripts/verify-build-role.mjs
+          node scripts/verify-engines.mjs
+          node scripts/verify-client-peer-shape.mjs
+          node scripts/verify-runtime-deps.mjs
+          node scripts/verify-app-scale.mjs --strict
+          node scripts/verify-version-sync.mjs
+
+      - name: Client factory gate
+        run: node scripts/verify-client-factory.mjs
+      - name: Pack gate
+        run: node scripts/verify-pack.mjs
+      - name: Keyless composition smoke
+        run: |
+          node scripts/smoke.mjs applications
+          node scripts/smoke.mjs applications --tooled

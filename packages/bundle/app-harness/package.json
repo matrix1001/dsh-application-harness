@@ -1,0 +1,108 @@
+{
+  "name": "@matrix1001/dsh-application-harness",
+  "description": "The application-harness bundle: mounts the application runtime, the persistence store, the agent tool bridge, the page-context reader, the host bridge, the network capability and the client application shell into any dsh profile",
+  "version": "0.1.0",
+  "engines": {
+    "dsh": ">=0.2.2-rc.2 <0.3.0-0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/matrix1001/dsh-application-harness.git",
+    "directory": "packages/bundle/app-harness"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "lib/index.js",
+    "cordis.patch.yml",
+    "deployment.yml",
+    "locale/*.json",
+    "lib/types/**/*.d.ts"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.1.0",
+    "@deepseek-ai/dsh-agent": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-api-remotes": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-atomic-write": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-client-locale": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-client-store": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-client-ui-layout": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-client-ui-sidebar": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-client-ui-slots": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-credentials": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-jobs": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-session": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-settings": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-subprocess": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-typert-protocol": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-typert-registry": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-user-approval": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-util-values": "0.2.2-rc.2"
+  },
+  "dependencies": {
+    "@matrix1001/dsh-application-harness-calendar": "workspace:*",
+    "@matrix1001/dsh-application-harness-calendar-view": "workspace:*",
+    "@matrix1001/dsh-application-harness-client-applications": "workspace:*",
+    "@matrix1001/dsh-application-harness-context": "workspace:*",
+    "@matrix1001/dsh-application-harness-disk-space": "workspace:*",
+    "@matrix1001/dsh-application-harness-disk-space-view": "workspace:*",
+    "@matrix1001/dsh-application-harness-git-browser": "workspace:*",
+    "@matrix1001/dsh-application-harness-git-browser-view": "workspace:*",
+    "@matrix1001/dsh-application-harness-host-bridge": "workspace:*",
+    "@matrix1001/dsh-application-harness-http": "workspace:*",
+    "@matrix1001/dsh-application-harness-inbox": "workspace:*",
+    "@matrix1001/dsh-application-harness-inbox-view": "workspace:*",
+    "@matrix1001/dsh-application-harness-notes": "workspace:*",
+    "@matrix1001/dsh-application-harness-notes-view": "workspace:*",
+    "@matrix1001/dsh-application-harness-runtime": "workspace:*",
+    "@matrix1001/dsh-application-harness-store": "workspace:*",
+    "@matrix1001/dsh-application-harness-tasks": "workspace:*",
+    "@matrix1001/dsh-application-harness-tasks-view": "workspace:*",
+    "@matrix1001/dsh-application-harness-tool-bridge": "workspace:*",
+    "@matrix1001/dsh-application-harness-usage": "workspace:*",
+    "@matrix1001/dsh-application-harness-usage-view": "workspace:*",
+    "@matrix1001/dsh-application-harness-workspace-review": "workspace:*",
+    "@matrix1001/dsh-application-harness-workspace-review-view": "workspace:*"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.1.0",
+    "@deepseek-ai/dsh-agent": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-api-remotes": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-client-locale": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-client-ui-layout": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-client-ui-sidebar": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-client-ui-slots": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-session": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-subprocess": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-typert-protocol": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-user-approval": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-util-values": "0.2.2-rc.2"
+  },
+  "author": "matrix1001"
+}

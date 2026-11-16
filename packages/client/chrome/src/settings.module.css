@@ -1,0 +1,156 @@
+/* The shared settings layout (settings.tsx). Semantic aliases only — the same
+ * --dsw-* tokens every other surface reads, so light and dark come from the
+ * theme and never from a second palette. */
+
+.settings {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  min-width: 0;
+}
+
+/* The ONE scroller of a settings page: the action bar below is a flex sibling,
+   not an overlay, so the last field is never covered by it. */
+.settingsBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-section);
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;
+}
+
+.settingsFoot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--app-space-block);
+  flex: none;
+  margin-top: 12px;
+  padding: 10px 0 16px;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+}
+
+.settingsStatus {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--app-font-meta);
+}
+
+.settingsActions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--app-space-group);
+  flex: none;
+}
+
+/* Groups: a heading, its rows, one divider before the next group. */
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-hairline);
+  min-width: 0;
+}
+
+.group + .group {
+  padding-top: 14px;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+}
+
+.groupTitle {
+  margin: 0 0 4px;
+  color: var(--dsw-alias-label-primary);
+  font-size: var(--app-font-body);
+  font-weight: 600;
+}
+
+.rows {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* One row: label + why on the left, the control on the right. The row is the
+   LABEL element (see settings.tsx), so the control's accessible name is the
+   row's own text with no id wiring. */
+.row {
+  display: grid;
+  grid-template-columns: minmax(120px, 200px) minmax(0, 1fr);
+  align-items: center;
+  gap: var(--app-space-hairline) 16px;
+  min-width: 0;
+  padding: 10px 0;
+}
+
+.row + .row {
+  border-top: 1px solid var(--dsw-alias-border-l1);
+}
+
+.rowInfo {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-hairline);
+  min-width: 0;
+}
+
+.rowLabel {
+  color: var(--dsw-alias-label-primary);
+  font-size: var(--app-font-body);
+}
+
+.rowBadge {
+  margin-left: var(--app-space-inline);
+  padding: 0 var(--app-space-inline);
+  border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: 999px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: var(--app-font-caption);
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.rowHint {
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--app-font-meta);
+  /* A hint wraps; it never gets clipped at the label column's edge (the
+     "留空表示不改动…" line used to end mid-sentence). */
+  overflow-wrap: anywhere;
+}
+
+.rowControl {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+/* The control fills the column it was given; a caller that wants a short
+   numeric box passes its own width on the control itself. */
+.rowControl > * {
+  min-width: 0;
+}
+
+.rowError {
+  grid-column: 2;
+  color: var(--dsw-alias-state-error-primary);
+  font-size: var(--app-font-meta);
+}
+
+/* A narrow surface stacks the row: the label above, the control full width.
+   (The dialog this page lives in is measured by the viewport below the
+   platform's own breakpoints, so the viewport is the honest signal here.) */
+@media (max-width: 720px) {
+  .row {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+    gap: var(--app-space-inline);
+  }
+
+  .rowError {
+    grid-column: 1;
+  }
+}
