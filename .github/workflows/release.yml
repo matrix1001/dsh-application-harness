@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to verify (v<semver>)
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: release gate · tarball · GitHub Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.22.0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.9.0
+          cache: pnpm
+
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify the tag names the bundle version
+        run: node scripts/verify-release-tag.mjs "${{ github.event.inputs.tag || github.ref_name }}"
+
+      - name: Release check (npm line, no platform checkout)
+        run: pnpm run release:check
+
+      - name: Tarball install acceptance in an isolated profile
+        run: node scripts/test-plugin-local.mjs --no-restore
+
+      - name: Build the self-contained release asset
+        run: node scripts/build-plugin-tarball.mjs --out dist
+
+      - name: Publish the GitHub Release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: |
+            dist/matrix1001-dsh-application-harness-*.tgz
+            dist/matrix1001-dsh-application-harness-*.tgz.sha256
+          generate_release_notes: true

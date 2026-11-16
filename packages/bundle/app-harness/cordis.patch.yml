@@ -1,0 +1,144 @@
+# The application-harness bundle patch: mounts the application harness (the application
+# runtime, the application persistence store, the agent tool bridge, the
+# page-context reader, the host bridge, the network capability and the browser's
+# application shell) into any dsh profile. Install with
+# `dsh plugin --profile <name> add @matrix1001/dsh-application-harness`;
+# the patch rows layer over the profile's own composition.
+#
+# The platform rows (typert registry, jobs, settings, credentials, subprocess)
+# belong to the hosting profile's platform subset — every dsh profile already
+# carries them — so this bundle mounts only the application-side rows.
+#
+# ⚠️ 这是「机械行集」的**规范来源**（review #⑧）：它是应用挽具挂载哪些机器插件的
+# 权威行集。两份示例组合各自演示不同形态，但它们对本文件的关系不同：
+# `examples/web-application/cordis.yml` 的机械段**由本文件生成**（`node scripts/
+# generate-bundle-patch.mjs`，其 `--check` 在 release:check 里），不再有第二份手抄；
+# `examples/applications/cordis.yml`（keyless）仍是**有意精简**的手写子集，按自己
+# 文件头的 `machinery-rowset` 声明与 `scripts/verify-example-compositions.mjs` 门禁
+# 锚回本文件，漂移即 release:check 红。应用与视图的示例行在下方生成段（真源 =
+# 各包 package.json 的 `dsh.appRow`，勿手改）。
+
+# The platform's own `ui-sidebar` row stays enabled. The applications package
+# registers its rail entry through the additive `sidebar.panellist` slot and its
+# page through the keyed `main` slot, so this bundle does not replace the
+# platform sidebar occupant (and cannot collide with another plugin over the
+# single `sidebar` slot).
+
+- insert:
+    # The application runtime: one service (`ctx.applications`) holding the
+    # registry, the one call path (identity, availability, declaration,
+    # parameters, openness, grant or confirmation) and the lifecycle
+    # (mounted = started). The application rows register their own declarations
+    # on it; no other row owns application state. Configured with no data path
+    # on purpose: history is a bounded in-memory window here (a deployment that
+    # wants it durable wires its own HistorySink), and business documents belong
+    # to the applications themselves (the generated rows below).
+    - id: application-runtime
+      name: '@matrix1001/dsh-application-harness-runtime'
+
+    # The unified application data store (SQLite documents/collections; not part of the world).
+    # It lives under the harness home (dshHomePath — cwd-independent) so every
+    # application's namespace survives restarts. The old JSON blob is a
+    # one-way import source for settings and filters; it is never rewritten.
+    # Absent a path, the store is in-memory only (not durable).
+    - id: app-store
+      name: '@matrix1001/dsh-application-harness-store'
+      config:
+        dbPath: !!js dshHomePath('application-harness/app-data.sqlite')
+
+    # The application tool bridge is deliberately SCOPED: this row owns the
+    # declaration-driven tool surface, but it attaches that surface only to a
+    # session the application area has marked as its conversation. A standard
+    # conversation (the main conversation) therefore never sees application
+    # business tools, while the application-area conversation does. The runtime
+    # stays global: applications run, and peer/human calls work, with no
+    # conversation open at all.
+    - id: app-tool-bridge
+      name: '@matrix1001/dsh-application-harness-tool-bridge'
+
+    # The page-context reader: `@page:` citations a browser page chip serialized
+    # into a prompt are verified through the cited application's own AI-open read
+    # operation and answered with one structured context message right after the
+    # citing one (stale citations are marked stale, unopenable ones contribute
+    # nothing). Reads only; it grants nothing. It injects the runtime and listens
+    # on the platform's `agent/pre-step`, so a composition without an agent
+    # simply never emits the step it serves.
+    - id: app-context
+      name: '@matrix1001/dsh-application-harness-context'
+
+    # The browser's one door to the applications this host runs: the
+    # `applications` Remote namespace (list, call with cancellation, history,
+    # grants, out-of-session confirmations, stop, one watch stream) over the
+    # runtime. The config names the durable grant table and the first-run
+    # record; the identity is fixed at this door (every call is the human), and
+    # the runtime owns everything behind it.
+    - id: app-bridge
+      name: '@matrix1001/dsh-application-harness-host-bridge'
+      config:
+        grantsPath: !!js dshHomePath('application-harness/grants.json')
+        policiesPath: !!js dshHomePath('application-harness/policies.json')
+        activationPath: !!js dshHomePath('application-harness/activation.json')
+        modelSelectionsPath: !!js dshHomePath('application-harness/model-selections.json')
+        modelUsagePath: !!js dshHomePath('application-harness/model-usage.json')
+        modelLimitsPath: !!js dshHomePath('application-harness/model-limits.json')
+        developmentPath: !!js dshHomePath('application-harness/development.json')
+        onboardingPath: !!js dshHomePath('application-harness/onboarding.json')
+        historyPath: !!js dshHomePath('application-harness/history.jsonl')
+        tasksPath: !!js dshHomePath('application-harness/tasks.jsonl')
+        secretsPath: !!js dshHomePath('application-harness/secrets.json')
+        dataPath: !!js dshHomePath('application-harness/app-data.sqlite')
+        conversationPath: !!js dshHomePath('application-harness/app-conversation.json')
+
+    # The harness network capability (ctx.applicationHttp): applications make outbound
+    # requests through it; an application declares no transport policy of its own.
+    - id: app-http
+      name: '@matrix1001/dsh-application-harness-http'
+
+    # The browser's application shell: the applications panel (list, switching,
+    # calls with cancellation, progress, history, grants, out-of-session
+    # confirmation) and the `applicationViews` registry every view package
+    # registers its page into. The mirror/panel/schema-ui packages are gone
+    # (P8) — one shell is mounted, never two.
+    # Applications mount below the generated-rows marker (aggregated from each
+    # package's `dsh.appRow` declaration — one bundle layer, deterministic order).
+    - id: client-applications
+      name: '@matrix1001/dsh-application-harness-client-applications'
+
+    # --- generated application rows (do not edit below; node scripts/generate-bundle-patch.mjs) ---
+    # 示例应用/视图行（真源 = 各包的 package.json `dsh.appRow` 声明）
+    - id: calendar
+      name: '@matrix1001/dsh-application-harness-calendar'
+    - id: disk-space
+      name: '@matrix1001/dsh-application-harness-disk-space'
+      config:
+        databasePath: !!js dshHomePath('application-harness/disk-space/index.db')
+    - id: git-browser
+      name: '@matrix1001/dsh-application-harness-git-browser'
+      config:
+        timeoutMs: 10000
+    - id: inbox
+      name: '@matrix1001/dsh-application-harness-inbox'
+    - id: notes
+      name: '@matrix1001/dsh-application-harness-notes'
+    - id: tasks
+      name: '@matrix1001/dsh-application-harness-tasks'
+    - id: usage
+      name: '@matrix1001/dsh-application-harness-usage'
+    - id: workspace-review
+      name: '@matrix1001/dsh-application-harness-workspace-review'
+    - id: client-ui-calendar
+      name: '@matrix1001/dsh-application-harness-calendar-view'
+    - id: client-ui-disk-space
+      name: '@matrix1001/dsh-application-harness-disk-space-view'
+    - id: client-ui-git-browser
+      name: '@matrix1001/dsh-application-harness-git-browser-view'
+    - id: client-ui-inbox
+      name: '@matrix1001/dsh-application-harness-inbox-view'
+    - id: client-ui-notes
+      name: '@matrix1001/dsh-application-harness-notes-view'
+    - id: client-ui-tasks
+      name: '@matrix1001/dsh-application-harness-tasks-view'
+    - id: client-ui-usage
+      name: '@matrix1001/dsh-application-harness-usage-view'
+    - id: client-ui-workspace-review
+      name: '@matrix1001/dsh-application-harness-workspace-review-view'

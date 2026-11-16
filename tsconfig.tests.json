@@ -1,0 +1,34 @@
+{
+  // The tests typecheck program: one pass over every package's test files
+  // (host + client tests together, so a cross-package shape change fails at
+  // the source). Extends tsconfig.test-paths.json (base + the source-plane
+  // paths our own packages' test suites import); unlike the build aggregates
+  // it emits nothing and holds no project references — the test files are
+  // checked directly against the sources the paths resolve to.
+  "extends": "./tsconfig.test-paths.json",
+  "compilerOptions": {
+    "composite": false,
+    "noEmit": true,
+    // Our sources import siblings through bare package specifiers with
+    // explicit .ts/.tsx extensions; nothing rewrites non-relative imports,
+    // so disable the rewrite expectation.
+    "rewriteRelativeImportExtensions": false,
+    // The two *.spec.tsx client suites render React; the client base's jsx
+    // setting is replicated here so they typecheck in this program too.
+    "jsx": "react-jsx"
+  },
+  "include": [
+    "packages/*/*/tests/**/*.ts",
+    "packages/*/*/tests/**/*.tsx",
+    // The examples' test drivers (scripts/smoke.mjs mounts them into the
+    // composed examples) are harness-owned code and typecheck under the same
+    // strict settings as the packages' tests.
+    "examples/**/tests/**/*.ts",
+    "examples/**/tests/**/*.tsx",
+    // The client suites import .module.css files (and the info-hub view imports
+    // the platform-external react-dom through a minimal ambient declaration);
+    // the packages' ambient .d.ts files live in src and are only roots of the
+    // package programs, so the tests program includes them explicitly.
+    "packages/*/*/src/**/*.d.ts"
+  ]
+}

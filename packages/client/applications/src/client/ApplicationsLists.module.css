@@ -1,0 +1,282 @@
+/* The record vocabulary the management dialog and the debug form share:
+ * sections, record cards, capability rows, one call's outcome. Semantic
+ * aliases only (the shared --dsw-* tokens), no literal colors. */
+
+.hint {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--app-font-body);
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-inline);
+  min-width: 0;
+}
+
+.sectionTitle {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--app-font-meta);
+  font-weight: 600;
+}
+
+.records {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-inline);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.record {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-tight);
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: var(--dsw-radius-sm, 6px);
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.recordHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--app-space-group);
+  font-size: var(--app-font-body);
+}
+
+.recordMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--app-space-group);
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--app-font-meta);
+}
+
+.recordMetaText {
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--app-font-meta);
+}
+
+.recordMessage {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--app-font-body);
+}
+
+.capabilities {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-tight);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.capability {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--app-space-group);
+}
+
+.capabilityText {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-hairline);
+  min-width: 0;
+}
+
+.needTitle {
+  margin: 0 0 8px;
+  font-size: var(--app-font-body);
+  font-weight: 600;
+}
+
+.needList {
+  display: grid;
+  gap: var(--app-space-tight);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* One declared need: what it is and why, the switch that decides it, and the
+   raw identifier kept as a viewable detail (never the thing a human reads to
+   decide). */
+.need {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-tight);
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: var(--dsw-radius-sm, 6px);
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.needHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--app-space-group);
+}
+
+.needName {
+  font-size: var(--app-font-body);
+}
+
+.needPurpose {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--app-font-meta);
+  overflow-wrap: anywhere;
+}
+
+.needError {
+  margin: 0;
+  color: var(--dsw-alias-state-error-primary);
+  font-size: var(--app-font-meta);
+}
+
+.needPending {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--app-font-meta);
+}
+
+.needDetails {
+  font-size: var(--app-font-meta);
+}
+
+.needDetails summary {
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}
+
+.needDetails code {
+  display: block;
+  margin-top: 4px;
+  color: var(--dsw-alias-label-secondary);
+  font-family: var(--dsw-font-family-mono, ui-monospace, monospace);
+  overflow-wrap: anywhere;
+}
+
+.code {
+  color: var(--dsw-alias-label-secondary);
+  font-family: var(--dsw-font-family-mono, ui-monospace, monospace);
+  font-size: var(--app-font-meta);
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-group);
+}
+
+/* ---- one call's outcome --------------------------------------------------- */
+
+.outcome {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-inline);
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: var(--dsw-radius-sm, 6px);
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.outcome[data-status='rejected'],
+.outcome[data-status='failed'] {
+  border-color: var(--dsw-alias-state-error-primary);
+}
+
+.outcomeHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--app-space-group);
+}
+
+.outcomeCaption {
+  font-size: var(--app-font-body);
+  font-weight: 600;
+}
+
+.outcomeMessage {
+  margin: 0;
+  color: var(--dsw-alias-state-error-primary);
+  font-size: var(--app-font-body);
+}
+
+.value {
+  margin: 0;
+  max-height: 320px;
+  padding: 8px;
+  overflow: auto;
+  border-radius: var(--dsw-radius-sm, 6px);
+  font-family: var(--dsw-font-family-mono, ui-monospace, monospace);
+  font-size: var(--app-font-meta);
+  background: var(--dsw-alias-bg-base);
+}
+
+/* ---- the debug call form -------------------------------------------------- */
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-group);
+  padding: 10px;
+  border: 1px dashed var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-sm, 6px);
+}
+
+.formTitle {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--app-font-meta);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-tight);
+}
+
+.fieldLabel {
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--app-font-meta);
+}
+
+.fieldHint {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--app-font-meta);
+}
+
+.select,
+.textarea {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-sm, 6px);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: var(--app-font-body);
+  background: var(--dsw-alias-bg-base);
+}
+
+.textarea {
+  min-height: 96px;
+  resize: vertical;
+  font-family: var(--dsw-font-family-mono, ui-monospace, monospace);
+}
+
+.formError {
+  margin: 0;
+  color: var(--dsw-alias-state-error-primary);
+  font-size: var(--app-font-body);
+}
