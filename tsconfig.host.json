@@ -17,10 +17,15 @@
   // and the package test glob above needs no per-file entry.
   "exclude": [
     "packages/client/*/src/**",
+    "apps/*/view/src/**",
     "packages/*/*/tests/**/*.client.ts",
     "packages/*/*/tests/**/*.client.tsx",
     "packages/*/*/tests/**/*.client.spec.ts",
-    "packages/*/*/tests/**/*.client.spec.tsx"
+    "packages/*/*/tests/**/*.client.spec.tsx",
+    "apps/*/*/tests/**/*.client.ts",
+    "apps/*/*/tests/**/*.client.tsx",
+    "apps/*/*/tests/**/*.client.spec.ts",
+    "apps/*/*/tests/**/*.client.spec.tsx"
   ],
   "references": [
     { "path": "./packages/typert/protocol" },
@@ -31,13 +36,10 @@
     { "path": "./packages/application/context" },
     { "path": "./packages/application/store" },
     { "path": "./packages/application/http" },
-    { "path": "./packages/examples/notes" },
-    { "path": "./packages/examples/tasks" },
-    { "path": "./packages/examples/calendar" },
-    { "path": "./packages/examples/inbox" },
-    { "path": "./packages/examples/usage" },
-    { "path": "./packages/examples/disk-space" },
-    { "path": "./packages/examples/git-browser" },
-    { "path": "./packages/examples/workspace-review" }
+    { "path": "./apps/home/host" },
+    { "path": "./apps/notes/host" },
+    { "path": "./apps/todo/host" },
+    { "path": "./apps/inbox/host" },
+    { "path": "./apps/git-browser/host" }
   ]
 }

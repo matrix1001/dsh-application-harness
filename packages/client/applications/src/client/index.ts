@@ -11,8 +11,8 @@
  *   readiness, calls with cancellation, progress, the change fan, the
  *   reconnect re-read, history, grants and the out-of-session confirmations —
  *   everything a browser user needs and no projection machinery;
- * - it binds the panel: a keyed `main` entry (the application area: navigation,
- *   header, the selected application's page and the management dialog) and the
+ * - it binds the panel: a keyed `main` entry (the application area: header,
+ *   application tabs and all-applications menu, the selected page and management) and the
  *   sidebar rail entry that selects it. The area's own layout preferences and
  *   each application's view state are persisted here, apart from business data.
  *
@@ -32,6 +32,8 @@ import type {} from '@matrix1001/dsh-application-harness-host-bridge/remote'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
+// Type-only: the platform Session row's leading marker slot this plugin fills.
+import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 // Side-effect: the shared scale is defined at `:root` (see tokens.module.css).
 // Imported here — not in an application view — because the area, the management
@@ -41,19 +43,27 @@ import applicationsRemote from '@matrix1001/dsh-application-harness-host-bridge/
 import { APPLICATION_PANEL_KEY } from './panel-key.ts'
 import { createApplicationViews, type ApplicationViews } from './views.ts'
 import { createPreferences } from './preferences.ts'
-import { createEntry, type ApplicationEntryService } from './entry.ts'
 import { createViewport, type ViewportService } from './viewport.ts'
 import { createManageService, type ManageService } from './manage.ts'
+import { createDock, type DockService } from './dock.ts'
+import { OpenInAreaAction, type HeaderActionProps } from './OpenInAreaAction.tsx'
+import { createDelegation, type DelegationService } from './delegation.ts'
 import { ApplicationsShell, type ApplicationsRemote } from './shell.ts'
 import { ApplicationsArea, type ApplicationsAreaInjected } from './ApplicationsArea.tsx'
+import { APP_HTTP_NAMESPACE, type NetworkProxySection } from './NetworkSettings.tsx'
 import { ApplicationsIcon } from './ApplicationsIcon.tsx'
+import { ApplicationsRailBadge } from './rail.tsx'
+import { SessionRowMarker } from './session-marker.tsx'
+import { TurnScopeControl } from './turn-scope.tsx'
+import { ApplicationsPlaceholder } from './placeholder.tsx'
+import { composerPlaceholder } from './model.ts'
 import { createPageContext } from './page-context.ts'
 import { createAppNavigation } from './navigation.ts'
 import type { AppNavigation } from './navigation.ts'
 import { createPageSource } from './page-source.ts'
 import { createApplicationSource } from './application-source.ts'
-import { ConversationPanel } from './ApplicationsConversation.tsx'
-import { createAppConversation, type AppConversationSessions, type AppConversationService, type AppConversationWorkspaces } from './app-conversation.ts'
+import { ConversationPanel, type ApplicationsConversationInjected } from './ApplicationsConversation.tsx'
+import { createAppConversation, type AppConversationPage, type AppConversationSessions, type AppConversationService, type AppConversationWorkspaces } from './app-conversation.ts'
 import { createDevelopmentSession } from './development.ts'
 import type { ConversationSession } from './conversation-session.ts'
 import { en, NS, zh, type ApplicationsKey } from './locales.ts'
@@ -74,7 +84,6 @@ export type {
 export type { ManageService } from './manage.ts'
 export type { ApplicationsState } from './shell.ts'
 export type { ViewportReport, ViewportService } from './viewport.ts'
-export type { ApplicationEntryService, EntryRequest } from './entry.ts'
 export { APPLICATION_PANEL_KEY } from './panel-key.ts'
 export type { ApplicationPreferences } from './preferences.ts'
 export type { ApplicationsKey } from './locales.ts'
@@ -94,13 +103,6 @@ declare module '@deepseek-ai/cordis' {
      * (`ctx.applicationViews.register`).
      */
     applicationViews: ApplicationViewRegistry
-    /**
-     * The applications entry: how another surface (the sidebar's own row, the
-     * window-chrome controls) tells this framework that a human activated the
-     * applications panel. Read OPTIONALLY (`ctx.get`) by whoever wants it — a
-     * surface that calls it must not wait for this plugin to be mounted.
-     */
-    applicationsEntry: ApplicationEntryService
   }
 }
 
@@ -115,7 +117,7 @@ declare module '@deepseek-ai/cordis' {
  * `ctx.inject(['inputTriggers'])` — present, it joins the `@` menu; absent, the
  * shell is exactly what it was.
  */
-export const inject = ['remote', 'slots', 'locale', 'layout']
+export const inject = ['remote', 'slots', 'locale', 'layout', 'uiSession', 'uiSession.sessionStatus']
 
 /**
  * Open the typed `applications` namespace: the composition's own mount when it
@@ -156,22 +158,47 @@ async function openApplications(ctx: Context): Promise<{ remote: ApplicationsRem
  * @param pageContext - the page-context store every page reports through.
  * @param viewport - the viewport store the business surface scrolls by.
  */
+/** The platform session-list rows this client can read, reduced to the fields the dock needs. */
+function sessionRows(sessions: AppConversationSessions): {
+  readonly byId: Readonly<Record<string, { readonly sessionId: string; readonly title?: string }>>
+  readonly archivedSessionIds?: readonly string[]
+} | undefined {
+  const list = (sessions as unknown as {
+    readonly list?: { getSnapshot(): { readonly byId: Readonly<Record<string, { readonly sessionId: string; readonly title?: string }>>; readonly archivedSessionIds?: readonly string[] } }
+  }).list
+  return list?.getSnapshot()
+}
+
 function bindPanel(
   ctx: Context,
+  applicationsConversationInjected: ApplicationsConversationInjected,
   shell: ApplicationsShell,
   views: ApplicationViews,
   preferences: ReturnType<typeof createPreferences>,
   pageContext: PageContextService,
   viewport: ViewportService,
   navigation: AppNavigation,
-  entry: ApplicationEntryService,
   manage: ManageService,
+  dock: DockService,
+  delegation: DelegationService,
   openAppConversation: () => Promise<ConversationSession | undefined>,
+  appConversationTargets: () => readonly { readonly workspaceId: string; readonly sessionId: string }[],
+  createAppConversation: () => Promise<ConversationSession>,
+  selectAppConversation: (sessionId: string) => Promise<ConversationSession | undefined>,
   setupAppConversation: (path: string) => Promise<ConversationSession>,
   createDevelopmentSession: (appId: string, path: string) => Promise<string>,
+  developmentTargets: (appId: string) => readonly { readonly appId: string; readonly sessionId: string }[],
+  selectDevelopmentSession: (sessionId: string) => Promise<string | undefined>,
+  retainDevelopmentSession: (sessionId: string) => Promise<ConversationSession | undefined>,
+  retainNormalSession: (sessionId: string) => Promise<ConversationSession | undefined>,
+  sessionTitle: (sessionId: string) => string | undefined,
+  normalSessions: () => readonly { readonly sessionId: string; readonly title?: string }[],
+  suggestedAppConversationPath: () => Promise<string | undefined>,
   pickAppConversationFolder: () => Promise<string | undefined>,
-  setAppConversationContextEnabled: (enabled: boolean) => Promise<void>,
-  appConversationSessionId: () => string | undefined,
+  setAppConversationContextEnabled: (enabled: boolean, sessionId?: string) => Promise<void>,
+  setPageContextSession: (sessionId: string | undefined) => void,
+  pageSessionIds: () => readonly string[],
+  subscribeChanges: (appId: string, listener: () => void) => () => void,
   shareDraft: (draftId: string, fields?: readonly string[]) => Promise<boolean>,
   revokeDraft: (draftId: string) => Promise<boolean>,
 ): void {
@@ -205,8 +232,12 @@ function bindPanel(
   }
   // Host page commands are executed only by the client that owns the app
   // conversation Session; another client leaves the command unanswered.
+  /* v8 ignore next 3 -- the close notification only drops transient page action handlers */
+  ctx.effect(() => shell.onPageClosed(notice => {
+    if (pageSessionIds().includes(notice.sessionId)) pageActionHandlers.clear()
+  }), 'applications: page close')
   ctx.effect(() => shell.onPageCommand(async (command) => {
-    if (appConversationSessionId() !== command.sessionId) return undefined
+    if (!pageSessionIds().includes(command.sessionId)) return undefined
     if (command.action === 'draft-read') {
       const handler = draftReadHandlers.get(command.appId)?.values().next().value
       if (handler === undefined) return false
@@ -231,14 +262,13 @@ function bindPanel(
       return false
     }
     try {
-      navigation.open({
+      return await navigation.openAndWait({
         appId: command.appId,
         ...(command.view === undefined ? {} : { view: command.view }),
-        ...(command.record === undefined ? {} : { record: { kind: command.record.kind, id: command.record.id } }),
+        ...(command.record === undefined ? {} : { record: { appId: command.appId, kind: command.record.kind, id: command.record.id } }),
       })
-      return true
     } catch {
-      /* v8 ignore next -- navigation.open is synchronous; the catch keeps a bad command from escaping */
+      /* v8 ignore next -- a malformed page command must not escape the listener */
       return false
     }
   }), 'applications: owner-session page commands')
@@ -284,38 +314,63 @@ function bindPanel(
     name: 'main',
     key: APPLICATION_PANEL_KEY,
     locale: NS,
-    children: { 'applications.conversation': { kind: 'single', scope: 'session' } },
+    children: { 'applications.conversation': { kind: 'single', scope: 'session', inject: applicationsConversationInjected } },
     inject: (): ApplicationsAreaInjected => ({
       hooks: {
         applications: shell.state,
         views,
         preferences,
         viewport,
-        entry,
         manage,
+        dock,
+        delegation: delegation.state,
         pageContext: { getSnapshot: () => pageContext.current(), subscribe: pageContext.subscribe },
       },
       navigation,
+      updatePreferences: (patch) => { preferences.set({ ...preferences.getSnapshot(), ...patch }) },
       manageScroll: manage.scroll,
+      // Optional platform service: the app-http row's settings form exists only
+      // when the settings client is mounted, so the management page hides the
+      // area-level setting in deployments that carry no settings surface.
+      networkProxy: () => ctx.get('configForms')?.get<NetworkProxySection>(APP_HTTP_NAMESPACE),
       openAppConversation,
+      appConversationTargets,
+      createAppConversation,
+      selectAppConversation,
       setupAppConversation,
       createDevelopmentSession,
+      developmentTargets,
+      selectDevelopmentSession,
+      retainDevelopmentSession,
+      retainNormalSession,
+      consumeDock: () => { dock.consume() },
+      sessionTitle,
+      normalSessions,
       openSession: (sessionId) => {
         const workspace = ctx.get('uiWorkspace') as { openSession?: (id: string) => void } | undefined
         workspace?.openSession?.(sessionId)
       },
+      suggestedAppConversationPath,
       pickAppConversationFolder,
       setAppConversationContextEnabled,
+      setPageContextSession,
+      subscribeChanges,
       loadTasks: () => { void shell.loadTasks() },
       openManage: (request) => { manage.open(request) },
       closeManage: () => { manage.close() },
-      consumeEntry: () => entry.consume(),
+      /* v8 ignore next -- UI responder for a pending delegation send */
+      answerDelegation: result => { delegation.answer(result) },
+      /* v8 ignore next 2 -- the management delegation list is exercised through the dialog */
+      delegations: async appId => await shell.delegations(appId),
+      /* v8 ignore next 2 -- the send dialog delegates to the shell */
+      sendDelegation: async (id, sessionId, supplement, appId) => { await shell.sendDelegation(id, sessionId, supplement, appId) },
+      /* v8 ignore next 2 -- the management cancel action delegates to the shell */
+      cancelDelegation: async (id, appId) => await shell.cancelDelegation(id, appId),
+      /* v8 ignore next 2 -- the open-execution action delegates to the shell */
+      openDelegation: async (id, appId) => await shell.openDelegation(id, appId),
       select: (appId) => { if (appId !== undefined) void navigation.select(appId) },
       refresh: () => { void shell.refresh() },
-      setNavExpanded: (expanded) => { preferences.set({ ...preferences.getSnapshot(), navExpanded: expanded }) },
-      setNavOrder: (order) => { preferences.set({ ...preferences.getSnapshot(), navOrder: [...order] }) },
       close: () => { ctx.layout.selectPanel(null) },
-      releaseClaims: (appId) => { shell.releaseClaims(appId) },
       viewProps: (appId) => {
         const route = navigation.state.getSnapshot().route
         return {
@@ -350,23 +405,21 @@ function bindPanel(
       loadHistory: (appId) => { void shell.loadHistory(appId) },
       loadDataInfo: (appId) => shell.dataInfo(appId),
       restorePreview: (appId, backupPath) => shell.restorePreview(appId, backupPath),
-      restoreData: (appId, backupPath, previewFingerprint, planId, requestId) => shell.restoreData(appId, backupPath, previewFingerprint, planId, requestId),
+      restoreData: (appId, planId, requestId) => shell.restoreData(appId, planId, requestId),
       exportData: (appId) => shell.dataExport(appId),
       previewDataImport: (appId, json) => shell.previewDataImport(appId, json),
-      importData: (appId, json, planId, requestId) => shell.importData(appId, json, planId, requestId),
+      importData: (appId, planId, requestId) => shell.importData(appId, planId, requestId),
       reloadImportedData: (appId) => shell.dataReload(appId),
       pruneBackups: (keep) => shell.pruneBackups(keep),
       loadGrants: () => { void shell.loadGrants() },
       loadPolicies: () => { void shell.loadPolicies() },
       setPolicy: (appId, op, policy) => shell.setPolicy(appId, op, policy),
       setActivation: (appId, activation) => shell.setActivation(appId, activation),
+      checkHealth: (appId) => shell.checkHealth(appId),
       setAppModel: (appId, selection) => shell.setAppModel(appId, selection),
       loadModelCatalog: () => shell.modelCatalog(),
       loadModelUsage: (appId) => shell.modelUsage(appId),
       loadModelLimits: (appId) => shell.modelLimits(appId),
-      loadCredentials: (appId) => shell.credentials(appId),
-      setCredential: (appId, name, value) => shell.setCredential(appId, name, value),
-      deleteCredential: (appId, name) => shell.deleteCredential(appId, name),
       setModelLimits: (appId, limits) => shell.setModelLimits(appId, limits),
       loadConfirmations: () => { void shell.loadConfirmations() },
       grant: (caller, capabilities) => shell.grant(caller, capabilities),
@@ -390,11 +443,15 @@ function bindReferenceSources(
   shell: ApplicationsShell,
   views: ApplicationViewRegistry,
   pageContext: PageContextService,
+  pageSessions: {
+    readonly isOwner: (sessionId: string) => boolean
+    readonly boundApp: (sessionId: string) => string | undefined
+  },
 ): void {
   ctx.inject(['inputTriggers'], (scope) => {
     const t = ctx.locale.bind(NS)
-    const page = createPageSource(pageContext, t)
-    const application = createApplicationSource(shell.state, views, pageContext, t)
+    const page = createPageSource(pageContext, t, pageSessions)
+    const application = createApplicationSource(shell.state, views, pageContext, pageSessions, t)
     scope.effect(() => scope.inputTriggers.registerSource(page), 'applications: page reference source')
     scope.effect(() => scope.inputTriggers.registerSource(application), 'applications: application reference source')
   })
@@ -415,6 +472,12 @@ function bindRailEntry(ctx: Context): void {
     locale: NS,
     label: () => t('panel'),
   }, ApplicationsIcon))
+  ctx.slots.inject('sidebar.panellist.trailing', () => ctx.slots.register({
+    name: 'sidebar.panellist.trailing',
+    id: APPLICATION_PANEL_KEY,
+    order: 0,
+    locale: NS,
+  }, ApplicationsRailBadge))
 }
 
 /**
@@ -426,6 +489,7 @@ function bindRailEntry(ctx: Context): void {
  */
 export async function apply(ctx: Context): Promise<() => Promise<void>> {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'applications: dictionaries')
+  const t = ctx.locale.bind(NS)
 
   const views = createApplicationViews()
   // Fiber-owned: unregistered with the plugin, woken dependents included.
@@ -442,18 +506,12 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
   // view that reported it).
   const pageContext = createPageContext()
   const viewport = createViewport()
-  // The entry another surface (the sidebar, the window chrome) activates: it
-  // owns the panel id and the one-shot request, so a second activation of the
-  // SAME entry still means something (`entry.ts` says why).
-  const entry = createEntry(APPLICATION_PANEL_KEY, {
-    activePanelId: () => ctx.layout.panelInfo.getSnapshot().activePanelId,
-    selectPanel: (id) => { ctx.layout.selectPanel(id as Parameters<typeof ctx.layout.selectPanel>[0]) },
-  })
-  ctx.provide('applicationsEntry', entry)
-  // What the management dialog shows: the framework instance owns it, so the
+  // What the management page shows: the framework instance owns it, so the
   // callbacks bound to an application's pages stay valid across the area
   // unmounting and remounting (`manage.ts` says why).
   const manage = createManageService()
+  const dock = createDock()
+  const delegation = createDelegation()
   // A registration that goes away takes its scroll positions with it: the
   // memory belongs to this instance and holds nothing for an application the
   // registry no longer has.
@@ -461,7 +519,16 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
     'applications: management scroll memory')
 
   const opened = await openApplications(ctx)
-  const shell = new ApplicationsShell(opened.remote, { initialAppId: preferences.getSnapshot().lastAppId })
+  const openSession = (sessionId: string): void => {
+    const workspace = ctx.get('uiWorkspace') as { openSession?: (id: string) => void } | undefined
+    workspace?.openSession?.(sessionId)
+  }
+  const shell = new ApplicationsShell(opened.remote, {
+    initialAppId: preferences.getSnapshot().lastAppId,
+    /* v8 ignore next -- the send dialog is exercised through the panel */
+    delegationRequest: async record => await delegation.request(record),
+    openSession,
+  })
   const navigation = createAppNavigation({
     currentAppId: () => shell.state.getSnapshot().activeAppId,
     /* v8 ignore next 11 -- the shell-level navigation location is exercised through UI tests */
@@ -497,27 +564,151 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
   // seat expects. The host marks the Session so its scoped tool bridge attaches
   // the application operations to this Agent only.
   let appConversation: AppConversationService | undefined
+  const appConversationTargets = (): readonly { readonly workspaceId: string; readonly sessionId: string }[] => appConversation?.targets() ?? []
   let createDevelopment: ((appId: string, path: string) => Promise<string>) | undefined
-  const reportPage = (): void => {
+  let selectDevelopment: ((sessionId: string) => Promise<string | undefined>) | undefined
+  let retainDevelopment: ((sessionId: string) => Promise<ConversationSession | undefined>) | undefined
+  let retainNormal: ((sessionId: string) => Promise<ConversationSession | undefined>) | undefined
+  let titleOf: ((sessionId: string) => string | undefined) | undefined
+  let normalChoices: (() => readonly { readonly sessionId: string; readonly title?: string }[]) | undefined
+  let archivedSessionIds: () => readonly string[] = () => []
+  let developmentSessionId: string | undefined
+  /** The dock's displayed Session: only it carries page context. */
+  let pageContextSessionId: string | undefined
+  /** The development Session whose page context this client last reported. */
+  let shownDevelopmentSessionId: string | undefined
+  /** Sessions whose page-context attachment the human turned off. */
+  const pageContextDisabled = new Set<string>()
+  const pagePointer = (): AppConversationPage | undefined => {
     const page = pageContext.current()
-    void appConversation?.setPage(page === undefined ? undefined : {
+    if (page === undefined) return undefined
+    return {
       appId: page.appId,
       label: page.label,
       ...(page.record === undefined ? {} : { record: page.record }),
-    })
+      ...(page.view === undefined ? {} : { view: page.view }),
+      ...(page.draftId === undefined ? {} : { draftId: page.draftId }),
+      ...(page.selection === undefined ? {} : { selection: page.selection }),
+      ...(page.filters === undefined ? {} : { filters: page.filters }),
+      ...(page.visibleRange === undefined ? {} : { visibleRange: page.visibleRange }),
+      ...(page.dirty === undefined ? {} : { hasUnsavedChanges: page.dirty }),
+    }
+  }
+  const reportPage = (): void => {
+    const page = pagePointer()
+    const appTarget = appConversation?.target()
+    const appVisible = appTarget !== undefined && pageContextSessionId === appTarget.sessionId
+    void appConversation?.setPage(appVisible ? page : undefined)
+    if (developmentSessionId !== undefined) {
+      // A development Session is bound to ONE application. Never feed it a
+      // page from another one, and only report while it is the displayed
+      // Session with the attachment switched on.
+      const boundApp = preferences.getSnapshot().developmentSessions?.find(entry => entry.sessionId === developmentSessionId)?.appId
+      const visible = pageContextSessionId === developmentSessionId && !pageContextDisabled.has(developmentSessionId)
+      const developmentPage = visible && page !== undefined && page.appId === boundApp ? page : undefined
+      /* v8 ignore next -- a page-context transport failure is best effort; the next report retries */
+      void opened.remote.setAppConversationContext(developmentSessionId, developmentPage as JsonValue | undefined ?? null).catch(() => {})
+    }
+  }
+  /** Clear one development Session's host page pointer (best effort). */
+  const clearDevelopmentContext = (sessionId: string): void => {
+    /* v8 ignore next -- a page-context transport failure is best effort; the next report retries */
+    void opened.remote.setAppConversationContext(sessionId, null).catch(() => {})
+  }
+  /** Display one development Session and drop the previous development pointer. */
+  const displayDevelopmentSession = (sessionId: string): void => {
+    if (shownDevelopmentSessionId !== undefined && shownDevelopmentSessionId !== sessionId) clearDevelopmentContext(shownDevelopmentSessionId)
+    shownDevelopmentSessionId = sessionId
+    pageContextSessionId = sessionId
+    reportPage()
+  }
+  /** Display one Session and drop a previous development pointer when it changes. */
+  const displayContextSession = (sessionId: string | undefined): void => {
+    const development = sessionId !== undefined && (sessionId === developmentSessionId
+      || (preferences.getSnapshot().developmentSessions ?? []).some(entry => entry.sessionId === sessionId))
+    if (shownDevelopmentSessionId !== undefined && shownDevelopmentSessionId !== sessionId) clearDevelopmentContext(shownDevelopmentSessionId)
+    shownDevelopmentSessionId = development ? sessionId : undefined
+    pageContextSessionId = sessionId
+    reportPage()
   }
   ctx.inject(['sessions', 'workspaces'], (scope) => {
     const sessions = scope.get('sessions') as unknown as AppConversationSessions
     const workspaces = scope.get('workspaces') as unknown as AppConversationWorkspaces
+    archivedSessionIds = () => sessionRows(sessions)?.archivedSessionIds ?? []
     appConversation = createAppConversation({
       sessions,
       workspaces,
       remote: opened.remote,
       preferences,
     })
-    createDevelopment = async (appId, path) => await createDevelopmentSession({ sessions, workspaces, remote: opened.remote }, appId, path)
+    createDevelopment = async (appId, path) => {
+      const sessionId = await createDevelopmentSession({ sessions, workspaces, remote: opened.remote }, appId, path)
+      const snapshot = preferences.getSnapshot()
+      /* v8 ignore next 4 -- the panel's create flow persists this mapping */
+      preferences.set({
+        ...snapshot,
+        developmentSessions: [...(snapshot.developmentSessions ?? []).filter(entry => entry.sessionId !== sessionId), { appId, sessionId }],
+      })
+      developmentSessionId = sessionId
+      displayDevelopmentSession(sessionId)
+      return sessionId
+    }
+    selectDevelopment = async (sessionId) => {
+      // Selection only moves the page-context pointer; the pane's single
+      // reference comes from retainDevelopment below. Retaining here too would
+      // leak one reference (and its event window) per selection.
+      developmentSessionId = sessionId
+      displayDevelopmentSession(sessionId)
+      return sessionId
+    }
+    retainDevelopment = async (sessionId) => {
+      const reference = sessions.retain(sessionId, { source: 'applicationHarnessDock', facets: { conversation: true } })
+      developmentSessionId = sessionId
+      displayDevelopmentSession(sessionId)
+      return reference
+    }
+    retainNormal = async (sessionId) => sessions.retain(sessionId, { source: 'applicationHarnessDock', facets: { conversation: true } })
+    titleOf = (sessionId) => sessionRows(sessions)?.byId[sessionId]?.title
+    normalChoices = () => {
+      const rows = sessionRows(sessions)?.byId ?? {}
+      const appIds = new Set(appConversationTargets().map(target => target.sessionId))
+      const devIds = new Set((preferences.getSnapshot().developmentSessions ?? []).map(entry => entry.sessionId))
+      const archived = new Set(sessionRows(sessions)?.archivedSessionIds ?? [])
+      return Object.entries(rows)
+        .filter(([sessionId]) => !appIds.has(sessionId) && !devIds.has(sessionId) && !archived.has(sessionId))
+        .map(([sessionId, row]) => ({ sessionId, ...(row.title === undefined ? {} : { title: row.title }) }))
+    }
+    /** Merge the host's authoritative development bindings into the browser mapping. */
+    const reconcileDevelopment = async (): Promise<void> => {
+      /* v8 ignore next -- a deployment without the host bridge has no list to merge */
+      const result = opened.remote.developmentBindings === undefined
+        ? undefined
+        : await opened.remote.developmentBindings().catch(() => ({ ok: false as const }))
+      if (result !== undefined && !result.ok) return
+      /* v8 ignore next -- the failure path above already returned; a missing list is the only absent case */
+      const host = result?.ok === true ? result.value : []
+      const rows = sessionRows(sessions)
+      const live = rows === undefined ? undefined : new Set(Object.keys(rows.byId))
+      const archived = new Set(rows?.archivedSessionIds ?? [])
+      const current = preferences.getSnapshot().developmentSessions ?? []
+      const merged = host.filter(entry => live === undefined || live.has(entry.sessionId))
+      for (const entry of current) {
+        if (merged.some(candidate => candidate.sessionId === entry.sessionId)) continue
+        merged.push(entry)
+      }
+      preferences.set({ ...preferences.getSnapshot(), developmentSessions: merged })
+      if (live === undefined) return
+      for (const entry of host) {
+        /* v8 ignore next -- only a host binding whose Session is gone needs cleaning */
+        if (live.has(entry.sessionId) || archived.has(entry.sessionId) || typeof opened.remote.clearDevelopmentSession !== 'function') continue
+        /* v8 ignore next -- cleanup is best effort; the next mount retries */
+        try { await opened.remote.clearDevelopmentSession(entry.sessionId) } catch { /* best effort */ }
+      }
+    }
+    void appConversation?.reconcile().catch(() => {})
+    void reconcileDevelopment().catch(() => {})
     reportPage()
-    return () => { appConversation = undefined; createDevelopment = undefined }
+    return () => { appConversation = undefined; createDevelopment = undefined; selectDevelopment = undefined; retainDevelopment = undefined; retainNormal = undefined; titleOf = undefined; normalChoices = undefined; archivedSessionIds = () => [] }
   })
   // The application area's dedicated conversation follows the page on screen:
   // the browser reports the same pointer the pane's chip shows, and the host
@@ -527,8 +718,23 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
     reportPage()
     return stop
   }, 'applications: application conversation page context')
+  // The embedded hero reuses the platform's Workspace navigation, exactly as
+  // the main occurrence's `openWorkspace` does. The parent's child declaration
+  // and the child's registration share one face.
+  const applicationsConversationInjected: ApplicationsConversationInjected = {
+    openWorkspace: async (workspaceId, adopt) => {
+      const navigation = ctx.get('uiWorkspace') as {
+        openWorkspace?: ApplicationsConversationInjected['openWorkspace']
+      } | undefined
+      if (typeof navigation?.openWorkspace !== 'function') {
+        throw new Error('applications: the Workspace UI is not mounted')
+      }
+      await navigation.openWorkspace(workspaceId, adopt)
+    },
+  }
   ctx.slots.inject('applications.conversation', () => ctx.slots.register({
     name: 'applications.conversation',
+    inject: () => applicationsConversationInjected,
   }, ConversationPanel))
   const pickAppConversationFolder = async (): Promise<string | undefined> => {
     const picker = ctx.get('remote.directoryPicker') as {
@@ -542,17 +748,51 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
       return undefined
     }
   }
-  bindPanel(ctx, shell, views, preferences, pageContext, viewport, navigation, entry, manage,
+  bindPanel(ctx, applicationsConversationInjected, shell, views, preferences, pageContext, viewport, navigation, manage, dock, delegation,
     async () => await appConversation?.open(),
+    appConversationTargets,
+    /* v8 ignore next -- panel-only creation action */
+    async () => await appConversation!.create(),
+    /* v8 ignore next -- panel-only selection action */
+    async sessionId => await appConversation?.select(sessionId),
     async path => await appConversation!.setup(path),
     async (appId, path) => {
       /* v8 ignore next -- the inject face exists only after the Session/Workspace services are ready */
       if (createDevelopment === undefined) throw new Error('development sessions are unavailable')
       return await createDevelopment(appId, path)
     },
+    appId => {
+      const archived = new Set(archivedSessionIds())
+      return (preferences.getSnapshot().developmentSessions ?? []).filter(entry => entry.appId === appId && !archived.has(entry.sessionId))
+    },
+    async sessionId => await selectDevelopment?.(sessionId),
+    async sessionId => await retainDevelopment?.(sessionId),
+    async sessionId => await retainNormal?.(sessionId),
+    sessionId => titleOf?.(sessionId),
+    () => normalChoices?.() ?? [],
+    async () => {
+      const result = await opened.remote.suggestedAppConversationPath()
+      /* v8 ignore next -- the generated host method answers with a string; a failed transport rejects, not returns false */
+      return result.ok ? result.value : undefined
+    },
     pickAppConversationFolder,
-    async enabled => await appConversation?.setContextEnabled(enabled),
-    () => appConversation?.target()?.sessionId,
+    async (enabled, sessionId) => {
+      /* v8 ignore next -- the chip always names its Session; the fallback is for older callers */
+      const target = sessionId ?? appConversation?.target()?.sessionId
+      if (target === undefined) return
+      /* v8 ignore next -- a development Session is handled by the disabled-set path below */
+      if (appConversation?.target()?.sessionId === target) {
+        await appConversation.setContextEnabled(enabled, target)
+        return
+      }
+      /* v8 ignore next -- development attachment is switched by the dock chip */
+      if (enabled) pageContextDisabled.delete(target)
+      else pageContextDisabled.add(target)
+      reportPage()
+    },
+    (sessionId) => displayContextSession(sessionId),
+    () => [appConversation?.target()?.sessionId, developmentSessionId].filter((id): id is string => id !== undefined),
+    (appId, listener) => shell.onChanged(appId, listener),
     async (draftId, fields) => {
       const sessionId = appConversation?.target()?.sessionId
       if (sessionId === undefined || typeof opened.remote.shareDraft !== 'function') return false
@@ -565,8 +805,79 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
       const result = await opened.remote.revokeDraftShare(sessionId, draftId)
       return result.ok && result.value
     })
+  // The trailing badge needs live state, and the platform's trailing slot
+  // declaration carries no business inject face: contribute one root hook.
+  ctx.slots.provideRoot({ hooks: { applicationsRail: shell.state, applicationsPreferences: preferences } })
   bindRailEntry(ctx)
-  bindReferenceSources(ctx, shell, views, pageContext)
+  ctx.slots.inject('sidebar.session.row.leading', () => ctx.slots.register({
+    name: 'sidebar.session.row.leading',
+    id: 'applications.session-marker',
+    order: 0,
+    locale: NS,
+  }, SessionRowMarker))
+  // The built-in editor's guidance follows the Session's ownership: the
+  // application-area conversation and a development conversation mean
+  // something different from an ordinary chat.
+  ctx.slots.inject('conversation.input.placeholder', () => ctx.slots.register({
+    name: 'conversation.input.placeholder',
+    priority: 10,
+    select: ({ sessionId }) => {
+      const hint = composerPlaceholder(
+        sessionId,
+        appConversationTargets().map(target => target.sessionId),
+        preferences.getSnapshot().developmentSessions ?? [],
+        (appId) => {
+          const view = views.views().get(appId)
+          const named = typeof view?.name === 'function' ? view.name() : view?.name
+          return named ?? appId
+        },
+      )
+      if (hint === undefined) return null
+      const t = ctx.locale.bind(NS)
+      return { text: hint.app === undefined ? t('conversation.placeholderApp') : t('conversation.placeholderDevelopment', { app: hint.app }) }
+    },
+  }, ApplicationsPlaceholder))
+  bindReferenceSources(ctx, shell, views, pageContext, {
+    isOwner: sessionId => appConversationTargets().some(target => target.sessionId === sessionId)
+      || (preferences.getSnapshot().developmentSessions ?? []).some(entry => entry.sessionId === sessionId),
+    boundApp: sessionId => (preferences.getSnapshot().developmentSessions ?? []).find(entry => entry.sessionId === sessionId)?.appId,
+  })
+  // The DSH conversation header offers the same Session to the app-area dock.
+  ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
+    name: 'conversation.session.header.actions',
+    id: 'applications.open-in-area',
+    order: 10,
+  }, (slotProps: HeaderActionProps) => {
+    const sessionId = slotProps.sessionId
+    const appConversation = appConversationTargets().some(target => target.sessionId === sessionId)
+    const development = (preferences.getSnapshot().developmentSessions ?? []).find(entry => entry.sessionId === sessionId)
+    const kind: import('./dock.ts').DockTabKind = appConversation ? 'app-conversation' : development !== undefined ? 'development' : 'normal'
+    // A normal Session does not belong to the app area; it can still be opened
+    // from the dock's add menu. Only the app's own conversations and
+    // development Sessions get the header bridge.
+    if (kind === 'normal') return null
+    return OpenInAreaAction({
+      sessionId,
+      kind,
+      ...(development === undefined ? {} : { appId: development.appId }),
+      dock,
+      selectPanel: () => { ctx.layout.selectPanel(APPLICATION_PANEL_KEY) },
+      label: t('dock.openInArea'),
+    })
+  }))
+  // The ordinary conversation's temporary @ scope: show it and let the human
+  // revoke it while the turn is still running.
+  ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
+    name: 'conversation.session.header.actions',
+    id: 'applications.turn-scope',
+    order: 20,
+  }, (slotProps: HeaderActionProps) => {
+    const sessionId = slotProps.sessionId
+    const owned = appConversationTargets().some(target => target.sessionId === sessionId)
+      || (preferences.getSnapshot().developmentSessions ?? []).some(entry => entry.sessionId === sessionId)
+    if (owned) return null
+    return TurnScopeControl({ sessionId, remote: opened.remote, t })
+  }))
 
   shell.start()
   return async () => { await opened.dispose?.() }

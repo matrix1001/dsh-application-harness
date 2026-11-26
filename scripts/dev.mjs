@@ -25,7 +25,7 @@
 
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, watch, writeFileSync } from 'node:fs'
-import { dirname, join, relative, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { PROFILE_DEFAULT, resolveProfileDir } from './deployment-packages.mjs'
 
@@ -38,10 +38,10 @@ const useHmr = process.argv.includes('--hmr')
 const forwarded = process.argv.slice(2).filter((arg) => arg !== '--watch-only' && arg !== '--hmr')
 const bin = (name) => join(ROOT, 'node_modules', '.bin', process.platform === 'win32' ? `${name}.cmd` : name)
 const TSC = join(ROOT, 'node_modules', 'typescript', 'bin', 'tsc')
-const PLATFORM_TYPES = join(ROOT, 'scripts', 'platform-types.mjs')
 
 let stopping = false
 let server
+let watcher
 let buildTimer
 let buildRunning = false
 let buildQueued = false
@@ -59,9 +59,9 @@ function run(command, args, env = process.env) {
   if (result.status !== 0) throw new Error(`${command} ${args.join(' ')} exited ${String(result.status)}`)
 }
 
-/** Run the compiler with the checkout type paths around it. */
+/** Run the workspace compiler. */
 function runTsc(args) {
-  run(process.execPath, [PLATFORM_TYPES, '--run', process.execPath, TSC, ...args])
+  run(process.execPath, [TSC, ...args])
 }
 
 /** Whether the daily profile exists. */
@@ -97,7 +97,7 @@ function writeOverlay() {
     `    base: ${JSON.stringify(ROOT)}`,
     '    root:',
     '      - packages/application',
-    '      - packages/examples',
+    '      - apps',
     '      - packages/bundle',
     '    ignored:',
     ...ignored.map((pattern) => `      - ${JSON.stringify(pattern)}`),
@@ -188,7 +188,7 @@ function scheduleBuild(path, typert) {
 function watchSources() {
   const packages = join(ROOT, 'packages')
   try {
-    watch(packages, { recursive: true }, (_event, filename) => {
+    watcher = watch(packages, { recursive: true }, (_event, filename) => {
       if (typeof filename !== 'string' || stopping) return
       const path = `packages/${filename.replaceAll('\\', '/')}`
       if (!path.includes('/src/') || path.includes('/lib/') || path.includes('/tests/') || path.includes('/node_modules/')) return
@@ -196,7 +196,8 @@ function watchSources() {
       const typert = path.includes('/host-bridge/src/') || path.includes('/typert/protocol/src/')
       scheduleBuild(path, typert)
       process.stdout.write(`dev: change ${path}${typert ? ' (typert)' : ''}\n`)
-    }).on('error', (error) => process.stderr.write(`dev: source watcher: ${String(error)}\n`))
+    })
+    watcher.on('error', (error) => process.stderr.write(`dev: source watcher: ${String(error)}\n`))
   } catch (error) {
     process.stderr.write(`dev: source watcher unavailable: ${String(error)}\n`)
   }
@@ -207,6 +208,10 @@ async function stop(code = 0) {
   if (stopping) return
   stopping = true
   if (buildTimer !== undefined) clearTimeout(buildTimer)
+  if (watcher !== undefined) {
+    watcher.close()
+    watcher = undefined
+  }
   if (server !== undefined && server.exitCode === null && server.signalCode === null) {
     try {
       if (process.platform !== 'win32' && server.pid !== undefined) process.kill(-server.pid, 'SIGTERM')
@@ -222,7 +227,9 @@ async function stop(code = 0) {
       // The process may already be gone.
     }
   }
-  process.exitCode = code
+  // The watcher was the only handle keeping the loop alive; exit explicitly so
+  // SIGTERM/SIGINT and an unexpected server exit cannot leave a stale dev loop.
+  process.exit(code)
 }
 
 /** Start dsh web and stop the loop if it exits unexpectedly. */
@@ -250,7 +257,6 @@ function main() {
     run(process.execPath, [join(ROOT, 'scripts', 'setup.mjs'), '--profile', PROFILE])
   }
 
-  run(process.execPath, [PLATFORM_TYPES, '--prepare'])
   if (!buildAll()) {
     void stop(1)
     return

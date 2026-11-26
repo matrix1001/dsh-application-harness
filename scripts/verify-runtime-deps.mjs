@@ -36,11 +36,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { packageDirs } from './package-areas.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-
-/** The package areas this deployment owns, in scan order. */
-export const PACKAGE_GROUPS = ['application', 'client', 'examples', 'bundle']
 
 /**
  * Package areas deliberately outside the scan — named so the omission is
@@ -242,15 +240,7 @@ function emptyScan() {
 
 /** Every workspace package directory the scan covers, in a stable order. */
 export function packagesToScan(root) {
-  const packages = []
-  for (const group of PACKAGE_GROUPS) {
-    const groupDir = join(root, 'packages', group)
-    if (!existsSync(groupDir)) continue
-    for (const dir of readdirSync(groupDir)) {
-      if (existsSync(join(groupDir, dir, 'package.json'))) packages.push(join(groupDir, dir))
-    }
-  }
-  return packages
+  return packageDirs(root)
 }
 
 /**

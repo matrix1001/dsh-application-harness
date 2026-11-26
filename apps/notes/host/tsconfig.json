@@ -1,0 +1,21 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib/types"
+  },
+  "include": [
+    "src"
+  ],
+  "references": [
+    {
+      "path": "../../../packages/application/runtime"
+    },
+    {
+      "path": "../../../packages/application/store"
+    },
+    {
+      "path": "../../../packages/application/host-bridge"
+    }
+  ]
+}

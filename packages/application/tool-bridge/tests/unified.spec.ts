@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { APPLICATIONS_TOOL, DRAFTS_TOOL, PAGES_TOOL } from '../src/index.ts'
+import { APPLICATIONS_TOOL, DELEGATION_REPORT_TOOL, DRAFTS_TOOL, PAGES_TOOL } from '../src/index.ts'
 import { demoApp, execution, host, runApplicationTool } from './harness.ts'
 
 describe('the unified application tool', () => {
   it('registers exactly one application tool', async () => {
     const { tools } = await host()
-    expect(tools.names()).toEqual([APPLICATIONS_TOOL, PAGES_TOOL, DRAFTS_TOOL])
+    expect(tools.names()).toEqual([APPLICATIONS_TOOL, PAGES_TOOL, DRAFTS_TOOL, DELEGATION_REPORT_TOOL])
   })
 
   it('gives an ordinary Session only the applications referenced in its turn', async () => {
@@ -98,6 +98,142 @@ describe('development sessions', () => {
   })
 })
 
+describe('the delegation report tool', () => {
+  /** The fake host delegation service the report tool calls, plus what it recorded. */
+  function delegationService(): {
+    provide: (ctx: { provide(name: string, value: unknown): void }) => void
+    calls: Array<{ sessionId: string; input: Record<string, unknown> }>
+    setActive: (record: { readonly id: string } | undefined) => void
+  } {
+    let active: { readonly id: string } | undefined
+    const calls: Array<{ sessionId: string; input: Record<string, unknown> }> = []
+    return {
+      calls,
+      setActive: (record) => { active = record },
+      provide: (ctx) => {
+        ctx.provide('appDelegations', {
+          active: async () => active,
+          report: async (sessionId: string, input: Record<string, unknown>) => {
+            calls.push({ sessionId, input })
+            return { delegationId: 'delegation-1', status: 'ended' }
+          },
+        })
+      },
+    }
+  }
+
+  it('reports the result for the Session bound to the live delegation only', async () => {
+    const { ctx, tools } = await host()
+    const service = delegationService()
+    service.provide(ctx)
+    const tool = tools.get(DELEGATION_REPORT_TOOL)!
+    const exec = execution({ agent: { session: { id: 'area-1' } } } as never)
+
+    // No Session at all (a detached tool call).
+    await expect(tool.execute({ outcome: 'completed', summary: '完成' }, execution())).rejects.toThrow(/require a Session/u)
+    // A Session with no live delegation.
+    await expect(tool.execute({ outcome: 'completed', summary: '完成' }, exec)).rejects.toThrow(/not executing a delegation/u)
+
+    service.setActive({ id: 'delegation-1' })
+    expect(await tool.execute(
+      { outcome: 'completed', summary: ' 完成 ', details: { ref: 'note-1' } },
+      exec,
+    )).toMatchObject({ delegationId: 'delegation-1', status: 'ended' })
+    // The Service receives the platform-shaped envelope (the question/details
+    // keys are omitted when the caller did not supply them).
+    expect(service.calls.at(-1)).toEqual({
+      sessionId: 'area-1',
+      input: { outcome: 'completed', summary: ' 完成 ', details: { ref: 'note-1' } },
+    })
+    expect(await tool.execute({ outcome: 'blocked', summary: '需要回答', question: '选哪个？' }, exec))
+      .toMatchObject({ delegationId: 'delegation-1' })
+    expect(service.calls.at(-1)).toEqual({
+      sessionId: 'area-1',
+      input: { outcome: 'blocked', summary: '需要回答', question: '选哪个？' },
+    })
+    expect(tool.output.render({}, { delegationId: 'delegation-1', status: 'ended' }))
+      .toEqual([{ type: 'text', text: JSON.stringify({ delegationId: 'delegation-1', status: 'ended' }, null, 2) }])
+  })
+
+  it('validates the report envelope before writing anything', async () => {
+    const { ctx, tools } = await host()
+    const service = delegationService()
+    service.provide(ctx)
+    service.setActive({ id: 'delegation-1' })
+    const tool = tools.get(DELEGATION_REPORT_TOOL)!
+    const exec = execution({ agent: { session: { id: 'area-1' } } } as never)
+    await expect(tool.execute({ outcome: 'done', summary: 'x' }, exec)).rejects.toThrow(/outcome must be completed, blocked or failed/u)
+    await expect(tool.execute({ outcome: 'completed' }, exec)).rejects.toThrow(/needs a non-empty summary/u)
+    await expect(tool.execute({ outcome: 'completed', summary: '   ' }, exec)).rejects.toThrow(/needs a non-empty summary/u)
+    await expect(tool.execute({ outcome: 'blocked', summary: 'need' }, exec)).rejects.toThrow(/blocked report needs the concrete question/u)
+    await expect(tool.execute({ outcome: 'blocked', summary: 'need', question: '   ' }, exec)).rejects.toThrow(/concrete question/u)
+    expect(service.calls).toEqual([])
+  })
+
+  it('fails closed when the composition has no delegation store', async () => {
+    const { tools } = await host()
+    await expect(tools.get(DELEGATION_REPORT_TOOL)!.execute(
+      { outcome: 'completed', summary: '完成' },
+      execution({ agent: { session: { id: 'area-1' } } } as never),
+    )).rejects.toThrow(/no delegation store/u)
+  })
+
+  it('fails the row when its tool name is already taken', async () => {
+    await expect(host([DELEGATION_REPORT_TOOL])).rejects.toThrow(/already registered/u)
+  })
+})
+
+describe('the application row state projection', () => {
+  it('maps the starting and stopping statuses onto the public runtime axis', async () => {
+    const { runtime, tools, mark } = await host()
+    const startGate = Promise.withResolvers<void>()
+    runtime.mount(demoApp('booting', { start: () => startGate.promise }))
+    const blocker = Promise.withResolvers<void>()
+    const base = demoApp('draining')
+    await runtime.register({
+      ...base,
+      ops: {
+        ...base.ops,
+        hold: {
+          description: 'holds until released', params: {}, result: { type: 'json' },
+          execute: async () => { await blocker.promise; return null },
+        },
+      },
+    })
+    const held = runtime.call({ kind: 'human' }, 'draining', 'hold', {})
+    const stopping = runtime.stop('draining')
+    mark('s-app')
+    const view = await runApplicationTool(tools, 's-app', { action: 'view' }) as {
+      applications: Array<{ appId: string; runtime: string; health?: string }>
+    }
+    expect(Object.fromEntries(view.applications.map(row => [row.appId, row.runtime]))).toEqual({
+      booting: 'starting',
+      draining: 'stopping',
+    })
+    expect(view.applications.every(row => row.health === undefined)).toBe(true)
+    startGate.resolve()
+    blocker.resolve(undefined)
+    await held
+    await stopping
+  })
+
+  it('carries the reason and detail of a failed application into the view', async () => {
+    const { runtime, tools, mark } = await host()
+    await runtime.register(demoApp('bad', { start: () => { throw new Error('the storage is missing') } }))
+    mark('s-app')
+    const view = await runApplicationTool(tools, 's-app', { action: 'view' }) as {
+      applications: Array<{ appId: string; runtime: string; reason?: string; detail?: string; health?: string }>
+    }
+    expect(view.applications[0]?.health).toBeUndefined()
+    expect(view.applications).toEqual([expect.objectContaining({
+      appId: 'bad',
+      runtime: 'stopped',
+      reason: 'platform.start-failed',
+      detail: 'the storage is missing',
+    })])
+  })
+})
+
 describe('page open action', () => {
   it('delegates to the host page service and rejects an invalid action', async () => {
     const { ctx, tools, mark } = await host()
@@ -184,9 +320,7 @@ describe('draft read tool', () => {
     mark('s-app')
     await expect(tools.get(DRAFTS_TOOL)!.execute({ action: 'read', pageId: 'p', draftId: 'd1' }, execution({ agent: { session: { id: 's-app' } } } as never)))
       .rejects.toThrow(/no draft service/u)
-    const draftsCollision = await host([DRAFTS_TOOL])
-    expect(draftsCollision.tools.names()).toEqual([APPLICATIONS_TOOL, PAGES_TOOL])
-    expect(draftsCollision.warnings.join('\n')).toContain(`the "${DRAFTS_TOOL}" tool could not be registered`)
+    await expect(host([DRAFTS_TOOL])).rejects.toThrow(/already registered/u)
   })
 })
 
@@ -209,6 +343,14 @@ describe('page context tool', () => {
       filters: { status: 'open' }, visibleRange: { from: '2026-01-01' }, hasUnsavedChanges: true,
     })
     expect(read).not.toHaveProperty('body')
+    // The page id is an optional fence on read: the current page passes, a
+    // stale or malformed id is refused instead of reading another page.
+    expect(await tool.execute({ pageId: 'page-1' }, execution({ agent: { session: { id: 's-app' } } } as never)))
+      .toMatchObject({ pageId: 'page-1', snapshotId: 'snapshot-2' })
+    await expect(tool.execute({ pageId: 'page-old' }, execution({ agent: { session: { id: 's-app' } } } as never)))
+      .rejects.toThrow(/no longer visible/u)
+    await expect(tool.execute({ pageId: 7 }, execution({ agent: { session: { id: 's-app' } } } as never)))
+      .rejects.toThrow(/non-empty string/u)
   })
 
   it('is unavailable in an ordinary conversation, without a page, or without a Session', async () => {
@@ -219,6 +361,8 @@ describe('page context tool', () => {
     await expect(tool.execute({}, execution({ agent: { session: { id: 's-app' } } } as never))).rejects.toThrow(/no application page/u)
     setPage('s-app', { appId: 'demo', label: 'Tasks' })
     expect(await tool.execute({}, execution({ agent: { session: { id: 's-app' } } } as never))).toMatchObject({ appId: 'demo', view: 'default' })
+    await expect(tool.execute({ pageId: 'page-without-id' }, execution({ agent: { session: { id: 's-app' } } } as never)))
+      .rejects.toThrow(/no longer visible/u)
     await expect(tool.execute({}, execution())).rejects.toThrow(/requires a Session/u)
   })
 })
@@ -244,7 +388,7 @@ describe('unified tool edge cases', () => {
     await runtime.register(demoApp())
     allow('s', ['missing'])
     const view = await runApplicationTool(tools, 's', { action: 'view' }) as { applications: unknown[] }
-    expect(view.applications).toEqual([])
+    expect(view.applications).toEqual([{ appId: 'missing', status: 'unavailable', reason: 'not-registered' }])
     await expect(runApplicationTool(tools, 's', { action: 'read', appId: 'missing' })).rejects.toThrow(/no application/u)
 
     mark('app')
@@ -256,13 +400,9 @@ describe('unified tool edge cases', () => {
     expect(cancelled).toMatchObject({ status: 'cancelled', error: { code: 'platform.cancelled' } })
   })
 
-  it('reports a registration collision instead of failing the whole row', async () => {
-    const { tools, warnings } = await host([APPLICATIONS_TOOL])
-    expect(tools.names()).toEqual([PAGES_TOOL, DRAFTS_TOOL])
-    expect(warnings.join('\n')).toContain('could not be registered')
-    const pagesCollision = await host([PAGES_TOOL])
-    expect(pagesCollision.tools.names()).toEqual([APPLICATIONS_TOOL, DRAFTS_TOOL])
-    expect(pagesCollision.warnings.join('\n')).toContain(`the "${PAGES_TOOL}" tool could not be registered`)
+  it('fails the row when a tool name is already taken', async () => {
+    await expect(host([APPLICATIONS_TOOL])).rejects.toThrow(/already registered/u)
+    await expect(host([PAGES_TOOL])).rejects.toThrow(/already registered/u)
   })
 
   it('unmarks an application conversation and falls back to the turn scope', async () => {
@@ -272,5 +412,39 @@ describe('unified tool edge cases', () => {
     expect(await runApplicationTool(tools, 's-app', { action: 'view' })).toMatchObject({ applications: [{ appId: 'demo' }] })
     ;(ctx.get('appTools') as { unmark(id: string): void } | undefined)?.unmark('s-app')
     await expect(runApplicationTool(tools, 's-app', { action: 'view' })).rejects.toThrow(/no application is referenced/u)
+  })
+
+  it('advertises the owner-session tools only in an application conversation', async () => {
+    const { tools, mark } = await host()
+    expect(tools.options.get(APPLICATIONS_TOOL)).toBeUndefined()
+    const whenPages = tools.options.get(PAGES_TOOL)?.when
+    const whenDrafts = tools.options.get(DRAFTS_TOOL)?.when
+    expect(whenPages).toBeTypeOf('function')
+    expect(whenDrafts).toBeTypeOf('function')
+    const context = { agent: { session: { id: 's-app' } } } as never
+    expect(await whenPages!(context)).toBe(false)
+    expect(await whenDrafts!(context)).toBe(false)
+    mark('s-app')
+    expect(await whenPages!(context)).toBe(true)
+    expect(await whenDrafts!(context)).toBe(true)
+  })
+
+  it('advertises the delegation report only while a live delegation is bound', async () => {
+    const { ctx, tools } = await host()
+    const when = tools.options.get(DELEGATION_REPORT_TOOL)?.when
+    expect(when).toBeTypeOf('function')
+    const bound = { agent: { session: { id: 's-delegated' } } } as never
+    const other = { agent: { session: { id: 's-other' } } } as never
+    expect(await when!(bound)).toBe(false)
+    ctx.provide('appDelegations', { active: async (id: string) => id === 's-delegated' ? { id: 'd-1' } : undefined } as never)
+    expect(await when!(bound)).toBe(true)
+    expect(await when!(other)).toBe(false)
+  })
+
+  it('hides the delegation report when the delegation table cannot be read', async () => {
+    const { ctx, tools } = await host()
+    const when = tools.options.get(DELEGATION_REPORT_TOOL)?.when
+    ctx.provide('appDelegations', { active: async () => { throw new Error('corrupt table') } } as never)
+    expect(await when!({ agent: { session: { id: 's-delegated' } } } as never)).toBe(false)
   })
 })

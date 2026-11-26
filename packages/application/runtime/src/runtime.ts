@@ -21,14 +21,21 @@ import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { HistoryReader } from './history.ts'
 import { eventCapability, opCapability, platformCapability } from './types.ts'
 import type {
-  Activation, AppCall, AppChangeNotice, AppContext, AppDataDeclaration, AppDeclaration, AppEvent, AppEventListener, AppHealth, AppId, AppReason, AppSecretAccess, AppStatus, CallOutcome, Caller, CapabilityAccess,
-  CapabilityGrant, CapabilityVerdict, ObjectRef, ObjectResolution, OpName, OperationContext, OperationDeclaration, OperationEffect, OperationPolicy, OperationPolicyEntry, OutcomeError, PolicyStorePort, ProgressNotice, RejectionCode,
+  Activation, AppCall, AppChangeNotice, AppContext, AppDataDeclaration, AppDeclaration, AppDelegationAccess, AppEvent, AppEventListener, AppHealth, AppHealthCheckResult, AppId, AppReason, AppStatus, CallOutcome, Caller, CapabilityAccess,
+  CapabilityGrant, CapabilityVerdict, DelegationPort, ObjectRef, ObjectResolutionResult, OpName, OperationContext, OperationDeclaration, OperationEffect, OperationPolicy, OperationPolicyEntry, OutcomeError, PolicyStorePort, ProcessAccess, ProcessDescriptor, ProgressNotice, RejectionCode,
   TaskCancelResult, TaskContext, TaskDescriptor, TaskError, TaskHandle, TaskId, TaskNotice, TaskOrigin,
   TaskProgress, TaskSnapshot, TaskState, TaskWork,
 } from './types.ts'
 
 /** How long a stop waits for in-flight and background work before reporting incomplete. */
 export const DEFAULT_STOP_BUDGET_MS = 3_000
+
+/**
+ * How long one application health check may run before the platform reports it
+ * as degraded. Health hooks are meant to be light; a hook that outlives this is
+ * a diagnostic, never a reason to block or stop the application on its own.
+ */
+export const DEFAULT_HEALTH_TIMEOUT_MS = 5_000
 
 /** How many recent history records {@link ApplicationRuntime.recentHistory} answers by default. */
 export const DEFAULT_RECENT_HISTORY = 50
@@ -57,9 +64,9 @@ interface EventBinding {
 }
 
 /** Build the public error body; platform codes are never given an app prefix. */
-function errorBody(code: string, message: string): OutcomeError {
+function errorBody(code: string, message: string, details?: JsonValue): OutcomeError {
   const prefixed = code.startsWith('platform.') || code.startsWith('app.') ? code : `platform.${code}`
-  return { code: prefixed, message }
+  return { code: prefixed, message, ...(details === undefined ? {} : { details }) }
 }
 
 /** Build one pre-execution rejection with the public error body. */
@@ -68,9 +75,9 @@ function rejectedOutcome(callId: string, code: RejectionCode, message: string): 
 }
 
 /** Build one post-execution failure with the public error body. */
-function failedOutcome(callId: string, code: string, message: string): CallOutcome {
+function failedOutcome(callId: string, code: string, message: string, details?: JsonValue): CallOutcome {
   const errorCode = code === 'threw' ? 'platform.execution-failed' : code === 'invalid-result' ? 'platform.invalid-result' : `app.${code}`
-  return { callId, status: 'failed', error: errorBody(errorCode, message) }
+  return { callId, status: 'failed', error: errorBody(errorCode, message, details) }
 }
 
 /** Build one cancellation with the public error body. */
@@ -91,6 +98,8 @@ export class AppError extends Error {
     message: string,
     /** Whether the caller may safely retry (absent = the application did not say). */
     public readonly retryable?: boolean,
+    /** Structured field paths or partial-effect facts; never a business body. */
+    public readonly details?: JsonValue,
   ) {
     super(message)
     this.name = 'AppError'
@@ -127,9 +136,19 @@ export interface MaintenanceLease {
  */
 export type ConfirmationAnswer = 'allowed-once' | 'denied' | 'cancelled' | 'unavailable'
 
+/** The bounded, human-checkable shape of a call asking for confirmation. */
+export interface ConfirmationPreview {
+  /** Whether the call would read or write. */
+  readonly effect: OperationEffect
+  /** Redacted, size-bounded JSON text; never the raw operation arguments. */
+  readonly args: string
+}
+
 /** One confirmation the runtime cannot answer itself. */
 export interface ConfirmationRequest {
   readonly caller: Caller
+  /** The call's bounded, redacted preview, when the channel can show one. */
+  readonly preview?: ConfirmationPreview
   /**
    * The capability the user is being asked to approve (`<appId>#<op>` for an
    * operation, `capability:<name>` for a platform capability). The approval
@@ -174,6 +193,8 @@ export interface HistoryRecord {
   readonly code?: string
   /** Failure/rejection message (never full arguments or results). */
   readonly message?: string
+  /** The command label of one process use; absent for operation calls. */
+  readonly command?: string
 }
 
 /** Where history records go. `write` failures are reported, never thrown at callers. */
@@ -191,27 +212,19 @@ export interface AppRegistration {
   status(): AppStatus
   /** User activation; a disabled application is visible but not callable. */
   activation(): Activation
-  /** Start failure reason, when status is `failed`. */
-  failure(): string | undefined
+  /** Readable diagnostic detail: start failure, stop incomplete, maintenance. */
+  detail(): string | undefined
   /** Health beside the lifecycle state. */
   health(): AppHealth
   /** Stable reason for a degraded/blocked state, when one applies. */
   reason(): AppReason | undefined
 }
 
-/** Host-side secret values, keyed by application and declared field name. */
-export interface SecretStorePort {
-  names(appId: AppId): Promise<readonly string[]>
-  has(appId: AppId, name: string): Promise<boolean>
-  get(appId: AppId, name: string): Promise<string | undefined>
-  set(appId: AppId, name: string, value: string): Promise<void>
-  delete(appId: AppId, name: string): Promise<boolean>
-}
-
 /** What the runtime needs from outside; every port has a safe default. */
 export interface RuntimeOptions {
   readonly confirm?: ConfirmationPort
-  readonly secrets?: SecretStorePort
+  /** The host's durable delegation store (see {@link DelegationPort}). */
+  readonly delegations?: DelegationPort
   readonly grants?: GrantStorePort
   readonly policies?: PolicyStorePort
   readonly history?: HistorySink
@@ -221,6 +234,16 @@ export interface RuntimeOptions {
   /** Task ids must survive a restart, so they default to random ids, not a counter. */
   readonly taskIdFactory?: () => string
   readonly stopBudgetMs?: number
+  /** How long one platform-run health check may take (default 5000ms). */
+  readonly healthTimeoutMs?: number
+  /** How long one confirmation may wait for a human (default 5 minutes). */
+  readonly confirmationTimeoutMs?: number
+  /**
+   * The activation snapshot read before this service was provided. It is the
+   * host's boot gate: a disabled id (or a failed read) must never start, even
+   * if the application row mounts before the host bridge's async reconciler.
+   */
+  readonly activation?: { readonly disabled: readonly AppId[]; readonly failure?: string }
   /** Report a non-fatal problem (history write failure, background rejection, ...). */
   readonly onProblem?: (problem: string) => void
 }
@@ -231,7 +254,7 @@ interface AppRecord {
   abort: AbortController
   status: AppStatus
   activation: Activation
-  failure: string | undefined
+  detail: string | undefined
   health: AppHealth
   reason: AppReason | undefined
   /**
@@ -255,6 +278,26 @@ interface AppRecord {
   maintenance?: { readonly token: number } | undefined
   /** Resolves when the app reaches stopped/stop-incomplete after a stop began. */
   stopped: Promise<AppStatus> | undefined
+  /** The stop hook still in flight after the budget; a re-entrant stop must not rerun it. */
+  stopHook?: Promise<string | undefined> | undefined
+  /** The late cleanup still in flight after an incomplete stop; a re-entrant stop joins it. */
+  stopLate?: Promise<void> | undefined
+  /** A health failure whose stop outlived the budget; re-applied when stopped. */
+  pendingHealthFailure?: { readonly reason: string; readonly detail: string } | undefined
+  /**
+   * The one platform-run health check in flight for this instance, when there
+   * is one. A user-triggered check joins it instead of running the hook twice;
+   * it is NOT application work, so a stop never waits for it (the check
+   * discards its own late result once the instance moved on).
+   */
+  checking?: Promise<void> | undefined
+  /**
+   * The identity of the newest health check this instance started. Every check
+   * captures it when it begins: a check that settles after the instance
+   * restarted or an import hold replaced it finds a newer value and discards
+   * its stale verdict.
+   */
+  healthEpoch: number
   /**
    * Set by {@link ApplicationRuntime.unregister} when the application was asked
    * to unload while it still had work. The record is dropped the moment that
@@ -262,6 +305,12 @@ interface AppRecord {
    * rather than aliasing a live instance.
    */
   unload: boolean
+  /**
+   * Mounted while the host's start gate was closed (activation is being read).
+   * It must not run its start hook until the gate releases and its activation
+   * is known to be enabled.
+   */
+  pendingStart: boolean
 }
 
 /** Internal mutable task record; snapshots are built at the boundary. */
@@ -274,6 +323,8 @@ interface TaskEntry {
   readonly externalId?: string
   readonly requestId?: string
   readonly origin: TaskOrigin
+  /** The application call chain that started this task (ancestors, current app included). */
+  readonly chain: readonly AppId[]
   state: TaskState
   progress?: TaskProgress
   readonly startedAt: string
@@ -291,8 +342,6 @@ const APP_ID_PATTERN = /^[a-z][a-z0-9-]*$/u
 const OP_NAME_PATTERN = /^[a-zA-Z][a-zA-Z0-9]*$/u
 const EVENT_TYPE_PATTERN = /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/u
 const OBJECT_TYPE_PATTERN = /^[a-z][a-z0-9-]*$/u
-const PAGE_VIEW_PATTERN = /^[a-z][a-z0-9-]*$/u
-const PAGE_ACTIONS = new Set(['navigate', 'set-filters', 'select'])
 
 /** The app a call declaration names. */
 function calledApp(call: AppCall): AppId {
@@ -313,6 +362,40 @@ export function declaredCallOps(declaration: AppDeclaration, target: AppId): 'al
   return undefined
 }
 
+/** Validate the optional process declaration and its link to the capability. */
+function assertProcessDeclarable(declaration: AppDeclaration): void {
+  const process = declaration.process
+  const declaresProcess = (declaration.capabilities ?? []).includes('process')
+  if (process === undefined) {
+    if (declaresProcess) throw new Error(`application ${declaration.id} declares the process capability but no process commands`)
+    return
+  }
+  if (!declaresProcess) throw new Error(`application ${declaration.id} declares process commands but not the process capability`)
+  if (process.length === 0 || process.length > 20) throw new Error(`application ${declaration.id} process declaration must list 1..20 executables`)
+  const seen = new Set<string>()
+  for (const entry of process) {
+    if (typeof entry.executable !== 'string' || entry.executable.trim() === '' || entry.executable.length > 200) {
+      throw new Error(`application ${declaration.id} process executable must be a non-empty 1..200 character string`)
+    }
+    if (seen.has(entry.executable)) throw new Error(`application ${declaration.id} process declares ${entry.executable} twice`)
+    seen.add(entry.executable)
+    if (typeof entry.purpose !== 'string' || entry.purpose.trim() === '' || entry.purpose.length > 500) {
+      throw new Error(`application ${declaration.id} process purpose must be a non-empty 1..500 character string`)
+    }
+    if (!Array.isArray(entry.commands) || entry.commands.length === 0 || entry.commands.length > 50) {
+      throw new Error(`application ${declaration.id} process ${entry.executable} must list 1..50 commands`)
+    }
+    const commands = new Set<string>()
+    for (const command of entry.commands) {
+      if (typeof command !== 'string' || command.trim() === '' || command.length > 100) {
+        throw new Error(`application ${declaration.id} process ${entry.executable} command must be a non-empty 1..100 character string`)
+      }
+      if (commands.has(command)) throw new Error(`application ${declaration.id} process ${entry.executable} repeats command ${command}`)
+      commands.add(command)
+    }
+  }
+}
+
 /** Validate one application's data description. */
 function assertDataDeclarable(declaration: AppDeclaration, data: AppDataDeclaration): void {
   const schemaVersion = data.schemaVersion
@@ -322,25 +405,10 @@ function assertDataDeclarable(declaration: AppDeclaration, data: AppDataDeclarat
     }
   }
   if (data.kind === 'none') {
-    if (data.namespace !== undefined || data.path !== undefined || data.backup !== undefined
-      || data.exportOp !== undefined || data.importOp !== undefined || data.secretFields !== undefined) {
+    if (data.namespace !== undefined || data.path !== undefined) {
       throw new Error(`application ${declaration.id} data kind none cannot carry storage fields`)
     }
     return
-  }
-  if (data.exportOp !== undefined && declaration.ops[data.exportOp] === undefined) {
-    throw new Error(`application ${declaration.id} data exportOp ${data.exportOp} is not an operation`)
-  }
-  if (data.importOp !== undefined && declaration.ops[data.importOp] === undefined) {
-    throw new Error(`application ${declaration.id} data importOp ${data.importOp} is not an operation`)
-  }
-  if (data.secretFields !== undefined) {
-    if (data.secretFields.some((field) => typeof field !== 'string' || field.trim() === '')) {
-      throw new Error(`application ${declaration.id} data secretFields must be non-empty names`)
-    }
-    if (new Set(data.secretFields).size !== data.secretFields.length) {
-      throw new Error(`application ${declaration.id} data secretFields must be unique`)
-    }
   }
   if (data.namespace !== undefined && !APP_ID_PATTERN.test(data.namespace)) {
     throw new Error(`application ${declaration.id} data namespace ${JSON.stringify(data.namespace)} is malformed`)
@@ -353,6 +421,9 @@ function assertDataDeclarable(declaration: AppDeclaration, data: AppDataDeclarat
   if (data.kind === 'unified') {
     if (data.namespace === undefined || data.path !== undefined) {
       throw new Error(`application ${declaration.id} unified data requires a namespace and no path`)
+    }
+    if (data.namespace !== declaration.id) {
+      throw new Error(`application ${declaration.id} unified namespace must equal the application id`)
     }
     return
   }
@@ -396,6 +467,10 @@ export function assertDeclarable(declaration: AppDeclaration): void {
     throw new Error(`application ${declaration.id} generation ${declaration.generation} must declare data`)
   }
   if (declaration.data !== undefined) assertDataDeclarable(declaration, declaration.data)
+  assertProcessDeclarable(declaration)
+  if (declaration.health !== undefined && typeof declaration.health !== 'function') {
+    throw new Error(`application ${declaration.id} health must be a function`)
+  }
   const seenCalls = new Set<AppId>()
   for (const call of declaration.calls ?? []) {
     const target = calledApp(call)
@@ -430,31 +505,13 @@ export function assertDeclarable(declaration: AppDeclaration): void {
     if (resolver === undefined) throw new Error(`application ${declaration.id} object type ${type} names the undeclared resolver ${objectType.resolveOperation}`)
     if ((resolver.effect ?? 'write') !== 'read') throw new Error(`application ${declaration.id} object type ${type} must use a read operation to resolve references`)
   }
-  for (const [view, page] of Object.entries(declaration.pages ?? {})) {
-    if (!PAGE_VIEW_PATTERN.test(view)) throw new Error(`application ${declaration.id} page ${JSON.stringify(view)} must match ${String(PAGE_VIEW_PATTERN)}`)
-    if (page.description.trim() === '') throw new Error(`application ${declaration.id} page ${view} must carry a description`)
-    if (page.actions !== undefined && (page.actions.length === 0 || new Set(page.actions).size !== page.actions.length || page.actions.some(action => !PAGE_ACTIONS.has(action)))) {
-      throw new Error(`application ${declaration.id} page ${view} has invalid or duplicate actions`)
-    }
-  }
-  const commandNames = new Set<string>()
-  for (const command of declaration.process?.commands ?? []) {
-    if (command.name.trim() === '') throw new Error(`application ${declaration.id} process command must carry a name`)
-    if (command.name.trim() !== command.name) throw new Error(`application ${declaration.id} process command ${JSON.stringify(command.name)} must not have surrounding whitespace`)
-    if (commandNames.has(command.name)) throw new Error(`application ${declaration.id} repeats the process command ${command.name}`)
-    commandNames.add(command.name)
-    if (command.description.trim() === '') throw new Error(`application ${declaration.id} process command ${command.name} must carry a description`)
-    if (command.argv !== undefined && (command.argv.length === 0 || command.argv.some(part => part === ''))) {
-      throw new Error(`application ${declaration.id} process command ${command.name} has an empty argv`)
-    }
-  }
-  if ((declaration.process?.commands.length ?? 0) > 0 && !(declaration.capabilities ?? []).includes('process')) {
-    throw new Error(`application ${declaration.id} declares process commands but not the process capability`)
-  }
   const opNames = Object.keys(declaration.ops)
   if (opNames.length === 0) throw new Error(`application ${declaration.id} declares no operations`)
   for (const [name, op] of Object.entries(declaration.ops)) {
     if (!OP_NAME_PATTERN.test(name)) throw new Error(`operation ${declaration.id}#${name} must match ${String(OP_NAME_PATTERN)}`)
+    if ((declaration.generation ?? 1) >= 2 && op.effect === undefined) {
+      throw new Error(`operation ${declaration.id}#${name} must declare effect`)
+    }
     if (op.description.trim() === '') throw new Error(`operation ${declaration.id}#${name} must carry a description`)
     try {
       assertSupportedJsonSchema(parameterSchemaSpecToJsonSchema(op.params))
@@ -477,7 +534,7 @@ export class ApplicationRuntime {
   private readonly taskListeners = new Set<(notice: TaskNotice) => void>()
   private readonly eventBindings = new Set<EventBinding>()
   private confirm: ConfirmationPort | undefined
-  private secrets: SecretStorePort | undefined
+  private delegations: DelegationPort | undefined
   private grants: GrantStorePort | undefined
   private policies: PolicyStorePort | undefined
   private history: HistorySink | undefined
@@ -485,17 +542,32 @@ export class ApplicationRuntime {
   private readonly idFactory: () => string
   private readonly taskIdFactory: () => string
   private readonly stopBudgetMs: number
+  private readonly healthTimeoutMs: number
+  private readonly confirmationTimeoutMs: number
   private readonly onProblem: (problem: string) => void
   private grantsCache: CapabilityGrant[] | undefined
   private policiesCache: OperationPolicyEntry[] | undefined
   private policyChain: Promise<unknown> = Promise.resolve()
   /** The tail of the grant table's serial queue (see {@link changeGrants}). */
   private grantChain: Promise<unknown> = Promise.resolve()
+  /**
+   * The host's activation lookup, installed before application rows mount.
+   * `undefined` means "no stored activation"; `disabled` suppresses start.
+   */
+  private activationResolver: ((appId: AppId) => Activation | undefined) | undefined
+  /** The activation snapshot read before the runtime service was provided. */
+  private readonly initialActivation: { readonly disabled: readonly AppId[]; readonly failure?: string } | undefined
+  /**
+   * Closed while the host reads its activation table. Application rows mount
+   * with `pendingStart` instead of running their start hook, so a corrupt
+   * activation file can fail closed before any application side effect.
+   */
+  private startGateOpen = true
   private serial = 0
 
   constructor(options: RuntimeOptions = {}) {
     this.confirm = options.confirm
-    this.secrets = options.secrets
+    this.delegations = options.delegations
     this.grants = options.grants
     this.policies = options.policies
     this.history = options.history
@@ -503,6 +575,9 @@ export class ApplicationRuntime {
     this.idFactory = options.idFactory ?? (() => `call-${String(++this.serial)}`)
     this.taskIdFactory = options.taskIdFactory ?? (() => `task-${globalThis.crypto.randomUUID()}`)
     this.stopBudgetMs = options.stopBudgetMs ?? DEFAULT_STOP_BUDGET_MS
+    this.healthTimeoutMs = options.healthTimeoutMs ?? DEFAULT_HEALTH_TIMEOUT_MS
+    this.confirmationTimeoutMs = options.confirmationTimeoutMs ?? CONFIRMATION_TIMEOUT_MS
+    this.initialActivation = options.activation
     this.onProblem = options.onProblem ?? (() => {})
   }
 
@@ -518,11 +593,41 @@ export class ApplicationRuntime {
   }
 
   /**
-   * Install the host's secret store. Without one, declared fields read as
-   * unset and writes fail with `secret-unavailable`.
-   * @param store - the store.
+   * Install the host's activation lookup. It is consulted for every application
+   * mounted after this call; an explicit `{ activation }` on {@link mount}
+   * still wins. The bridge installs it before application rows mount.
+   * @param resolver - the lookup, or undefined to remove it.
    */
+  useActivationResolver(resolver: ((appId: AppId) => Activation | undefined) | undefined): void {
+    this.activationResolver = resolver
+  }
 
+  /**
+   * Close the start gate while the host reads its durable activation table.
+   * Applications mounted now stay `stopped` with `pendingStart` set; no start
+   * hook runs until {@link releaseStarts}. Compositions without a host bridge
+   * never call this and keep the default-open behaviour.
+   */
+  holdStarts(): void {
+    this.startGateOpen = false
+  }
+
+  /**
+   * Open the start gate and start the applications whose activation is enabled.
+   * Records that were explicitly disabled (or whose resolver says disabled)
+   * stay stopped; a record that already started is never restarted.
+   */
+  releaseStarts(): void {
+    this.startGateOpen = true
+    for (const record of this.apps.values()) {
+      if (!record.pendingStart || record.activation !== 'enabled') {
+        record.pendingStart = false
+        continue
+      }
+      record.pendingStart = false
+      void this.startRecord(record)
+    }
+  }
 
   /**
    * Install the durable grant store. Without one, grants live in memory for
@@ -536,11 +641,12 @@ export class ApplicationRuntime {
   }
 
   /**
-   * Install the credential store used by application operations.
-   * @param store - the store.
+   * Install the host's durable delegation store. Without one, every delegation
+   * port use fails with `delegation-unavailable`; it never invents a record.
+   * @param port - the store.
    */
-  useSecretStore(store: SecretStorePort): void {
-    this.secrets = store
+  useDelegationStore(port: DelegationPort): void {
+    this.delegations = port
   }
 
   /**
@@ -582,31 +688,41 @@ export class ApplicationRuntime {
     assertDeclarable(declaration)
     if (this.apps.has(declaration.id)) throw new Error(`application ${declaration.id} is already registered`)
     assertDataUnique(declaration, [...this.apps.values()].map((record) => record.declaration))
+    const activation = options.activation
+      ?? (this.initialActivation === undefined
+        ? undefined
+        : this.initialActivation.failure !== undefined || this.initialActivation.disabled.includes(declaration.id)
+          ? 'disabled'
+          : 'enabled')
+      ?? this.activationResolver?.(declaration.id)
+      ?? 'enabled'
     const record: AppRecord = {
       declaration,
       abort: new AbortController(),
       status: 'stopped',
-      activation: options.activation ?? 'enabled',
+      activation,
       stopped: undefined,
       unload: false,
+      pendingStart: activation === 'enabled' && !this.startGateOpen,
       health: 'ok',
       reason: undefined,
-      failure: undefined,
+      detail: undefined,
       inFlight: new Set(),
       background: new Set(),
       tasks: new Map(),
       pendingConfirmations: new Set(),
+      healthEpoch: 0,
     }
     this.apps.set(declaration.id, record)
     const registration: AppRegistration = {
       declaration,
       status: () => record.status,
       activation: () => record.activation,
-      failure: () => record.failure,
+      detail: () => record.detail,
       health: () => record.health,
       reason: () => record.reason,
     }
-    if (record.activation === 'enabled') void this.startRecord(record)
+    if (record.activation === 'enabled' && this.startGateOpen) void this.startRecord(record)
     else this.notify(declaration.id, this.lifecycleListeners)
     return registration
   }
@@ -616,9 +732,12 @@ export class ApplicationRuntime {
     record.abort = new AbortController()
     record.status = 'starting'
     record.stopped = undefined
-    record.failure = undefined
-    record.health = 'ok'
-    record.reason = undefined
+    record.pendingHealthFailure = undefined
+    this.clearDiagnostics(record)
+    // A check still running for the PREVIOUS instance (a stop interrupted it,
+    // or its hook ignores the abort) belongs to that instance: this start is a
+    // fresh life and gets its own check, while the old one discards its result.
+    record.checking = undefined
     record.unload = false
     const declaration = record.declaration
     const starting = (async (): Promise<void> => {
@@ -634,7 +753,7 @@ export class ApplicationRuntime {
           this.onProblem(`application ${declaration.id} start failed after its stop began: ${reason}`)
           return
         }
-        record.failure = reason
+        record.detail = reason
         record.health = 'degraded'
         record.reason = 'platform.start-failed'
         record.activation = 'disabled'
@@ -649,24 +768,44 @@ export class ApplicationRuntime {
       record.starting = undefined
     })
     record.starting = starting
+    // The health check runs AFTER the start settles and is deliberately NOT
+    // part of the start's own work: an application's stop must not wait for a
+    // health hook (the health timeout bounds that hook, not the stop budget),
+    // and a late result is discarded once this instance moves on.
+    void starting.then(() => {
+      if (record.status === 'available') void this.ensureHealthCheck(record)
+    })
     this.notify(declaration.id, this.lifecycleListeners)
     return starting
   }
 
   /**
    * Enable or disable one application. Disabling stops its work first; enabling
-   * restarts a stopped or failed application. Activation is separate from health
-   * and from permissions: it does not grant or revoke anything.
+   * restarts a stopped or failed application. An application the user left
+   * enabled can still be DOWN: a failed health check stops the instance without
+   * touching the user setting, and this explicit enable is the user's recovery
+   * action. Activation is separate from health and from permissions: it does
+   * not grant or revoke anything, and the platform never restarts an
+   * application on its own.
    * @param id - the application.
    * @param activation - the new activation.
    */
   async setActivation(id: AppId, activation: Activation): Promise<void> {
     const record = this.apps.get(id)
     if (record === undefined) throw new Error(`application ${id} is not registered`)
-    if (record.activation === activation) return
+    if (record.activation === activation) {
+      // The setting is already what was asked for. Only an explicit enable of a
+      // down instance is a real request (a health-failed stop, or a failed
+      // start); every other repeat is idempotent and changes nothing.
+      if (activation === 'disabled' || (record.status !== 'stopped' && record.status !== 'failed')) return
+    }
     if (activation === 'disabled') {
       /* v8 ignore next -- disabling a stopped record needs no stop */
       if (record.status === 'starting' || record.status === 'available' || record.status === 'stopping') await this.stop(id)
+      else if (record.status === 'stop-incomplete') {
+        const status = await this.stop(id)
+        if (status !== 'stopped') throw new AppError('stop-incomplete', `application ${id} is still ${status}; retry the stop`)
+      } else if (record.status === 'stopped' || record.status === 'failed') this.clearDiagnostics(record)
       record.activation = 'disabled'
       this.notify(id, this.lifecycleListeners)
       return
@@ -675,12 +814,21 @@ export class ApplicationRuntime {
       throw new AppError('activation-busy', `application ${id} is ${record.status}; wait for its work to end before enabling it`)
     }
     record.activation = 'enabled'
+    if (!this.startGateOpen) {
+      record.pendingStart = true
+      this.notify(id, this.lifecycleListeners)
+      return
+    }
     /* v8 ignore next 4 -- a disabled record is stopped; this guards a start/disable race */
     if (record.status === 'available' || record.status === 'starting') {
       this.notify(id, this.lifecycleListeners)
       return
     }
     await this.startRecord(record)
+    // Enabling waits for the health result the start scheduled: a caller that
+    // reads the row right after this returns sees the real health, not a
+    // transiently-ok instance.
+    await this.ensureHealthCheck(record)
   }
 
   /**
@@ -694,8 +842,41 @@ export class ApplicationRuntime {
    */
   async register(declaration: AppDeclaration, options: { readonly activation?: Activation } = {}): Promise<AppRegistration> {
     const registration = this.mount(declaration, options)
-    await this.apps.get(declaration.id)?.starting
+    const record = this.apps.get(declaration.id)
+    await record?.starting
+    // Wait for the health result the settled start scheduled, so the returned
+    // registration already reports the application's real health.
+    if (record !== undefined && record.status === 'available') await this.ensureHealthCheck(record)
     return registration
+  }
+
+  /**
+   * Run one application's declared health check NOW (the management page's
+   * explicit "check" action), map the result onto the public state and wait for
+   * it to apply. It is not an operation: no caller identity, grant or permission
+   * is involved, and it never runs per call or on a timer. The hook is the
+   * application's and only the platform interprets its result; the check is
+   * bounded by the runtime's health timeout.
+   *
+   * A check started while another one is in flight joins it instead of running
+   * the hook twice. Only an available instance is checked: a stopped (or
+   * health-failed) instance must be enabled again first, and an instance under
+   * an import hold must wait for the hold to be released.
+   * @param id - the registered application.
+   * @returns when the check (if there was one to run) has applied its result.
+   * @throws when the application is not registered, not available, or held.
+   */
+  async checkHealth(id: AppId): Promise<void> {
+    const record = this.apps.get(id)
+    if (record === undefined) throw new Error(`application ${id} is not registered`)
+    if (record.declaration.health === undefined) return
+    if (record.maintenance !== undefined) {
+      throw new AppError('health-unavailable', `application ${id} is held for an import; check again when the import settles`)
+    }
+    if (record.status !== 'available') {
+      throw new AppError('health-unavailable', `application ${id} is ${record.status}; enable it and wait until it is available before checking its health`)
+    }
+    await this.ensureHealthCheck(record)
   }
 
   /**
@@ -729,7 +910,7 @@ export class ApplicationRuntime {
       declaration: record.declaration,
       status: () => record.status,
       activation: () => record.activation,
-      failure: () => record.failure,
+      detail: () => record.detail,
       health: () => record.health,
       reason: () => record.reason,
     }))
@@ -777,6 +958,7 @@ export class ApplicationRuntime {
     record.maintenance = { token }
     record.health = 'degraded'
     record.reason = 'platform.updating'
+    record.detail = 'application data is being updated'
     this.notify(id, this.lifecycleListeners)
     const context = this.appContext(record)
     // ONE budget for the whole sequence (pause, then the drain), counted from
@@ -797,7 +979,10 @@ export class ApplicationRuntime {
     const pause = started.then(() => ({ failure: undefined as unknown }), (error: unknown) => ({ failure: error }))
     if (!(await waitWithin([pause], deadline)).ended) {
       const owned = record.maintenance?.token === token
-      if (owned) record.maintenance = undefined
+      if (owned) {
+        record.maintenance = undefined
+        this.clearDiagnostics(record)
+      }
       // Resume only once the late pause really finished, and only when no other
       // hold/app state owns the application by then: a timeout reports the
       // wait as unfinished instead of pretending the pause did not happen.
@@ -809,13 +994,16 @@ export class ApplicationRuntime {
         // A hold released by its real owner already resumed the application;
         // resuming again here would duplicate that hook.
         if (!owned) return
-        if (record.maintenance === undefined && record.status === 'available') void this.resumeRecord(record, context)
+        if (record.maintenance === undefined && record.status === 'available') void this.resumeAndCheck(record, context)
       })
       throw new AppError('maintenance-busy', `application ${id} did not pause within the ${String(this.stopBudgetMs)}ms import budget; retry when it is idle`, true)
     }
     const paused = await pause
     if (paused.failure !== undefined) {
-      if (record.maintenance?.token === token) record.maintenance = undefined
+      if (record.maintenance?.token === token) {
+        record.maintenance = undefined
+        this.clearDiagnostics(record)
+      }
       throw new AppError('maintenance-pause-failed', `application ${id} could not pause for the import: ${String((paused.failure as Error)?.message ?? paused.failure)}`, true)
     }
     try {
@@ -826,22 +1014,23 @@ export class ApplicationRuntime {
           release: async () => {
             if (record.maintenance?.token !== token) return
             record.maintenance = undefined
-            record.health = 'ok'
-            record.reason = undefined
-            await this.resumeRecord(record, context)
+            this.clearDiagnostics(record)
+            await this.resumeAndCheck(record, context)
           },
         }
       }
     } catch (error) {
       if (record.maintenance?.token === token) {
         record.maintenance = undefined
-        await this.resumeRecord(record, context)
+        this.clearDiagnostics(record)
+        await this.resumeAndCheck(record, context)
       }
       throw error
     }
     if (record.maintenance?.token === token) {
       record.maintenance = undefined
-      await this.resumeRecord(record, context)
+      this.clearDiagnostics(record)
+      await this.resumeAndCheck(record, context)
     }
     throw new AppError('maintenance-busy', `application ${id} still owns running work after the ${String(this.stopBudgetMs)}ms import budget; retry when it is idle`, true)
   }
@@ -857,9 +1046,8 @@ export class ApplicationRuntime {
     const record = this.apps.get(id)
     if (record === undefined || record.maintenance === undefined) return
     record.maintenance = undefined
-    record.health = 'ok'
-    record.reason = undefined
-    await this.resumeRecord(record, this.appContext(record))
+    this.clearDiagnostics(record)
+    await this.resumeAndCheck(record, this.appContext(record))
   }
 
   /** Run the application's resume hook; a failure is a reported problem, not a throw. */
@@ -869,6 +1057,21 @@ export class ApplicationRuntime {
     } catch (error) {
       this.onProblem(`application ${record.declaration.id} resume hook failed: ${String((error as Error)?.message ?? error)}`)
     }
+  }
+
+  /**
+   * The recovery path every import hold ends with: re-arm the application's
+   * work, then re-read its health. The check is the application's declared one
+   * and only runs for a live, unheld instance; a health result that stops the
+   * application is a normal outcome here, not an error of the recovery.
+   */
+  private async resumeAndCheck(record: AppRecord, context: AppContext): Promise<void> {
+    // A check still running while the import hold was placed belongs to the
+    // pre-import instance and is discarded by the hold; the recovery starts a
+    // fresh one, so the stale promise must not be joined as "already running".
+    record.checking = undefined
+    await this.resumeRecord(record, context)
+    await this.checkAfterRecovery(record)
   }
 
   /** Whether one application is held out of service for an import. */
@@ -894,6 +1097,14 @@ export class ApplicationRuntime {
     const record = this.apps.get(id)
     if (record === undefined) throw new Error(`application ${id} is not registered`)
     if (record.stopped !== undefined) return await record.stopped
+    // A re-entrant stop joins the first one. The hook/late cleanup may still be
+    // running after a stop-incomplete; rerunning them would release resources twice.
+    if (record.stopHook !== undefined || record.stopLate !== undefined) return record.status
+    if (record.pendingStart) {
+      record.pendingStart = false
+      this.enter(record, 'stopped')
+      return record.status
+    }
     this.enter(record, 'stopping')
     const stopped = this.runStop(record)
     record.stopped = stopped
@@ -927,11 +1138,17 @@ export class ApplicationRuntime {
       // The hook was NOT skipped: cleanup still has to happen, so it runs once
       // the work really ends, and only then does the status reach `stopped`.
       // Nothing here reopens the application for calls.
-      void this.lateCleanup(record)
+      const late = this.lateCleanup(record)
+      record.stopLate = late
+      /* v8 ignore next -- the late cleanup owns the field until it settles */
+      void late.finally(() => { if (record.stopLate === late) record.stopLate = undefined })
       return status
     }
 
     const hook = this.runStopHook(record)
+    record.stopHook = hook
+    /* v8 ignore next -- a newer stop cannot replace this hook; the identity check is defensive */
+    void hook.finally(() => { if (record.stopHook === hook) record.stopHook = undefined })
     if (!(await waitWithin([hook], deadline)).ended) {
       const status = this.incomplete(record, `the stop hook did not finish within the ${String(this.stopBudgetMs)}ms stop budget`)
       // The hook is still running: when it really ends, the status follows what
@@ -1010,6 +1227,7 @@ export class ApplicationRuntime {
   /** Mark one stop as not finished, and report why. */
   private incomplete(record: AppRecord, reason: string): AppStatus {
     this.onProblem(`application ${record.declaration.id} stop incomplete: ${reason}`)
+    record.detail = reason
     this.enter(record, 'stop-incomplete')
     return record.status
   }
@@ -1025,9 +1243,22 @@ export class ApplicationRuntime {
    */
   private enter(record: AppRecord, status: AppStatus): void {
     record.status = status
-    if (status === 'available') {
-      record.health = 'ok'
-      record.reason = undefined
+    // A late stop (the work outlived the budget) reaches `stopped` after the
+    // retry cache was cleared; without this terminal cache a second stop would
+    // run the hook again and a failing hook could pin the id forever.
+    if (status === 'stopped') record.stopped = Promise.resolve('stopped')
+    if (status === 'available' || status === 'stopped') {
+      // A normal start/stop owns the health/reason/detail fields: a stale
+      // maintenance hold, a previous health failure or a failed start's reason
+      // must not survive the lifecycle transition it no longer explains.
+      this.clearDiagnostics(record)
+      const pendingHealth = record.pendingHealthFailure
+      if (status === 'stopped' && pendingHealth !== undefined) {
+        record.pendingHealthFailure = undefined
+        record.health = 'degraded'
+        record.reason = 'platform.health-failed'
+        record.detail = pendingHealth.detail
+      }
     } else if (status === 'stop-incomplete') {
       record.health = 'degraded'
       record.reason = 'platform.stop-incomplete'
@@ -1038,34 +1269,170 @@ export class ApplicationRuntime {
     this.notify(record.declaration.id, this.lifecycleListeners)
   }
 
+  /** Clear the mutable diagnostics (health/reason/detail) to their healthy default. */
+  private clearDiagnostics(record: AppRecord): void {
+    record.health = 'ok'
+    record.reason = undefined
+    record.detail = undefined
+  }
+
+  // ---- health checks ---------------------------------------------------------
+
+  /**
+   * Run the declared health check after a recovery (a settled start or an
+   * import hold release) when the instance is live and not held. A check never
+   * runs for a stopped/starting instance, never overlaps another check of the
+   * same instance, and never runs per call or on a timer.
+   */
+  private async checkAfterRecovery(record: AppRecord): Promise<void> {
+    if (record.declaration.health === undefined) return
+    if (record.maintenance !== undefined) return
+    /* v8 ignore next -- a recovery path resumes an available instance; stopped/starting is a race */
+    if (record.status !== 'available') return
+    await this.ensureHealthCheck(record)
+  }
+
+  /**
+   * Join the health check already in flight for this instance, or start one.
+   * The promise never rejects (a failing hook is a diagnostic), so callers may
+   * await it for deterministic rows.
+   */
+  private ensureHealthCheck(record: AppRecord): Promise<void> {
+    const running = record.checking
+    if (running !== undefined) return running
+    const epoch = ++record.healthEpoch
+    const checking = this.runHealthCheck(record, epoch)
+    record.checking = checking
+    void checking.finally(() => {
+      if (record.checking === checking) record.checking = undefined
+    })
+    return checking
+  }
+
+  /**
+   * Run one health hook under the platform timeout and map its result onto the
+   * public state. Never throws: a thrown hook, a timeout and an invalid result
+   * are reported as degraded with a platform diagnostic in `detail` and NO new
+   * reason code. A result that arrives after the instance moved on (stopped,
+   * restarted, held, unloaded) is discarded instead of overwriting the newer
+   * state. Only an explicit `unhealthy` stops the instance; the activation
+   * setting is the user's and is not changed here, and nothing restarts it.
+   */
+  private async runHealthCheck(record: AppRecord, epoch: number): Promise<void> {
+    const check = record.declaration.health
+    if (check === undefined) return
+    // Only a live, unheld instance is checked: a check raced by a stop or an
+    // import hold is a no-op rather than a hook run against dead state.
+    if (record.status !== 'available' || record.maintenance !== undefined) return
+    const id = record.declaration.id
+    const lifetime = record.abort
+    const controller = new AbortController()
+    const forwardAbort = (): void => { controller.abort(lifetime.signal.reason) }
+    if (lifetime.signal.aborted) forwardAbort()
+    else lifetime.signal.addEventListener('abort', forwardAbort, { once: true })
+    const settled = (async (): Promise<HealthInvocation> => {
+      try {
+        return { result: await check({ signal: controller.signal }) }
+      } catch (error) {
+        return { failure: `health check failed: ${healthDetailText(error)}` }
+      }
+    })()
+    const deadline = Date.now() + this.healthTimeoutMs
+    const inTime = (await waitWithin([settled], deadline)).ended
+    lifetime.signal.removeEventListener('abort', forwardAbort)
+    if (!inTime) controller.abort(new Error('the health check timed out'))
+    if (!this.healthResultApplies(record, lifetime, epoch)) return
+    if (!inTime) {
+      this.applyHealthDiagnostic(record, `health check timed out after ${String(this.healthTimeoutMs)}ms`)
+      return
+    }
+    const outcome = await settled
+    if (!this.healthResultApplies(record, lifetime, epoch)) return
+    if (outcome.failure !== undefined) {
+      this.applyHealthDiagnostic(record, outcome.failure)
+      return
+    }
+    const result = validateHealthResult(outcome.result)
+    if (result === undefined) {
+      this.applyHealthDiagnostic(record, 'health check returned an invalid result')
+      return
+    }
+    if (result.status === 'ok') {
+      this.clearDiagnostics(record)
+      this.notify(id, this.lifecycleListeners)
+      return
+    }
+    if (result.status === 'degraded') {
+      record.health = 'degraded'
+      // A degraded report is the application's, not a platform reason code.
+      record.reason = undefined
+      record.detail = result.reason
+      this.notify(id, this.lifecycleListeners)
+      return
+    }
+    // Only an explicit `unhealthy` stops the instance. The activation setting
+    // stays the user's (the public state is stopped + health degraded + the
+    // stable reason); the platform never restarts it, and the user's explicit
+    // enable is the recovery action (see setActivation).
+    record.pendingHealthFailure = { reason: 'platform.health-failed', detail: result.reason ?? 'the application reported unhealthy' }
+    record.health = 'degraded'
+    record.reason = 'platform.health-failed'
+    record.detail = result.reason
+    this.notify(id, this.lifecycleListeners)
+    // A stop that cannot finish keeps its own diagnostic until the late
+    // cleanup reaches `stopped`; `enter('stopped')` re-applies this pending
+    // health failure, so the reason is not lost between the two transitions.
+    await this.stop(id)
+    /* v8 ignore next 3 -- a later start/stop owns the terminal state; this is a defensive guard */
+    if (this.apps.get(id) !== record) return
+    if ((record.status as AppStatus) !== 'stopped') return
+    this.notify(id, this.lifecycleListeners)
+  }
+
+  /** Whether a health result still describes the live instance it was asked of. */
+  private healthResultApplies(record: AppRecord, lifetime: AbortController, epoch: number): boolean {
+    return record.healthEpoch === epoch && record.abort === lifetime && record.status === 'available' && record.maintenance === undefined
+  }
+
+  /** Apply a platform diagnostic (timeout, throw, invalid result) without inventing a reason code. */
+  private applyHealthDiagnostic(record: AppRecord, detail: string): void {
+    record.health = 'degraded'
+    record.reason = undefined
+    record.detail = detail
+    this.notify(record.declaration.id, this.lifecycleListeners)
+  }
+
   // ---- object references -----------------------------------------------------
 
   /**
    * Resolve one cross-application object reference through the owning
    * application's declared read operation. The resolver receives only `{ id }`
    * and the caller's real identity; a result that names another ref, has an
-   * empty title or a non-string summary is refused.
+   * empty title or a non-string summary is refused. A failure is a VALUE: the
+   * bridge folds every thrown error into one transport code, so an exception
+   * here would erase the reason the reference could not be read.
    * @param caller - the trusted caller resolving the reference.
    * @param ref - the reference to resolve.
-   * @returns the display facts the resolver returned.
+   * @returns the display facts, or the stable reason they could not be read.
    */
-  async resolveObject(caller: Caller, ref: ObjectRef): Promise<ObjectResolution> {
+  async resolveObject(caller: Caller, ref: ObjectRef): Promise<ObjectResolutionResult> {
+    const refuse = (code: string, message: string): ObjectResolutionResult => ({ ok: false, error: errorBody(code, message) })
     if (typeof ref.appId !== 'string' || typeof ref.type !== 'string' || typeof ref.id !== 'string'
       || ref.appId === '' || ref.type === '' || ref.id === '') {
-      throw new AppError('object-invalid-ref', 'an object reference needs non-empty appId, type and id')
+      return refuse('object-invalid-ref', 'an object reference needs non-empty appId, type and id')
     }
     const record = this.apps.get(ref.appId)
-    if (record === undefined) throw new AppError('object-unknown-app', `no application ${ref.appId}`)
+    if (record === undefined) return refuse('object-unknown-app', `no application ${ref.appId}`)
     const type = record.declaration.objectTypes?.[ref.type]
-    if (type === undefined) throw new AppError('object-unknown-type', `application ${ref.appId} does not declare the object type ${ref.type}`)
+    if (type === undefined) return refuse('object-unknown-type', `application ${ref.appId} does not declare the object type ${ref.type}`)
     const outcome = await this.call(caller, ref.appId, type.resolveOperation, { id: ref.id })
-    if (outcome.status !== 'success') {
-      const reason = outcome.error!
-      throw new AppError(reason.code, reason.message)
-    }
+    // The operation's own code is the reference's reason: the target says
+    // `app.not-found` when the object is gone, and that is the one fact a
+    // caller may branch on.
+    if (outcome.status !== 'success') return { ok: false, error: outcome.error! }
     const value = outcome.result
     if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-      throw new AppError('object-invalid-resolution', 'the resolver did not return a resolution object')
+      return refuse('object-invalid-resolution', 'the resolver did not return a resolution object')
     }
     const resolution = value as Record<string, unknown>
     const resolvedRef = resolution.ref
@@ -1075,15 +1442,15 @@ export class ApplicationRuntime {
       || (resolvedRef as Record<string, unknown>).appId !== ref.appId
       || (resolvedRef as Record<string, unknown>).type !== ref.type
       || (resolvedRef as Record<string, unknown>).id !== ref.id) {
-      throw new AppError('object-invalid-resolution', 'the resolver returned a different object reference')
+      return refuse('object-invalid-resolution', 'the resolver returned a different object reference')
     }
     if (typeof title !== 'string' || title.trim() === '') {
-      throw new AppError('object-invalid-resolution', 'the resolver returned no display title')
+      return refuse('object-invalid-resolution', 'the resolver returned no display title')
     }
     if (summary !== undefined && typeof summary !== 'string') {
-      throw new AppError('object-invalid-resolution', 'the resolver summary must be a string')
+      return refuse('object-invalid-resolution', 'the resolver summary must be a string')
     }
-    return { ref: { appId: ref.appId, type: ref.type, id: ref.id }, title, ...(summary === undefined ? {} : { summary }) }
+    return { ok: true, value: { ref: { appId: ref.appId, type: ref.type, id: ref.id }, title, ...(summary === undefined ? {} : { summary }) } }
   }
 
   // ---- events --------------------------------------------------------------
@@ -1116,6 +1483,13 @@ export class ApplicationRuntime {
     }
     for (const binding of [...this.eventBindings]) {
       if (binding.publisher !== publisher || binding.type !== type) continue
+      // A publisher that is not ready or has not opened the event yet keeps the
+      // intent: startup must not fail for a collaboration that is merely
+      // unavailable, and delivery re-checks the declaration at publish time.
+      if (!this.eventBindingReady(binding)) continue
+      // No standing grant yet: the intent waits for the user's approval instead
+      // of being discarded, so approving it later takes effect immediately.
+      if (!this.eventBindingApproved(binding)) continue
       try {
         void Promise.resolve(binding.listener(event)).catch((error: unknown) => {
           this.onProblem(`application ${binding.subscriber} failed to handle event ${publisher}#${type}: ${String((error as Error)?.message ?? error)}`)
@@ -1128,10 +1502,14 @@ export class ApplicationRuntime {
   }
 
   /**
-   * Subscribe one application to another's declared event. The subscriber must
-   * declare the pair, the publisher's event must be open, and the user must
-   * have granted the subscriber the event capability. A failed subscribe never
-   * creates a listener.
+   * Record one subscription intent. The subscriber must declare the pair; a
+   * publisher that is not registered yet is deferred rather than refused, so an
+   * application may subscribe before the application it watches starts. A
+   * registered publisher whose event is missing or closed also keeps the intent
+   * (and reports a diagnostic) instead of failing the subscriber's start;
+   * delivery is gated by the declaration and the user's standing grant at
+   * publish time, so opening or approving the subscription later takes effect
+   * without restarting the subscriber.
    * @param subscriber - the application subscribing.
    * @param publisher - the application publishing.
    * @param type - the publisher's event type.
@@ -1141,19 +1519,57 @@ export class ApplicationRuntime {
   async subscribe(subscriber: AppId, publisher: AppId, type: string, listener: AppEventListener): Promise<() => void> {
     const subscriberRecord = this.apps.get(subscriber)
     if (subscriberRecord === undefined) throw new AppError('event-unknown-app', `no application ${subscriber}`)
-    const publisherRecord = this.apps.get(publisher)
-    if (publisherRecord === undefined) throw new AppError('event-unknown-app', `no application ${publisher}`)
-    const declaration = publisherRecord.declaration.events?.[type]
-    if (declaration === undefined) throw new AppError('event-undeclared', `application ${publisher} does not declare the event ${type}`)
-    if ((declaration.subscription ?? 'closed') !== 'open') throw new AppError('event-closed', `event ${publisher}#${type} is not open to subscriptions`)
     const declared = (subscriberRecord.declaration.subscriptions ?? []).some(entry => entry.appId === publisher && entry.type === type)
     if (!declared) throw new AppError('subscription-undeclared', `application ${subscriber} does not declare the subscription ${publisher}#${type}`)
-    if (!await this.isGranted({ kind: 'app', appId: subscriber }, eventCapability(publisher, type))) {
-      throw new AppError('event-not-approved', `the user has not approved the ${publisher}#${type} subscription for ${subscriber}`)
+    const publisherRecord = this.apps.get(publisher)
+    if (publisherRecord !== undefined) {
+      const declaration = publisherRecord.declaration.events?.[type]
+      if (declaration === undefined || (declaration.subscription ?? 'closed') !== 'open') {
+        // The publisher is registered but the event is not open yet. Keep the
+        // intent: a subscriber's start must not fail for a collaboration that is
+        // merely unavailable, and delivery re-checks the declaration.
+        this.onProblem(`subscription ${subscriber}#${publisher}:${type} waits: the publisher does not offer the event`)
+      }
     }
+    // Delivery runs synchronously and reads the standing grant table from the
+    // cache, so warm that cache now: the first publish after this subscription
+    // must be able to see an approval the user already made.
+    await this.loadGrants()
     const binding: EventBinding = { subscriber, publisher, type, listener }
     this.eventBindings.add(binding)
     return () => { this.eventBindings.delete(binding) }
+  }
+
+  /**
+   * Whether a live binding's publisher and event are ready for delivery now.
+   * A missing publisher or a not-yet-open event keeps the intent alive and
+   * only skips this publish; the subscriber removes its bindings when it stops.
+   * The standing grant is a separate question ({@link eventBindingApproved})
+   * because a missing grant must keep the intent alive for a later approval.
+   */
+  private eventBindingReady(binding: EventBinding): boolean {
+    const publisher = this.apps.get(binding.publisher)
+    /* v8 ignore next -- publishEvent has already refused an unregistered publisher */
+    if (publisher === undefined) return false
+    /* v8 ignore next -- a stopping publisher cannot start a new publish; a late one may race it */
+    if (publisher.status !== 'available' && publisher.status !== 'starting') return false
+    const event = publisher.declaration.events?.[binding.type]
+    /* v8 ignore next -- publishEvent refuses an event the publisher does not declare */
+    if (event === undefined) return false
+    return event.subscription === 'open'
+  }
+
+  /**
+   * Whether the user currently allows this subscription. Publish runs
+   * synchronously, so this reads the grant table already loaded by the last
+   * grant change; a missing cache delivers nothing rather than guessing.
+   */
+  private eventBindingApproved(binding: EventBinding): boolean {
+    const grants = this.grantsCache
+    /* v8 ignore next -- a missing cache fails closed */
+    if (grants === undefined) return false
+    return grants.some(grant => samePrincipal(grant.caller, { kind: 'app', appId: binding.subscriber })
+      && grant.capabilities.includes(eventCapability(binding.publisher, binding.type)))
   }
 
   /** End every subscription held by one application (called when it stops). */
@@ -1268,14 +1684,14 @@ export class ApplicationRuntime {
     if (record.activation === 'disabled') return reject('unavailable', `application ${target} is disabled`)
     if (record.status === 'stopping' || record.status === 'stopped' || record.status === 'stop-incomplete') return reject('stopping', `application ${target} is ${record.status}`)
     /* v8 ignore next -- failed/stopped statuses are rejected by the previous line */
-    if (record.status !== 'available') return reject('unavailable', `application ${target} is ${record.status}${record.failure === undefined ? '' : `: ${record.failure}`}`)
+    if (record.status !== 'available') return reject('unavailable', `application ${target} is ${record.status}${record.detail === undefined ? '' : `: ${record.detail}`}`)
     if (record.maintenance !== undefined) return reject('unavailable', `application ${target} is being restored from an import; retry when it finishes`)
     const declaration = record.declaration.ops[op]
     if (declaration === undefined) return reject('unknown-op', `application ${target} has no operation ${op}`)
     const argErrors = validateJsonSchemaValue(parameterSchemaSpecToJsonSchema(declaration.params), args, 'args')
     if (argErrors.length > 0) return reject('invalid-args', argErrors.join('; '))
 
-    const decision = await this.checkPermission(caller, target, op, declaration.exposure, declaration.effect ?? 'write', signal, record, callId)
+    const decision = await this.checkPermission(caller, target, op, declaration.exposure, declaration.effect ?? 'write', signal, record, callId, args)
     if (decision.verdict !== 'allow') {
       if (decision.verdict === 'deny') return reject('denied', `the call ${target}#${op} was refused`)
       if (decision.verdict === 'unavailable') return reject('confirmation-unavailable', `the call ${target}#${op} needs confirmation and no channel could deliver it`)
@@ -1310,6 +1726,7 @@ export class ApplicationRuntime {
     signal: AbortSignal | undefined,
     record: AppRecord,
     callId: string,
+    args: JsonValue,
   ): Promise<{ verdict: PermissionOutcome; waited: boolean }> {
     if (caller.kind === 'human') {
       // The human's own interface is their way in: no per-operation grant.
@@ -1334,7 +1751,7 @@ export class ApplicationRuntime {
     // parking in the browser table.
     const ask = async (reason: string): Promise<PermissionOutcome> => caller.kind === 'background'
       ? 'unavailable'
-      : await this.askApproval(caller, capability, reason, signal, record, callId)
+      : await this.askApproval(caller, capability, reason, signal, record, callId, args, effect)
     // A development Session bound to this application forces one confirmation
     // per write, regardless of the author/user default and earlier grants.
     if (caller.kind === 'ai' && caller.developmentApp === target && effect === 'write') {
@@ -1421,9 +1838,11 @@ export class ApplicationRuntime {
    * applications panel, and {@link checkCapability} reads that standing
    * approval.
    */
-  private async askApproval(caller: Caller, capability: string, reason: string, signal: AbortSignal | undefined, record: AppRecord | undefined, label: string): Promise<PermissionOutcome> {
+  private async askApproval(caller: Caller, capability: string, reason: string, signal: AbortSignal | undefined, record: AppRecord | undefined, label: string, args: JsonValue, effect: OperationEffect): Promise<PermissionOutcome> {
     if (this.confirm === undefined) return 'unavailable'
     const controller = new AbortController()
+    const preview = confirmationPreview(args, effect)
+    const timeout = setTimeout(() => controller.abort(), this.confirmationTimeoutMs)
     record?.pendingConfirmations.add(controller)
     const abort = (): void => { controller.abort() }
     // A request that arrives after the caller already cancelled is cancelled
@@ -1432,7 +1851,13 @@ export class ApplicationRuntime {
     if (signal?.aborted === true) abort()
     signal?.addEventListener('abort', abort, { once: true })
     try {
-      const answer = await this.confirm.ask({ caller, capability, reason, signal: controller.signal })
+      const aborted = new Promise<ConfirmationAnswer>((resolve) => {
+        controller.signal.addEventListener('abort', () => { resolve('unavailable') }, { once: true })
+      })
+      const answer = await Promise.race([
+        this.confirm.ask({ caller, capability, reason, signal: controller.signal, preview }),
+        aborted,
+      ])
       // A request that was cancelled has no valid answer: a late "allow" from
       // the channel must not revive a decision the user already ended.
       if (controller.signal.aborted) return 'unavailable'
@@ -1443,6 +1868,7 @@ export class ApplicationRuntime {
       this.onProblem(`confirmation for ${label} failed: ${String((error as Error)?.message ?? error)}`)
       return 'unavailable'
     } finally {
+      clearTimeout(timeout)
       signal?.removeEventListener('abort', abort)
       record?.pendingConfirmations.delete(controller)
     }
@@ -1502,6 +1928,45 @@ export class ApplicationRuntime {
   }
 
   /**
+   * The process entry bound to ONE application. Every use checks the declared
+   * `process` capability and the user's grant, runs the work (the platform
+   * subprocess service still owns the child), and appends one history record
+   * with the command label. The declaration is disclosure, never a whitelist.
+   */
+  private processAccess(appId: AppId, caller: Caller): ProcessAccess {
+    const door = this.capabilityAccess(appId, callerOfApp(appId))
+    return {
+      run: async <T>(descriptor: ProcessDescriptor, work: () => T | Promise<T>): Promise<T> => {
+        const command = typeof descriptor.command === 'string' ? descriptor.command.trim() : ''
+        if (command === '' || command.length > 200) throw new AppError('invalid-args', 'a process command must be a non-empty 1..200 character string')
+        const callId = this.idFactory()
+        const startedAt = this.now().toISOString()
+        try {
+          const value = await door.use('process', work)
+          this.record({ callId, caller, target: appId, op: 'process', command, startedAt, endedAt: this.now().toISOString(), status: 'success' })
+          return value
+        } catch (error) {
+          const raw = error instanceof AppError ? error.code : 'threw'
+          const code = raw.startsWith('platform.') || raw.startsWith('app.') ? raw : `app.${raw}`
+          this.record({
+            callId,
+            caller,
+            target: appId,
+            op: 'process',
+            command,
+            startedAt,
+            endedAt: this.now().toISOString(),
+            status: raw.startsWith('capability-') ? 'rejected' : 'failed',
+            code,
+            ...(error instanceof Error ? { message: error.message.slice(0, 500) } : {}),
+          })
+          throw error
+        }
+      },
+    }
+  }
+
+  /**
    * The durable table for the CURRENT queue slot: the cache a previous slot
    * published, or the store when there is none. Only a queue step (a serialized
    * read or a change) calls this, which is what makes the two agree — whatever
@@ -1547,6 +2012,7 @@ export class ApplicationRuntime {
    * @param grant - the grant to persist.
    */
   async grant(grant: CapabilityGrant): Promise<void> {
+    this.assertGrantable(grant)
     await this.changeGrants(async (grants) => [...grants, grant])
   }
 
@@ -1614,32 +2080,15 @@ export class ApplicationRuntime {
         }
         continue
       }
-      const separator = capability.indexOf('#')
-      if (separator <= 0 || separator === capability.length - 1) {
-        throw new AppError('grant-unknown', `the grant capability ${JSON.stringify(capability)} is not <application>#<operation> or capability:<name>`)
-      }
-      const target = capability.slice(0, separator)
-      const op = capability.slice(separator + 1)
-      const record = this.apps.get(target)
-      if (record === undefined) throw new AppError('grant-unknown-app', `the grant names the unregistered application ${target}`)
-      const declaration = record.declaration.ops[op]
-      if (declaration === undefined) throw new AppError('grant-unknown-op', `application ${target} has no operation ${op}`)
-      const exposure = caller.kind === 'ai'
-        ? declaration.exposure?.ai
-        : caller.kind === 'human'
-          ? 'open'
-          : declaration.exposure?.peers
-      if (exposure === undefined || exposure === 'closed') {
-        throw new AppError('grant-not-open', `operation ${target}#${op} is not open to ${caller.kind} callers, so a grant would never take effect`)
-      }
+      throw new AppError('grant-unknown', `the grant capability ${JSON.stringify(capability)} is not capability:<name> or event:<application>#<type>; operation grants were removed in favor of per-operation policy`)
     }
   }
 
   /**
    * Revoke capabilities from a caller. The selector is either one exact
-   * capability (`<appId>#<op>` or `capability:<name>`), an application id (all
-   * of that application's operations), or omitted (everything this caller was
-   * granted). Revoked capabilities are removed from the stored grant, so the
+   * capability (`capability:<name>` or `event:<app>#<type>`), an application id
+   * (that application's event subscriptions), or omitted (everything this
+   * caller was granted). Revoked capabilities are removed from the stored grant, so the
    * next call re-asks rather than reusing a stale approval.
    * @param caller - the caller whose grants are revoked.
    * @param selector - an exact capability, an application id, or nothing for all.
@@ -1648,27 +2097,13 @@ export class ApplicationRuntime {
     const matches = (capability: string): boolean => {
       if (selector === undefined) return true
       if (selector.includes('#') || selector.includes(':')) return capability === selector
-      return capability.startsWith(`${selector}#`) || capability.startsWith(`event:${selector}#`)
+      return capability.startsWith(`event:${selector}#`)
     }
     await this.changeGrants((grants) => grants
       .map((grant) => (samePrincipal(grant.caller, caller)
         ? { ...grant, capabilities: grant.capabilities.filter((entry) => !matches(entry)) }
         : grant))
       .filter((grant) => grant.capabilities.length > 0))
-    await this.dropUnapprovedEventBindings(caller)
-  }
-
-  /** End live subscriptions whose event grant no longer exists after a revoke. */
-  private async dropUnapprovedEventBindings(caller: Caller): Promise<void> {
-    const appId = applicationIdOf(caller)
-    if (appId === undefined) return
-    const grants = await this.readGrants()
-    for (const binding of [...this.eventBindings]) {
-      if (binding.subscriber !== appId) continue
-      const capability = eventCapability(binding.publisher, binding.type)
-      const approved = grants.some(grant => samePrincipal(grant.caller, { kind: 'app', appId }) && grant.capabilities.includes(capability))
-      if (!approved) this.eventBindings.delete(binding)
-    }
   }
 
   /**
@@ -1837,12 +2272,13 @@ export class ApplicationRuntime {
       caller,
       signal: controller.signal,
       capabilities: this.capabilityAccess(target, callerOfApp(target)),
-      secrets: this.secretAccess(target),
+      process: this.processAccess(target, caller),
       reportProgress: (message, data) => { this.progress(target, op, callId, message, data) },
       call: async (next, nextOp, nextArgs) => await this.call(callerOfApp(target, originSession), next, nextOp, nextArgs, controller.signal, undefined, [...chain, target]),
       notifyChanged: () => { this.notify(target) },
       publishEvent: (type, refs) => this.publishEvent(target, type, refs),
-      startTask: (descriptor, work) => this.startTask(record, { kind: 'operation', callId, caller }, descriptor, work),
+      startTask: (descriptor, work) => this.startTask(record, { kind: 'operation', callId, caller }, descriptor, work, [...chain, target]),
+      delegations: this.delegationAccess(target, callerOfApp(target)),
     }
     const work = (async (): Promise<CallOutcome> => {
       try {
@@ -1852,7 +2288,7 @@ export class ApplicationRuntime {
         return { callId, status: 'success', result: value }
       } catch (error) {
         if (isAbort(error)) return cancelledOutcome(callId)
-        return failedOutcome(callId, error instanceof AppError ? error.code : 'threw', String((error as Error)?.message ?? error))
+        return failedOutcome(callId, error instanceof AppError ? error.code : 'threw', String((error as Error)?.message ?? error), error instanceof AppError ? error.details : undefined)
       }
     })()
     try {
@@ -1937,7 +2373,7 @@ export class ApplicationRuntime {
    * @param work - the work; its return value is a bounded summary.
    * @returns the task handle.
    */
-  private startTask(record: AppRecord, origin: TaskOrigin, descriptor: TaskDescriptor, work: TaskWork): TaskHandle {
+  private startTask(record: AppRecord, origin: TaskOrigin, descriptor: TaskDescriptor, work: TaskWork, chain: readonly AppId[] = [record.declaration.id]): TaskHandle {
     assertTaskDescriptor(descriptor)
     if (record.activation === 'disabled' || (record.status !== 'starting' && record.status !== 'available')) {
       throw new AppError('unavailable', `application ${record.declaration.id} is ${record.status}; a task cannot start`)
@@ -1972,6 +2408,7 @@ export class ApplicationRuntime {
       ...(descriptor.externalId === undefined ? {} : { externalId: descriptor.externalId }),
       ...(descriptor.requestId === undefined ? {} : { requestId: descriptor.requestId }),
       origin,
+      chain,
       state: 'running',
       startedAt: now,
       updatedAt: now,
@@ -2005,9 +2442,9 @@ export class ApplicationRuntime {
       taskId: entry.taskId,
       signal: entry.controller.signal,
       capabilities: this.capabilityAccess(appId, { kind: 'background', appId }),
-      secrets: this.secretAccess(appId),
+      process: this.processAccess(appId, { kind: 'background', appId }),
       reportProgress: (message, data) => { this.taskProgress(entry, message, data) },
-      call: async (target, op, args) => await this.call({ kind: 'background', appId }, target, op, args, entry.controller.signal, undefined, [appId]),
+      call: async (target, op, args) => await this.call({ kind: 'background', appId }, target, op, args, entry.controller.signal, undefined, entry.chain),
       notifyChanged: () => { this.notify(appId) },
       publishEvent: (type, refs) => this.publishEvent(appId, type, refs),
     }
@@ -2029,7 +2466,7 @@ export class ApplicationRuntime {
     if (entry.state !== 'running') return
     entry.state = 'cancelling'
     entry.updatedAt = this.now().toISOString()
-    entry.controller.abort(new Error(`task ${entry.taskId} cancelled`))
+    entry.controller.abort(new DOMException(`task ${entry.taskId} cancelled`, 'AbortError'))
     this.emitTask(entry)
   }
 
@@ -2085,33 +2522,34 @@ export class ApplicationRuntime {
         // background role; the two identities share one grant (samePrincipal).
         { kind: 'background', appId: record.declaration.id },
       ),
-      secrets: this.secretAccess(record.declaration.id),
+      process: this.processAccess(record.declaration.id, { kind: 'background', appId: record.declaration.id }),
       call: async (target, op, args) => await this.call({ kind: 'background', appId: record.declaration.id }, target, op, args, record.abort.signal, undefined, [record.declaration.id]),
       notifyChanged: () => { this.notify(record.declaration.id) },
       publishEvent: (type, refs) => this.publishEvent(record.declaration.id, type, refs),
       subscribe: async (publisher, type, listener) => await this.subscribe(record.declaration.id, publisher, type, listener),
       startTask: (descriptor, work) => this.startTask(record, { kind: 'background' }, descriptor, work),
+      delegations: this.delegationAccess(record.declaration.id, { kind: 'background', appId: record.declaration.id }),
     }
   }
 
-  /** One application's declared secret fields; undeclared names are refused. */
-  private secretAccess(appId: AppId): AppSecretAccess {
-    const record = this.apps.get(appId)
-    const declared = new Set(record?.declaration.data?.secretFields ?? [])
-    const door = this.capabilityAccess(appId, { kind: 'background', appId })
-    const assertName = (name: string): void => {
-      if (!declared.has(name)) throw new AppError('secret-undeclared', `application ${appId} did not declare the secret ${name}`)
+  /**
+   * The delegation door bound to ONE application. The identity is captured
+   * here, from the runtime's own record; every use checks the application's
+   * declared `delegate` capability and the user's standing approval, exactly
+   * like the other platform capability entries.
+   */
+  private delegationAccess(appId: AppId, caller: Caller): AppDelegationAccess {
+    const door = this.capabilityAccess(appId, caller)
+    const port = async (): Promise<DelegationPort> => {
+      const current = this.delegations
+      if (current === undefined) throw new AppError('delegation-unavailable', 'this host has no delegation store')
+      return current
     }
     return {
-      names: async () => await door.use('storage', async () => (await this.secrets?.names(appId) ?? []).filter(name => declared.has(name))),
-      has: async (name) => { assertName(name); return await door.use('storage', async () => await this.secrets?.has(appId, name) ?? false) },
-      get: async (name) => { assertName(name); return await door.use('storage', async () => await this.secrets?.get(appId, name)) },
-      set: async (name, value) => {
-        assertName(name)
-        if (this.secrets === undefined) throw new AppError('secret-unavailable', 'this host has no secret store')
-        await door.use('storage', async () => await this.secrets!.set(appId, name, value))
-      },
-      delete: async (name) => { assertName(name); return await door.use('storage', async () => await this.secrets?.delete(appId, name) ?? false) },
+      create: async input => await door.use('delegate', async () => await (await port()).create(appId, input)),
+      list: async () => await door.use('delegate', async () => await (await port()).list(appId)),
+      read: async id => await door.use('delegate', async () => await (await port()).read(appId, id)),
+      cancel: async id => await door.use('delegate', async () => await (await port()).cancel(appId, id)),
     }
   }
 
@@ -2146,15 +2584,10 @@ function applicationIdOf(caller: Caller): AppId | undefined {
  * durable principal at all.
  */
 function samePrincipal(left: Caller, right: Caller): boolean {
+  // Only application/background identities can hold durable grants: platform
+  // capabilities and events reject every other caller kind.
   const leftApp = applicationIdOf(left)
-  const rightApp = applicationIdOf(right)
-  if (leftApp !== undefined || rightApp !== undefined) return leftApp !== undefined && leftApp === rightApp
-  // AI grants belong to one session. An anonymous AI call has no principal a
-  // durable approval could belong to, so it never matches a stored grant.
-  if (left.kind === 'ai' || right.kind === 'ai') {
-    return left.kind === 'ai' && right.kind === 'ai' && left.sessionId !== undefined && left.sessionId === right.sessionId
-  }
-  return left.kind === right.kind
+  return leftApp !== undefined && leftApp === applicationIdOf(right)
 }
 
 /** The failure a capability entry reports when the use of the capability was refused. */
@@ -2199,6 +2632,47 @@ async function waitWithin(items: readonly Promise<unknown>[], deadline: number):
 const ANONYMOUS_CALLER_LABELS: Record<'human' | 'ai', string> = {
   human: 'the user',
   ai: 'the assistant',
+}
+
+/** How long a human has to answer one confirmation before the call is refused. */
+export const CONFIRMATION_TIMEOUT_MS = 5 * 60 * 1000
+
+const PREVIEW_MAX_BYTES = 2048
+const PREVIEW_MAX_DEPTH = 3
+const PREVIEW_MAX_KEYS = 20
+const PREVIEW_MAX_ARRAY = 20
+const PREVIEW_MAX_STRING = 256
+const SENSITIVE_KEY = /token|secret|password|authorization|cookie|api[-_]?key/iu
+
+/** Bound and redact one argument tree for a human confirmation. */
+function previewValue(value: JsonValue, depth: number): JsonValue {
+  if (depth > PREVIEW_MAX_DEPTH) return '[depth]'
+  if (typeof value === 'string') return value.length > PREVIEW_MAX_STRING ? `${value.slice(0, PREVIEW_MAX_STRING)}…` : value
+  if (value === null || typeof value === 'number' || typeof value === 'boolean') return value
+  if (Array.isArray(value)) {
+    const head = value.slice(0, PREVIEW_MAX_ARRAY).map(entry => previewValue(entry, depth + 1))
+    return value.length > PREVIEW_MAX_ARRAY ? [...head, '[…]'] : head
+  }
+  const entries = Object.entries(value).slice(0, PREVIEW_MAX_KEYS)
+  const output: Record<string, JsonValue> = {}
+  for (const [key, entry] of entries) output[key] = SENSITIVE_KEY.test(key) ? '[redacted]' : previewValue(entry, depth + 1)
+  if (Object.keys(value).length > PREVIEW_MAX_KEYS) output['…'] = '[…]'
+  return output
+}
+
+/** One confirmation preview; text is bounded and never raw. */
+function confirmationPreview(args: JsonValue, effect: OperationEffect): ConfirmationPreview {
+  let text: string
+  try {
+    /* v8 ignore next -- JSON.stringify of a JsonValue always returns a string */
+    text = JSON.stringify(previewValue(args, 0)) ?? 'null'
+  } catch {
+    /* v8 ignore next -- a JsonValue cannot reach JSON.stringify's throw path */
+    text = '[unserializable]'
+  }
+  /* v8 ignore next -- a small preview (the common case) does not truncate */
+  if (text.length > PREVIEW_MAX_BYTES) text = `${text.slice(0, PREVIEW_MAX_BYTES)}…`
+  return { effect, args: text }
 }
 
 /** A short label for confirmation text. */
@@ -2277,4 +2751,33 @@ function boundedJson(
  */
 function isAbort(error: unknown): boolean {
   return error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')
+}
+
+/** One health hook's settlement: its raw result, or the platform diagnostic for a throw. */
+interface HealthInvocation {
+  readonly result?: unknown
+  readonly failure?: string
+}
+
+/** The longest diagnostic detail copied from an application's thrown health hook. */
+const MAX_HEALTH_DETAIL_CHARS = 300
+
+/** Render one thrown health-hook error as bounded diagnostic text (never a stack). */
+function healthDetailText(error: unknown): string {
+  const message = String((error as Error)?.message ?? error)
+  return message.length > MAX_HEALTH_DETAIL_CHARS ? `${message.slice(0, MAX_HEALTH_DETAIL_CHARS)}…` : message
+}
+
+/**
+ * Validate one health hook's result. Anything but the declared shape is an
+ * invalid result — the platform never guesses a status.
+ * @param value - the raw value the hook returned.
+ * @returns the validated result, or undefined when the shape is invalid.
+ */
+function validateHealthResult(value: unknown): AppHealthCheckResult | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const record = value as { readonly status?: unknown; readonly reason?: unknown }
+  if (record.status !== 'ok' && record.status !== 'degraded' && record.status !== 'unhealthy') return undefined
+  if (record.reason !== undefined && (typeof record.reason !== 'string' || record.reason.trim() === '')) return undefined
+  return { status: record.status, ...(record.reason === undefined ? {} : { reason: record.reason }) }
 }

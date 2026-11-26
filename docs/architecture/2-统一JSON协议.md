@@ -1,5 +1,7 @@
 # 统一 JSON 协议
 
+> 类型：目标设计。当前实现与差异见 [11 §5](11-实现与验收.md#5-当前未完成与边界)。
+
 [总体设计](1-总体设计.md) · [用词约定](1-总体设计.md#用词约定) · 本篇是所有设计共用的数据协议。以下为目标接口，不是当前源码签名。
 
 ## 统一什么
@@ -108,7 +110,11 @@ JSON 统一数据语义，不规定组件布局，也不要求同进程调用反
 }
 ```
 
-`status` 说明执行事实，`error.code` 说明原因：`rejected` 表示操作没有执行，调用方可以按“没有业务副作用”处理，但仍按具体错误码决定提示或修正输入；`failed` 表示操作已经执行或部分执行，可能已有副作用，不保证回滚；`cancelled` 表示调用被停止，取消是请求，不撤销已发生的业务效果；`unknown` 专门表示无法可靠确定是否执行或最终结果，不等于失败或未执行。调用方以 `status` 判断执行事实，不能仅凭错误码或缺少 `details` 推断 `failed` 已回滚或 `unknown` 未执行；需要说明已知部分影响或相关对象时，由稳定错误码和 `error.details` 如实表达。字段位置使用相对于 `input` 的 JSON Pointer。平台可以在内部诊断记录中保存执行阶段，但不把它作为公共 `Outcome` 字段。
+`status` 说明执行事实，`error.code` 说明原因：`rejected` 表示操作没有执行，调用方可以按“没有业务副作用”处理，但仍按具体错误码决定提示或修正输入；`failed` 表示操作已经执行或部分执行，可能已有副作用，不保证回滚。
+
+`cancelled` 表示调用被停止，取消是请求，不撤销已发生的业务效果；`unknown` 专门表示无法可靠确定是否执行或最终结果，不等于失败或未执行。
+
+调用方以 `status` 判断执行事实，不能仅凭错误码或缺少 `details` 推断 `failed` 已回滚或 `unknown` 未执行；需要说明已知部分影响或相关对象时，由稳定错误码和 `error.details` 如实表达。字段位置使用相对于 `input` 的 JSON Pointer。平台可以在内部诊断记录中保存执行阶段，但不把它作为公共 `Outcome` 字段。
 
 ```json
 {
@@ -120,7 +126,13 @@ JSON 统一数据语义，不规定组件布局，也不要求同进程调用反
 }
 ```
 
-平台稳定错误至少覆盖：`unknown-app`、`unknown-operation`、`unavailable`、`starting`、`stopping`、`updating`、`call-chain-limit`、`denied`、`confirmation-unavailable`、`invalid-input`、`invalid-result`、`execution-failed`、`cancelled`、`connection-lost`、`page-unavailable`、`stale-snapshot`、`action-not-allowed`、`draft-not-shared`、`draft-scope`、`draft-conflict`、`model-limit-exceeded`（均加 `platform.` 前缀）。错误码说明原因，`status` 说明是否执行；平台按实际阶段选择状态，例如 `invalid-input` 通常是 `rejected`，`execution-failed` 是 `failed`，`connection-lost` 无法确认时是 `unknown`。应用声明需要调用方处理的业务错误与详情 Schema，不泄露内部堆栈或凭据。
+平台稳定错误至少覆盖以下类别（均加 `platform.` 前缀）：目标与操作 `unknown-app`、`unknown-operation`、`unavailable`、`starting`、`stopping`、`updating`；调用链 `call-chain-limit`；权限与确认 `denied`、`confirmation-unavailable`。
+
+输入输出 `invalid-input`、`invalid-result`、`execution-failed`、`cancelled`、`connection-lost`；页面与草稿 `page-unavailable`、`stale-snapshot`、`action-not-allowed`、`draft-not-shared`、`draft-scope`、`draft-conflict`；模型 `model-limit-exceeded`。
+
+错误码说明原因，`status` 说明是否执行；平台按实际阶段选择状态，例如 `invalid-input` 通常是 `rejected`，`execution-failed` 是 `failed`，`connection-lost` 无法确认时是 `unknown`。
+
+应用声明需要调用方处理的业务错误与详情 Schema，不泄露内部堆栈或凭据。
 
 应用可用性由平台提供 `activation`、`runtime`，以及可选的 `health` 和 `reason`：
 
@@ -131,7 +143,16 @@ JSON 统一数据语义，不规定组件布局，也不要求同进程调用反
 | `health` | `ready` 时可取 `ok/degraded`；`degraded` 表示可选条件缺失，仍接受调用，具体操作由应用在执行前检查前置条件并返回业务错误 |
 | `reason` | 可选 `{ code, message }`，说明 `starting/stopping/stopped` 的原因；至少覆盖 `platform.updating`、`platform.start-failed`、`platform.health-failed`、`platform.unavailable`、`platform.stop-incomplete` |
 
-应用登记记录存在但 `activation=disabled` 时不可调用；只有 `activation=enabled` 且 `runtime=ready` 接受调用，`health=degraded` 不阻止调用。更新期间为 `enabled + starting` + `reason=platform.updating`，拒绝新调用并返回 `platform.updating`；平台无法加载或运行（运行时、协议、依赖不兼容）为 `enabled + stopped` + `reason=platform.unavailable`，不自动重试；启动失败为 `disabled + stopped` + `reason=platform.start-failed`，保留原因；停止预算耗尽或清理失败为 `disabled + stopping` + `reason=platform.stop-incomplete`，不伪造成功取消，用户可重试停止。由部署组合登记的应用默认 `enabled + starting`，准备完成 `enabled + ready`；用户停用后 `disabled + stopping`，停止完成 `disabled + stopped`。独立来源应用（未来）默认 `disabled + stopped`，用户启用后才启动。调用方只依赖 `activation`/`runtime` 和 `reason`，不依赖内部进程细节；页面、会话和其他应用看到同一状态，错误详情按访问权限裁剪。
+应用登记记录存在但 `activation=disabled` 时不可调用；只有 `activation=enabled` 且 `runtime=ready` 接受调用，`health=degraded` 不阻止调用。状态按场景取值：
+
+- 更新期间：`enabled + starting` + `reason=platform.updating`，拒绝新调用并返回 `platform.updating`；
+- 平台无法加载或运行（运行时、协议、依赖不兼容）：`enabled + stopped` + `reason=platform.unavailable`，不自动重试；
+- 启动失败：`disabled + stopped` + `reason=platform.start-failed`，保留原因；
+- 停止预算耗尽或清理失败：`disabled + stopping` + `reason=platform.stop-incomplete`，不伪造成功取消，用户可重试停止。
+
+由部署组合登记的应用默认 `enabled + starting`，准备完成 `enabled + ready`；用户停用后 `disabled + stopping`，停止完成 `disabled + stopped`。独立来源应用（未来）默认 `disabled + stopped`，用户启用后才启动。
+
+调用方只依赖 `activation`/`runtime` 和 `reason`，不依赖内部进程细节；页面、会话和其他应用看到同一状态，错误详情按访问权限裁剪。
 
 应用可声明只读的业务健康检查，返回 `ok/degraded/unhealthy` 与必要原因；平台把 `ok`/`degraded` 映射为 `ready + health=ok/degraded`，把 `unhealthy` 映射为 `stopped + reason=platform.health-failed`。检查结果供平台判断状态，不能由应用直接伪造平台状态。健康检查必须轻量并有时限，不执行迁移、网络扫描、模型调用或业务写入，也不自动修复或触发会话。
 
@@ -172,8 +193,8 @@ JSON 统一数据语义，不规定组件布局，也不要求同进程调用反
 | 字段 | 规则 |
 |---|---|
 | `operation`、`description` | 应用内唯一名称、清楚的业务用途 |
-| `effect` | `read` 或 `write`；新声明必填。读取不得修改业务状态或产生外部副作用 |
-| `exposure` | 作者按调用方类别声明的默认值：`{ ai?, peers? }`，每项为 `closed/open/confirm`（不开放、默认无需确认、默认需要确认），省略的类别为 `closed`。`ai` 指普通、专用和开发会话，`peers` 指其他应用及其后台调用。用户对每个操作只维护一条覆盖策略，规则见[权限与调用](3-权限与调用.md) |
+| `effect` | `read` 或 `write`；generation 2 的新声明必填，generation 1 缺省按 `write`。读取不得修改业务状态或产生外部副作用 |
+| `exposure` | 作者按调用方类别声明的默认值：`{ ai?, peers? }`，每项为 `closed/open/confirm`（不开放、默认无需确认、默认需要确认），省略的类别为 `closed`。`ai` 指普通、应用区和开发会话，`peers` 指其他应用及其后台调用。用户对每个操作只维护一条覆盖策略，规则见[权限与调用](3-权限与调用.md) |
 | `inputSchema`、`resultSchema` | 分别校验 `input` 和成功的 `result` |
 | `errors` | 可选，按业务错误码声明说明与 `detailsSchema` |
 
@@ -218,7 +239,9 @@ JSON 统一数据语义，不规定组件布局，也不要求同进程调用反
 
 示例中的 `ObjectRef` 由平台公共定义内联生成，开发者不手抄。第一版声明源使用平台 `ParameterSchemaSpec`/`ValueSchemaSpec`，导出为同一份声明生成的标准 JSON Schema；支持对象、数组、标量、`required`、`additionalProperties`、`enum/const`、`oneOf`。不支持长度、格式、数值范围、`anyOf`、`$defs/$ref`；这些业务约束由应用在 `execute` 中校验，声明与导出都不承诺它们。各 Schema 独立可解析，不依赖运行时网络引用。
 
-应用声明还可以声明 `pages` 和 `objectTypes`。`pages` 只描述本应用页面，是当前应用页面与应用专用／开发会话之间的本地契约，不是跨应用页面目录。每项至少包含稳定的 `view` 名称和可读的 `description`，可选声明该页面的 `contextSchema` 和支持的固定动作列表 `actions`。`contextSchema` 只描述应用特有的筛选、可见范围等页面状态；`actions` 只能列出 `navigate`、`set-filters`、`select`，不注册自定义动作或动作级业务 Schema。调用方可以省略 `view`，由应用选择默认页面；没有页面时不能通过当前应用页面入口打开。
+应用声明可以声明 `objectTypes`。`pages`/`pageActions` 声明在 v1 延期；当前应用页面由视图自身路由，页面服务仍使用固定动作，不按声明校验 view/action。
+
+对象类型声明包含描述和只读解析操作；调用方可以省略 `view`，由应用选择默认页面；没有页面时不能通过当前应用页面入口打开。
 
 `objectTypes` 为可跨应用传递的对象类型登记解析操作：
 
@@ -239,7 +262,11 @@ JSON 统一数据语义，不规定组件布局，也不要求同进程调用反
 |---|---|
 | `protocolVersion` | 平台公共请求、结果与引用等统一格式，初始为 `1`；公共协议发生不兼容变化时增加 |
 
-跨应用 `calls` 只声明目标应用和操作；事件只声明来源应用和类型。调用时校验目标应用当前声明、开放策略、输入和业务规则；操作不存在返回 `platform.unknown-operation`，输入不匹配返回 `platform.invalid-input`，含义变化由构建、声明校验和测试保证。页面和对象使用当前声明，视图或操作不存在时返回明确错误。应用更新不会替依赖方自动升级声明；依赖方须显式更新并重新校验。安装与更新同时校验平台运行时、协议、依赖和完整声明；不满足时应用不可启用，不自动降级、改写声明或建立兼容层。
+跨应用 `calls` 声明目标应用和操作；当前实现接受 `AppId | { app, ops }`，字符串形式表示目标全部已开放操作；事件只声明来源应用和类型。
+
+调用时校验目标应用当前声明、开放策略、输入和业务规则；操作不存在返回 `platform.unknown-operation`，输入不匹配返回 `platform.invalid-input`，含义变化由构建、声明校验和测试保证。页面和对象使用当前声明，视图或操作不存在时返回明确错误。
+
+应用更新不会替依赖方自动升级声明；依赖方须显式更新并重新校验。安装与更新同时校验平台运行时、协议、依赖和完整声明；不满足时应用不可启用，不自动降级、改写声明或建立兼容层。
 
 平台升级前后按同一规则重新校验已注册应用的运行时、`protocolVersion`、依赖和声明。平台公共协议发生不兼容变化时提升 `protocolVersion`；不兼容应用保持 `stopped` + `reason=platform.unavailable`，不强行启动。平台升级不改变应用数据、应用设置、用户权限、凭据或订阅，也不提供多版本平台并行或长期兼容窗口。
 

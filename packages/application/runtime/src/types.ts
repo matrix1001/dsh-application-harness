@@ -64,27 +64,6 @@ export interface EventSubscription {
   readonly type: string
 }
 
-/** The fixed page actions a page can declare. */
-export type PageActionName = 'navigate' | 'set-filters' | 'select'
-
-/** One page this application exposes to its owner-session page service. */
-export interface PageDeclaration {
-  /** What the page is for. */
-  readonly description: string
-  /** Fixed actions this page supports; omitted means all three. */
-  readonly actions?: readonly PageActionName[]
-}
-
-/** One process command an application declares for display and review. */
-export interface ProcessCommandDeclaration {
-  /** Stable command name shown in the management UI. */
-  readonly name: string
-  /** What the command is for. */
-  readonly description: string
-  /** Optional executable/argument display list; the platform does not enforce it. */
-  readonly argv?: readonly string[]
-}
-
 /** One object type a cross-application reference can resolve. */
 export interface ObjectTypeDeclaration {
   /** What the object type is, in words the user can understand. */
@@ -99,6 +78,16 @@ export interface ObjectResolution {
   readonly title: string
   readonly summary?: string
 }
+
+/**
+ * The outcome of one reference resolution: the display facts, or the stable
+ * reason the reference could not be read. A business failure is a VALUE, never
+ * an exception, because the transport folds every thrown error into one
+ * infrastructure code and the reason would stop meaning anything.
+ */
+export type ObjectResolutionResult =
+  | { readonly ok: true; readonly value: ObjectResolution }
+  | { readonly ok: false; readonly error: OutcomeError }
 
 /** The capability name of one event subscription. */
 export function eventCapability(target: AppId, type: string): string {
@@ -174,6 +163,43 @@ export interface PolicyStorePort {
   /** Replace the whole table; a failed save must reject. */
   save(entries: readonly OperationPolicyEntry[]): Promise<void>
 }
+
+/**
+ * The verdict of one application-declared, platform-run health check. Unlike
+ * {@link AppHealth} it is the application's own report, not the platform's
+ * projection: `unhealthy` asks the platform to stop the instance.
+ */
+export type AppHealthCheckStatus = 'ok' | 'degraded' | 'unhealthy'
+
+/**
+ * What one application's health hook reports. `reason` is a short human-readable
+ * sentence for the management UI, shown as the public `detail` text (the
+ * platform's stable codes stay in `reason`).
+ */
+export interface AppHealthCheckResult {
+  readonly status: AppHealthCheckStatus
+  /** Why the application is degraded/unhealthy, in the application's own words. */
+  readonly reason?: string
+}
+
+/**
+ * The context one health check receives. The hook is platform-owned and
+ * read-only: it gets no caller identity and no capabilities — only the signal
+ * the platform aborts when the check outlives its timeout or the application
+ * stops.
+ */
+export interface AppHealthCheckContext {
+  /** Aborted on the platform timeout or when the application stops. */
+  readonly signal: AbortSignal
+}
+
+/**
+ * One application's platform-only health check (see
+ * {@link AppDeclaration.health}). It is not an operation: it is never exposed
+ * to the AI or to peer applications, it needs no grant, and the platform runs
+ * it after start, after an import/recovery and when the user asks.
+ */
+export type AppHealthCheck = (ctx: AppHealthCheckContext) => AppHealthCheckResult | Promise<AppHealthCheckResult>
 
 /** Lifecycle state of one application, distinct from the plugin's own state. */
 export type AppStatus =
@@ -256,26 +282,23 @@ export interface OutcomeError {
  *
  */
 export type CallOutcome =
-  | { readonly callId: string; readonly status: 'success'; readonly result?: JsonValue }
+  | { readonly callId: string; readonly status: 'success'; readonly result: JsonValue }
   | {
     readonly callId: string
     readonly status: 'rejected'
-    readonly error?: OutcomeError
+    readonly error: OutcomeError
   }
   | {
     readonly callId: string
     readonly status: 'failed'
-    readonly error?: OutcomeError
+    readonly error: OutcomeError
   }
-  | { readonly callId: string; readonly status: 'cancelled'; readonly error?: OutcomeError }
+  | { readonly callId: string; readonly status: 'cancelled'; readonly error: OutcomeError }
   | {
     readonly callId: string
     readonly status: 'unknown'
-    readonly error?: OutcomeError
+    readonly error: OutcomeError
   }
-
-/** The verdict of one permission check. */
-export type PermissionVerdict = 'allow' | 'deny' | 'confirm'
 
 /** The application that changed; the subscription selects data or lifecycle changes. */
 export interface AppChangeNotice {
@@ -380,8 +403,8 @@ export interface TaskContext {
   readonly signal: AbortSignal
   /** The application's capability door, in its background role. */
   readonly capabilities: CapabilityAccess
-  /** This application's declared secrets, kept outside its business data. */
-  readonly secrets: AppSecretAccess
+  /** The application's process entry, gated by `process` and the user's grant. */
+  readonly process: ProcessAccess
   /** Report the latest progress; delivery never changes the task's outcome. */
   reportProgress(message: string, data?: JsonValue): void
   /** Call another application as this one, under this task's cancellation. */
@@ -404,20 +427,6 @@ export type TaskCancelResult = 'accepted' | 'settled' | 'not-found'
 
 /** The work a task runs; its return value becomes the bounded result summary. */
 export type TaskWork = (ctx: TaskContext) => JsonValue | void | Promise<JsonValue | void>
-
-/** One application's own secret fields, gated by its data declaration. */
-export interface AppSecretAccess {
-  /** Names currently set for this application (never values). */
-  names(): Promise<readonly string[]>
-  /** Whether one declared secret is set. */
-  has(name: string): Promise<boolean>
-  /** Read one declared secret value; host-only, never sent to the browser. */
-  get(name: string): Promise<string | undefined>
-  /** Set one declared secret. */
-  set(name: string, value: string): Promise<void>
-  /** Delete one declared secret. */
-  delete(name: string): Promise<boolean>
-}
 
 /**
  * What an executing operation may do. Bound to the one call it belongs to —
@@ -445,8 +454,8 @@ export interface OperationContext {
    * of a platform capability is still the application's to be authorized.
    */
   readonly capabilities: CapabilityAccess
-  /** This application's declared secrets, kept outside its business data. */
-  readonly secrets: AppSecretAccess
+  /** The application's process entry, gated by `process` and the user's grant. */
+  readonly process: ProcessAccess
   /**
    * Report progress for this call. Delivery is best-effort: a reporting
    * failure never changes what the operation achieves.
@@ -472,6 +481,104 @@ export interface OperationContext {
   startTask(descriptor: TaskDescriptor, work: TaskWork): TaskHandle
   /** Publish one declared, refs-only change notice; delivery is best-effort. */
   publishEvent(type: string, refs?: readonly ObjectRef[]): AppEvent
+  /** This application's own delegation records, gated by the `delegate` capability. */
+  readonly delegations: AppDelegationAccess
+}
+
+/**
+ * One delegation's state. `pending` waits for the human to choose a target and
+ * send; `active` is running in one application-area Session; `needs-person`
+ * means the Session reported a blocker and a human must answer; `ended` is
+ * final and carries the {@link DelegationOutcome} that ended it.
+ */
+export type DelegationStatus = 'pending' | 'active' | 'needs-person' | 'ended'
+
+/**
+ * Why a delegation ended. `completed`/`failed` come from the execution
+ * Session's report; the platform records `cancelled` when a person or the
+ * application ended it, `interrupted` when the host restarted, and
+ * `unavailable` when the bound Session went away.
+ */
+export type DelegationOutcome = 'completed' | 'failed' | 'cancelled' | 'interrupted' | 'unavailable'
+
+/**
+ * The execution Session's structured report, the only content an application
+ * receives from a delegation. It is untrusted model output: callers validate
+ * it as data and never execute it as instructions. `completed` means the
+ * Session believes the work is done, not that the application's business
+ * succeeded.
+ */
+export interface DelegationReport {
+  /** What the Session reports. `blocked` asks the human a concrete question. */
+  readonly outcome: 'completed' | 'blocked' | 'failed'
+  /** Readable summary of what happened. */
+  readonly summary: string
+  /** The concrete question a `blocked` report needs answered; forbidden otherwise. */
+  readonly question?: string
+  /** Application-shaped payload (references, links, bounded data); never conversation text. */
+  readonly details?: JsonValue
+}
+
+/**
+ * One delegation as its OWNING application may read it. The application gets
+ * the delegation id, state and report envelope; it never receives a Session
+ * handle, transcript or tool/preset control — opening the execution is the
+ * platform's client action, not an application capability.
+ */
+export interface AppDelegation {
+  /** Platform-assigned identity; the application queries and cancels by this id. */
+  readonly id: string
+  /** The owning application (always the reader's own id). */
+  readonly appId: AppId
+  /** Short display title the application prepared. */
+  readonly title: string
+  /** The application's instructions, snapshotted when the delegation was created. */
+  readonly instructions: string
+  readonly status: DelegationStatus
+  /** The final outcome; present exactly when `status` is `ended`. */
+  readonly outcome?: DelegationOutcome
+  /** The newest report the execution Session wrote, when it wrote one. */
+  readonly latestReport?: DelegationReport
+  readonly createdAt: string
+  readonly updatedAt: string
+}
+
+/** What an application provides when it prepares one delegation. */
+export interface DelegationCreateInput {
+  /** Short display title; the human sees it before sending. */
+  readonly title: string
+  /** The instructions the execution Session receives; the human cannot rewrite them. */
+  readonly instructions: string
+}
+
+/**
+ * The application-facing delegation port. Every method is bound to one
+ * application by the runtime (the identity is never read from arguments), and
+ * every use is gated by the application's declared `delegate` capability and
+ * the user's standing approval of it. An application can only see and cancel
+ * its own delegations; it can never send one (only the human sends).
+ */
+export interface AppDelegationAccess {
+  /** Prepare a `pending` delegation; nothing is sent. */
+  create(input: DelegationCreateInput): Promise<AppDelegation>
+  /** The application's own delegations, newest first. */
+  list(): Promise<readonly AppDelegation[]>
+  /** One of the application's own delegations, or undefined when unknown. */
+  read(id: string): Promise<AppDelegation | undefined>
+  /** End one of the application's own pending/active delegations as `cancelled`. */
+  cancel(id: string): Promise<AppDelegation>
+}
+
+/**
+ * The host seam behind {@link AppDelegationAccess}. The runtime binds the
+ * application id and checks the capability; the host owns durability, the
+ * human's send action, the bound Session and the execution reports.
+ */
+export interface DelegationPort {
+  create(appId: AppId, input: DelegationCreateInput): Promise<AppDelegation>
+  list(appId: AppId): Promise<readonly AppDelegation[]>
+  read(appId: AppId, id: string): Promise<AppDelegation | undefined>
+  cancel(appId: AppId, id: string): Promise<AppDelegation>
 }
 
 /** The context handed to an application's start/stop hooks. */
@@ -485,8 +592,8 @@ export interface AppContext {
    * declaration and grants — the same ones its operations use.
    */
   readonly capabilities: CapabilityAccess
-  /** This application's declared secrets, kept outside its business data. */
-  readonly secrets: AppSecretAccess
+  /** The application's process entry, gated by `process` and the user's grant. */
+  readonly process: ProcessAccess
   /** Call another application as this one (same rules as {@link OperationContext.call}). */
   call(target: AppId, op: OpName, args: JsonValue): Promise<CallOutcome>
   notifyChanged(): void
@@ -500,6 +607,8 @@ export interface AppContext {
   subscribe(publisher: AppId, type: string, listener: AppEventListener): Promise<() => void>
   /** Start application-owned background work; see {@link OperationContext.startTask}. */
   startTask(descriptor: TaskDescriptor, work: TaskWork): TaskHandle
+  /** This application's own delegation records, gated by the `delegate` capability. */
+  readonly delegations: AppDelegationAccess
 }
 
 /** Whether one operation only reads its application's state or can change it. */
@@ -541,14 +650,6 @@ export interface AppDataDeclaration {
   readonly path?: string
   /** Durable schema version, owned by the application. */
   readonly schemaVersion?: number
-  /** Whether the host's whole-data backup includes this data (default include). */
-  readonly backup?: 'include' | 'exclude'
-  /** Operation that serialises this application's data for export. */
-  readonly exportOp?: OpName
-  /** Operation that imports data previously produced by `exportOp`. */
-  readonly importOp?: OpName
-  /** Names of secret fields managed by the host secret store, never by app data. */
-  readonly secretFields?: readonly string[]
 }
 
 /** One peer application this declaration may call. */
@@ -559,6 +660,32 @@ export type AppCall =
     /** The exact operations this application may call on the target. */
     readonly ops: readonly OpName[]
   }
+
+/** One executable an application declares it runs, for display and review. */
+export interface ProcessDeclaration {
+  /** The executable name or path (e.g. `git`); the platform does not enforce it as a whitelist. */
+  readonly executable: string
+  /** The command names this application may run, shown to the user for review. */
+  readonly commands: readonly string[]
+  /** What the commands are used for, in words the user can judge. */
+  readonly purpose: string
+}
+
+/** One recorded process use: the command the application reported running. */
+export interface ProcessDescriptor {
+  /** The command label recorded in history (e.g. `git status`). */
+  readonly command: string
+}
+
+/**
+ * The application-facing process entry. Every use is checked against the
+ * application's declared `process` capability and the user's standing approval;
+ * the actual child process still runs through the platform subprocess service.
+ */
+export interface ProcessAccess {
+  /** Run one process use under the capability door and record it in history. */
+  run<T>(descriptor: ProcessDescriptor, work: () => T | Promise<T>): Promise<T>
+}
 
 /**
  * One application, declared once: identity, operations, what it needs from
@@ -582,10 +709,6 @@ export interface AppDeclaration {
   readonly subscriptions?: readonly EventSubscription[]
   /** Object types this application exposes for cross-application references. */
   readonly objectTypes?: Readonly<Record<string, ObjectTypeDeclaration>>
-  /** Process commands this application declares, for display only. */
-  readonly process?: { readonly commands: readonly ProcessCommandDeclaration[] }
-  /** Pages this application exposes; view keys are stable and local to it. */
-  readonly pages?: Readonly<Record<string, PageDeclaration>>
   /** Declaration generation; new applications use 2 and must declare `data`. */
   readonly generation?: number
   /** Durable data description; required for generation 2 applications. */
@@ -601,6 +724,12 @@ export interface AppDeclaration {
    * need, it is not a sandbox and never a substitute for the check.
    */
   readonly capabilities?: readonly string[]
+  /**
+   * Optional: the executables and commands this application declares for the
+   * human's review. Requires the `process` capability; the declaration is
+   * never an execution whitelist.
+   */
+  readonly process?: readonly ProcessDeclaration[]
   /** Optional: run when the application becomes available. */
   readonly start?: (ctx: AppContext) => void | Promise<void>
   /** Optional: run when the application stops, before its tracked work is awaited. */
@@ -622,6 +751,24 @@ export interface AppDeclaration {
   readonly pause?: (ctx: AppContext) => void | Promise<void>
   /** Optional: re-arm the work {@link pause} stopped, after the import reload. */
   readonly resume?: (ctx: AppContext) => void | Promise<void>
+  /**
+   * Optional: the platform-run, read-only health check (see
+   * {@link AppHealthCheck}). It is NOT an operation: it is absent from the ops
+   * directory, never exposed to the AI or peers, and never authorized by a
+   * grant. The platform runs it after start, after an import/maintenance
+   * recovery, and when the user asks; it never polls and never runs it per
+   * call. It must only read the application's state and configured
+   * dependencies — no migrations, network scans, model calls or writes — and
+   * the platform bounds it with a finite timeout.
+   *
+   * The platform maps the result: `ok` → ready/health ok; `degraded` → ready +
+   * health degraded (the application is still callable); `unhealthy` → the
+   * instance is stopped and the public state is stopped + health degraded +
+   * reason `platform.health-failed`. A timeout, a throw or an invalid result
+   * does not stop the application: it is reported as degraded, and the
+   * platform's diagnostic text lands in the public `detail` field.
+   */
+  readonly health?: AppHealthCheck
 }
 
 /**
@@ -694,11 +841,4 @@ export interface CapabilityAccess {
    * @returns the work's value.
    */
   use<T>(name: string, work: () => T | Promise<T>): Promise<T>
-}
-
-/** The permission question the runtime answers for one call. */
-export interface PermissionRequest {
-  readonly caller: Caller
-  readonly target: AppId
-  readonly op: OpName
 }

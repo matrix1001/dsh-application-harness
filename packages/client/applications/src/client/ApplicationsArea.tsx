@@ -1,9 +1,9 @@
 /**
  * The application area: the whole center column while the applications panel
- * is selected. Three pieces, and nothing else — the navigation (which
- * application), the header (which application is this, and the actions that
- * belong to the work), the business surface (the application's own page), and
- * the management dialog when it is open.
+ * is selected. Two pieces, and nothing else — the header (the way back to the
+ * conversation, the application tabs and the all-applications menu, and the
+ * actions that belong to the work) and the business surface (the
+ * application's own page); the management page sits above when it is open.
  *
  * The area renders; the shell (`shell.ts`) owns the wire and the state
  * machine. Everything here arrives through the injected `hooks` compartment
@@ -11,64 +11,69 @@
  * be exercised with plain observables and no Remote.
  * @module @matrix1001/dsh-application-harness-client-applications/client/ApplicationsArea
  */
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Button, Modal, useModalLayer } from '@deepseek-ai/dsh-client-ui-primitives'
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
+import { Button, Modal } from '@matrix1001/dsh-application-harness-client-chrome'
 import type {
   HostObservable, InjectFace, PropsLocale, PropsRenderSlots, PropsRuntime,
 } from '@deepseek-ai/dsh-client-ui-slots'
-import type { Caller, ConfirmationDecision, OperationPolicy } from '@matrix1001/dsh-application-harness-host-bridge/client'
+import type { Caller, ConfirmationDecision, DelegationInfo, OperationPolicy } from '@matrix1001/dsh-application-harness-host-bridge/client'
 import type {
   ApplicationSettingsProps, ApplicationView, ApplicationViewProps, ManageRequest, PageContext,
 } from './contract.ts'
+import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
+// Type-only: loads the platform `GlobalStandardProps.useSessionStatus` declaration
+// the plugin's `uiSession.sessionStatus` inject supplies at runtime. Erased at build time.
+import type {} from '@deepseek-ai/dsh-client-ui-session-status/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { AppNavigation as AppNavigationService } from './navigation.ts'
 import type { ApplicationsState } from './shell.ts'
 import type { ApplicationPreferences } from './preferences.ts'
-import type { EntryRequest } from './entry.ts'
+import type { DockRequest, DockTabKind } from './dock.ts'
+import { ApplicationsDockBody, ApplicationsDockHeader, DockContextBar, type DockTabView } from './ApplicationsDock.tsx'
 import type { ViewportReport } from './viewport.ts'
 import { AppHeader } from './AppHeader.tsx'
-import { AppNavigation } from './AppNavigation.tsx'
-import { displayName, onboardingPending, orderApplications } from './model.ts'
+import type { AreaNotice } from './notices.ts'
+import {
+  displayName, dockNeedsAnswer, dockStatusOf as dockStatusFor, onboardingPending, splitPinnedTabs, statusOf,
+} from './model.ts'
 import { AppSurface } from './AppSurface.tsx'
+import { describeError } from './shell.ts'
+import type { DelegationSendResult } from './delegation.ts'
 import { DevelopmentDialog } from './DevelopmentDialog.tsx'
-import { ManagementDialog, defaultTab } from './ManagementDialog.tsx'
+import { ManagementPage, defaultTab } from './ManagementPage.tsx'
+import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { ManageScrollMemory } from './manage.ts'
+import type { NetworkProxySection } from './NetworkSettings.tsx'
 import type { ConversationSession } from './conversation-session.ts'
 import { useNarrow } from './narrow.ts'
 import css from './ApplicationsArea.module.css'
 
 
-/** One floating shell status (never a row in the page). */
-interface ShellNotice {
-  readonly id: string
-  readonly tone: 'error' | 'warning' | 'info'
-  readonly text: string
-  readonly actions?: readonly {
-    readonly label: string
-    readonly onClick: () => void
-    readonly anchor?: Readonly<Record<string, string>> | undefined
-  }[]
-  readonly anchor?: Readonly<Record<string, string>> | undefined
-}
 
 /** The area's injected business face; its `hooks` compartment becomes the `use<Name>` seats. */
 export interface ApplicationsAreaInjected {
-  /** The shell's live state, the view registry, the layout preferences, the viewport reports and the entry requests. */
+  /** The shell's live state, the view registry, the layout preferences and the viewport reports. */
   readonly hooks: {
     readonly applications: HostObservable<ApplicationsState>
     readonly views: HostObservable<ReadonlyMap<string, ApplicationView>>
     readonly preferences: HostObservable<ApplicationPreferences>
     readonly viewport: HostObservable<ViewportReport | undefined>
-    readonly entry: HostObservable<EntryRequest | undefined>
     /** What the current application page reports (the pane's current-page chip). */
     readonly pageContext: HostObservable<PageContext | undefined>
-    /** What the management dialog shows right now (the framework instance owns it). */
+    /** A one-shot request from the conversation header to show one Session here. */
+    readonly dock: HostObservable<DockRequest | undefined>
+    /** What the management page shows right now (the framework instance owns it). */
     readonly manage: HostObservable<ManageRequest | undefined>
+    /** The pending delegation send request the human has to review. */
+    readonly delegation: HostObservable<import('./delegation.ts').DelegationSendRequest | undefined>
   }
   /** Cross-application record navigation, when the shell mounted it. */
   readonly navigation?: AppNavigationService
-  /** Where the dialog remembers its scroll positions (the framework instance owns it). */
+  /** Where the management page remembers its scroll positions (the framework instance owns it). */
   readonly manageScroll: ManageScrollMemory
-  /** Show the management dialog (the list, or one application's detail at a tab). */
+  /** Write one layout preference patch (pinned tabs and their order). */
+  readonly updatePreferences?: (patch: Partial<ApplicationPreferences>) => void
+  /** Show the management page (the list, or one application's detail at a tab). */
   readonly openManage: (request: ManageRequest) => void
   /**
    * Close it. The area calls this with itself when it leaves: coming back to
@@ -76,19 +81,22 @@ export interface ApplicationsAreaInjected {
    * positions serve the next EXPLICIT open.
    */
   readonly closeManage: () => void
-  /**
-   * Take the pending entry request (one-shot): the human activated the
-   * applications entry and the navigation has to answer for it.
-   */
-  readonly consumeEntry: () => EntryRequest | undefined
+  /** Resolve the pending delegation send request. */
+  readonly answerDelegation: (result: DelegationSendResult) => void
+  /** Subscribe to one application's change notices. */
+  readonly subscribeChanges: (appId: string, listener: () => void) => () => void
+  /** Read the host's delegation records (the management list). */
+  readonly delegations: (appId?: string) => Promise<readonly DelegationInfo[]>
+  /** Send one pending delegation to an application-area Session (the human's action). */
+  readonly sendDelegation: (id: string, sessionId: string, supplement?: string, appId?: string) => Promise<void>
+  /** End one delegation on the human's request. */
+  readonly cancelDelegation: (id: string, appId?: string) => Promise<DelegationInfo>
+  /** Show the Session that executes one delegation. */
+  readonly openDelegation: (id: string, appId?: string) => Promise<boolean>
   /** Select the application whose page the area shows (undefined clears the selection). */
   readonly select: (appId: string | undefined) => void
   /** Re-read the application rows. */
   readonly refresh: () => void
-  /** Remember the wide navigation's folded state. */
-  readonly setNavExpanded: (expanded: boolean) => void
-  /** Remember the human's own order of the page applications. */
-  readonly setNavOrder: (order: readonly string[]) => void
   /** Leave the area: the center column returns to the conversation. */
   readonly close: () => void
   /**
@@ -96,27 +104,47 @@ export interface ApplicationsAreaInjected {
    * reference is captured now and the center column returns to the conversation,
    * where the composer offers it as the `@page` chip.
    */
+  /** Every remembered application-area conversation, for the pane switcher. */
+  readonly appConversationTargets: () => readonly { readonly workspaceId: string; readonly sessionId: string }[]
+  /** Create another conversation in the current area workspace. */
+  readonly createAppConversation: () => Promise<ConversationSession>
+  /** Select one remembered application-area conversation. */
+  readonly selectAppConversation: (sessionId: string) => Promise<ConversationSession | undefined>
   /** Open (or first-use set up) the application area's dedicated conversation. */
   readonly openAppConversation: () => Promise<ConversationSession | undefined>
   /** Create the dedicated Workspace and its first conversation at the chosen path. */
   readonly setupAppConversation: (path: string) => Promise<ConversationSession>
   /** Create a development Session over a source workspace and bind it to the app. */
   readonly createDevelopmentSession: (appId: string, path: string) => Promise<string>
+  /** Remembered development Sessions for one application. */
+  readonly developmentTargets: (appId: string) => readonly { readonly appId: string; readonly sessionId: string }[]
+  /** Select one development Session and bind the current page to it. */
+  readonly selectDevelopmentSession: (sessionId: string) => Promise<string | undefined>
+  /** Retain one development Session for a dock tab (and point the page context at it). */
+  readonly retainDevelopmentSession: (sessionId: string) => Promise<ConversationSession | undefined>
+  /** Retain one normal Session for a dock tab; no application page context. */
+  readonly retainNormalSession: (sessionId: string) => Promise<ConversationSession | undefined>
+  /** Consume the one-shot request from the conversation header. */
+  readonly consumeDock: () => void
+  /** A platform Session's title, when the session list has it. */
+  readonly sessionTitle: (sessionId: string) => string | undefined
+  /** Normal Sessions that can be opened as dock tabs (not app conversations or development). */
+  readonly normalSessions: () => readonly { readonly sessionId: string; readonly title?: string }[]
   /** Show a Session in the platform's main area, when that face exists. */
   readonly openSession: (sessionId: string) => void
+  /** The host's absolute suggested path for first-use Workspace setup. */
+  readonly suggestedAppConversationPath: () => Promise<string | undefined>
   /** Open the platform directory picker for the dedicated Workspace folder. */
   readonly pickAppConversationFolder?: (() => Promise<string | undefined>) | undefined
   /** Attach or detach the current page pointer from the application conversation. */
-  readonly setAppConversationContextEnabled: (enabled: boolean) => Promise<void>
+  readonly setAppConversationContextEnabled: (enabled: boolean, sessionId?: string) => Promise<void>
+  /** Tell the host which Session the dock currently displays (only it carries page context). */
+  readonly setPageContextSession: (sessionId: string | undefined) => void
   readonly loadTasks: () => void
   /** The props the shell hands one application's registered page (the call pair included). */
   readonly viewProps: (appId: string) => ApplicationViewProps
-  /**
-   * The page of one application is gone (the human left it, or a re-read
-   * re-keyed it): drop that application's progress take-overs, so the ordinary
-   * rows come back for the calls still running.
-   */
-  readonly releaseClaims: (appId: string) => void
+  /** The application network proxy form; undefined when the platform settings client is not mounted. */
+  readonly networkProxy: () => ConfigForm<NetworkProxySection> | undefined
   /** The props one application's settings page is rendered with. */
   readonly settingsProps: (appId: string) => ApplicationSettingsProps
   /** Read the call records; with an application, the ones TARGETING it. */
@@ -124,13 +152,13 @@ export interface ApplicationsAreaInjected {
   /** Read one application's unified-store facts for the info tab's data section. */
   readonly loadDataInfo: (appId: string) => Promise<import('@matrix1001/dsh-application-harness-host-bridge/client').AppDataInfo>
   readonly restorePreview: (appId: string, backupPath: string) => Promise<import('@matrix1001/dsh-application-harness-host-bridge/client').AppDataRestorePreview>
-  readonly restoreData: (appId: string, backupPath: string, previewFingerprint?: string, planId?: string, requestId?: string) => Promise<import('@matrix1001/dsh-application-harness-host-bridge/client').AppDataRestoreResult>
+  readonly restoreData: (appId: string, planId: string, requestId: string) => Promise<import('@matrix1001/dsh-application-harness-host-bridge/client').AppDataRestoreResult>
   /** Export one application's unified-store namespace (JSON). */
   readonly exportData: (appId: string) => Promise<import('@matrix1001/dsh-application-harness-host-bridge/client').AppDataExport>
   /** Validate one application JSON import before any write. */
   readonly previewDataImport: (appId: string, json: string) => Promise<import('@matrix1001/dsh-application-harness-host-bridge/client').AppDataImportPreview>
   /** Import one application JSON after a pre-import backup. */
-  readonly importData: (appId: string, json: string, planId?: string, requestId?: string) => Promise<import('@matrix1001/dsh-application-harness-host-bridge/client').AppDataImportResult>
+  readonly importData: (appId: string, planId: string, requestId: string) => Promise<import('@matrix1001/dsh-application-harness-host-bridge/client').AppDataImportResult>
   /** Retry the reload an import could not complete. */
   readonly reloadImportedData?: (appId: string) => Promise<void>
   /** Delete old pre-import snapshots beyond the newest keep (explicit action). */
@@ -143,18 +171,14 @@ export interface ApplicationsAreaInjected {
   readonly setPolicy: (appId: string, op: string, policy: OperationPolicy) => Promise<boolean>
   /** Enable or disable one application. */
   readonly setActivation: (appId: string, activation: 'enabled' | 'disabled') => Promise<boolean>
+  /** Run one application's declared health check now (the management page's check action). */
+  readonly checkHealth: (appId: string) => Promise<boolean>
   /** Set or clear one application's fixed model route. */
   readonly setAppModel: (appId: string, selection: { provider: string; model: string } | null) => Promise<boolean>
   /** Read the provider/model catalog for the model selector. */
   readonly loadModelCatalog: () => Promise<import('@matrix1001/dsh-application-harness-host-bridge/client').ModelCatalog>
   /** Read one application's aggregated model usage. */
   readonly loadModelUsage: (appId: string) => Promise<import('@matrix1001/dsh-application-harness-host-bridge/client').ModelUsageSummary>
-  /** Read the declared credentials' set status. */
-  readonly loadCredentials: (appId: string) => Promise<readonly import('@matrix1001/dsh-application-harness-host-bridge/client').AppCredentialStatus[]>
-  /** Set one declared credential. */
-  readonly setCredential: (appId: string, name: string, value: string) => Promise<boolean>
-  /** Delete one declared credential. */
-  readonly deleteCredential: (appId: string, name: string) => Promise<boolean>
   /** Read one application's model limits. */
   readonly loadModelLimits: (appId: string) => Promise<import('@matrix1001/dsh-application-harness-host-bridge/client').ModelLimits>
   /** Set one application's model limits. */
@@ -186,43 +210,74 @@ export type ApplicationsAreaProps =
 /**
  * Render the application area.
  * @param props - the shell's state and actions (injected) plus the locale seat.
- * @returns the navigation, the header, the surface and (when open) the management dialog.
+ * @returns the header, the surface and (when open) the management page.
  */
+export function setupErrorMessage(cause: unknown, t: TranslateNS<'applications'>): string {
+  const message = cause instanceof Error ? cause.message : String(cause)
+  if (/must already exist|already exist/u.test(message)) return t('conversation.setup.missing')
+  if (/symlink|real directory|not a file/u.test(message)) return t('conversation.setup.notDirectory')
+  if (/absolute/u.test(message)) return t('conversation.setup.absolute')
+  return t('conversation.setup.failed', { message })
+}
+
+const DELEGATE_SUPPLEMENT_MAX = 4000
+
 export function ApplicationsArea(props: ApplicationsAreaProps): ReactNode {
-  const { useApplications, useViews, usePreferences, useViewport: useViewportReport, useEntry, useManage, usePageContext, t } = props
+  const { useApplications, useViews, usePreferences, useViewport: useViewportReport, useManage, useDelegation, useDock, useSessionStatus, usePageContext, t } = props
   const state = useApplications(snapshot => snapshot)
   const views = useViews(snapshot => snapshot)
   const preferences = usePreferences(snapshot => snapshot)
   const viewport = useViewportReport(snapshot => snapshot)
-  const entry = useEntry(snapshot => snapshot)
   const manage = useManage(snapshot => snapshot)
-  const page = usePageContext(snapshot => snapshot)
-  const [canRecordBack, setCanRecordBack] = useState(false)
+  const delegation = useDelegation(snapshot => snapshot)
+  const currentPage = usePageContext(snapshot => snapshot)
+  const [delegateTarget, setDelegateTarget] = useState('')
+  const [delegateSupplement, setDelegateSupplement] = useState('')
+  const [delegateBusy, setDelegateBusy] = useState(false)
+  const [delegateError, setDelegateError] = useState<string>()
+  useEffect(() => {
+    if (delegation === undefined) return
+    setDelegateTarget(props.appConversationTargets()[0]?.sessionId ?? 'new')
+    setDelegateSupplement('')
+    setDelegateBusy(false)
+    setDelegateError(undefined)
+  }, [delegation?.id, delegation === undefined])
+  const [navBack, setNavBack] = useState<{ readonly canBack: boolean; readonly backAppId?: string }>({ canBack: false })
   useEffect(() => {
     const navigation = props.navigation
     /* v8 ignore next -- the shell can render without navigation in isolated tests */
     if (navigation === undefined) return undefined
-    setCanRecordBack(navigation.state.getSnapshot().canBack)
-    return navigation.state.subscribe(() => { setCanRecordBack(navigation.state.getSnapshot().canBack) })
+    const read = (): void => {
+      const snapshot = navigation.state.getSnapshot()
+      setNavBack({ canBack: snapshot.canBack, ...(snapshot.backAppId === undefined ? {} : { backAppId: snapshot.backAppId }) })
+    }
+    read()
+    return navigation.state.subscribe(read)
   }, [props.navigation])
   const root = useRef<HTMLDivElement>(null)
-  const { narrow, measured } = useNarrow(root)
-  const [drawerOpen, setDrawerOpen] = useState(false)
-  const selectApplication = (appId: string): void => {
-    setDrawerOpen(false)
-    props.select(appId)
-  }
+  const { compact, wide, width: areaWidth } = useNarrow(root)
   // The page's re-read generation: the refusal notice's own retry bumps it and
   // the page mounts again, which is that page's ordinary read path.
   const [readEpoch, setReadEpoch] = useState(0)
   // The application area's dedicated conversation pane. It is closed until the
   // header is clicked; opening it remembers (or first-use creates) the area's
   // own Session, bound below through the standard SessionProvider seat.
-  const [conversationOpen, setConversationOpen] = useState(false)
+  const [conversationOpen, setConversationOpen] = useState(() => preferences.dockExpanded === true)
   const [developOpen, setDevelopOpen] = useState(false)
   const [conversation, setConversation] = useState<ConversationSession>()
+  const [conversationTargets, setConversationTargets] = useState<readonly { readonly workspaceId: string; readonly sessionId: string }[]>([])
+  const sessionStatusById = useSessionStatus(snapshot => snapshot)
+  const [activeDock, setActiveDock] = useState<{ readonly id: string; readonly kind: DockTabKind; readonly appId?: string }>()
+  const displayedContextSession = conversationOpen ? activeDock?.id : undefined
+  useEffect(() => { props.setPageContextSession(displayedContextSession) }, [displayedContextSession])
+  const [dockWidth, setDockWidth] = useState(preferences.dockWidth ?? 0)
+  const [dockDragging, setDockDragging] = useState(false)
+  const [dockClosing, setDockClosing] = useState(false)
+  const dockCloseTimer = useRef<ReturnType<typeof setTimeout>>()
+  const [dockOtherOpen, setDockOtherOpen] = useState(preferences.dockOtherDevOpen === true)
+  const [normalTabs, setNormalTabs] = useState<readonly string[]>(preferences.dockNormalTabs ?? [])
+  const [hiddenTabs, setHiddenTabs] = useState<readonly string[]>(preferences.dockHidden ?? [])
   const conversationRef = useRef<ConversationSession>()
-  const conversationPaneRef = useRef<HTMLElement>(null)
   // First-use setup: the pane has no target until a dedicated Workspace exists.
   // The dialog is explicit, and the pane stays closed until the human commits.
   const [setupOpen, setSetupOpen] = useState(false)
@@ -230,30 +285,97 @@ export function ApplicationsArea(props: ApplicationsAreaProps): ReactNode {
   const [setupBusy, setSetupBusy] = useState(false)
   const [setupError, setSetupError] = useState<string>()
   // The current page is attached by default; the chip is the visible switch.
-  const [contextOn, setContextOn] = useState(true)
+  const [contextOff, setContextOff] = useState<ReadonlySet<string>>(new Set())
   useEffect(() => () => {
     conversationRef.current?.release()
     conversationRef.current = undefined
   }, [])
 
-  // Leaving the area closes the dialog with it (the request lives in the
-  // framework instance, which outlives this component): the human comes back
-  // to the page they left, not to a modal they did not ask for again.
+  // Leaving the area closes the management page with it (the request lives in
+  // the framework instance, which outlives this component): the human comes
+  // back to the page they left, not to a page they did not ask for again.
   const closeManage = props.closeManage
   useEffect(() => () => { closeManage() }, [closeManage])
+
+  const managing = manage !== undefined
+  const closeManagement = (): void => {
+    props.closeManage()
+    // The page covers the application frame, so give focus back to the
+    // application's own tab after the page has cleared; the trigger may be
+    // inside the hidden frame and is not a stable target then.
+    setTimeout(() => {
+      const fallback = root.current?.querySelector<HTMLElement>('[data-app-tab-active]')
+      fallback?.focus()
+    }, 0)
+  }
+  // A direct application switch (a tab, the more menu, or the management
+  // page's "open") clears the cross-application record stack through the
+  // navigation service, so the header never offers a back that belongs to an
+  // earlier flow.
+  const selectApp = (appId: string): void => {
+    // A development tab belongs to one application: switching the application
+    // folds it into the other-development group instead of leaving a tab that
+    // no longer matches the page on screen.
+    if (activeDock?.kind === 'development' && activeDock.appId !== appId) {
+      const target = conversationTargets.at(-1)
+      if (target !== undefined) void chooseConversation(target.sessionId)
+      else { setConversation(undefined); conversationRef.current?.release(); conversationRef.current = undefined }
+      setActiveDock(target === undefined ? undefined : { id: target.sessionId, kind: 'app-conversation' })
+    }
+    if (props.navigation !== undefined) void props.navigation.select(appId)
+    else props.select(appId)
+  }
+  // Opening an application from the management page is a real switch: the
+  // explicit user action leaves the page and selects the application.
+  const openManagedApp = (appId: string): void => {
+    props.closeManage()
+    selectApp(appId)
+    setTimeout(() => { root.current?.querySelector<HTMLElement>('[data-app-tab-active]')?.focus() }, 0)
+  }
 
   const apps = state.apps
   const active = apps?.find(app => app.id === state.activeAppId)
   const view = active === undefined ? undefined : views.get(active.id)
   const switchable = (apps ?? []).filter(app => views.get(app.id)?.Component !== undefined)
-  // The order is the human's, not the click's: selecting an application never
-  // moves it. The saved order is applied to the page applications only; new
-  // ones land at the end and removed ids disappear.
-  const ordered = useMemo(
-    () => orderApplications(switchable, preferences.navOrder ?? []),
-    [switchable, preferences.navOrder],
+  const pendingApprovalIds = new Set(switchable.filter(app => onboardingPending(app, state)).map(app => app.id))
+  // The tab strip is the human's fixed list; the more menu holds the rest.
+  // With no saved list every page application is fixed, so a fresh deployment
+  // is fully pinned. Selecting an application never changes the order; tab
+  // drag/context-menu actions write it.
+  const split = useMemo(
+    () => splitPinnedTabs(switchable, preferences.pinned, state.activeAppId),
+    [switchable, preferences.pinned, state.activeAppId],
   )
   const anyPage = switchable.length > 0
+  const updatePinned = (ids: readonly string[]): void => {
+    props.updatePreferences?.({ pinned: [...ids] })
+  }
+  const pinApp = (appId: string): void => {
+    const ids = split.pinned.map(app => app.id)
+    if (!ids.includes(appId)) ids.push(appId)
+    updatePinned(ids)
+  }
+  const unpinApp = (appId: string): void => {
+    updatePinned(split.pinned.map(app => app.id).filter(id => id !== appId))
+  }
+  const orderPinned = (ids: readonly string[]): void => {
+    // Keep only page applications that exist and preserve the complete set: a
+    // stale or duplicated id must not drop a tab from the strip.
+    const current = new Set(split.pinned.map(app => app.id))
+    const next = ids.filter((id, index) => ids.indexOf(id) === index && current.has(id))
+    for (const id of split.pinned.map(app => app.id)) {
+      if (!next.includes(id)) next.push(id)
+    }
+    if (next.length > 0) updatePinned(next)
+  }
+  const backApp = navBack.backAppId === undefined ? undefined : switchable.find(app => app.id === navBack.backAppId)
+  const backLabel = navBack.canBack
+    ? (backApp === undefined ? t('nav.backRecord') : t('nav.backApp', { name: displayName(backApp, views.get(backApp.id)) }))
+    : t('menu.back')
+  const onAreaBack = (): void => {
+    if (navBack.canBack) props.navigation?.back()
+    else props.close()
+  }
 
   // The selection survives the rows and the registrations moving, and only a
   // row that is GONE costs it: an application whose page package has not
@@ -265,51 +387,84 @@ export function ApplicationsArea(props: ApplicationsAreaProps): ReactNode {
     props.select(apps.find(app => views.get(app.id)?.Component !== undefined)?.id)
   }, [apps, views, state.activeAppId, props])
 
-  // A drawer only exists while the area is narrow; turning wide closes it (and
-  // never touches the wide column's own expanded preference).
-  useEffect(() => { if (!narrow) setDrawerOpen(false) }, [narrow])
-
-  // The human activated the applications entry (the sidebar's own row, the
-  // window-chrome control): the area answers for it exactly once, as soon as
-  // the width is known. Only a REPEAT activation toggles the navigation — a
-  // first entry leaves it folded, because the sidebar already lists the
-  // applications and an auto-expanded column duplicated that list (decision S1:
-  // navigation folded by default, one click to unfold). Everything else (a
-  // restored preference, a programmatic selection) leaves no request behind.
-  useEffect(() => {
-    if (!measured) return
-    const request = props.consumeEntry()
-    if (request === undefined || !request.toggle) return
-    if (narrow) setDrawerOpen(!drawerOpen)
-    else props.setNavExpanded(!preferences.navExpanded)
-  }, [entry, measured, narrow, drawerOpen, preferences.navExpanded, props])
-
-  // Closing the drawer: the modal layer restores focus to whoever opened it.
-  // When that control is GONE (the window widened and took the drawer's button
-  // with it), focus must land on something the human can still use — never the
-  // document body (a dead end for keyboard and screen readers).
-  const wasDrawerOpen = useRef(false)
-  useEffect(() => {
-    if (wasDrawerOpen.current && !drawerOpen) {
-      const active = document.activeElement
-      if (active === null || active === document.body || !(active as HTMLElement).isConnected) {
-        root.current?.querySelector<HTMLElement>('[data-app-drawer-open], [data-app-switcher], [data-app-menu], [data-app-nav-toggle]')?.focus()
-      }
-    }
-    wasDrawerOpen.current = drawerOpen
-  }, [drawerOpen])
-
-  const closeDrawer = (): void => { setDrawerOpen(false) }
+  const finishCloseConversation = (): void => {
+    const released = conversationRef.current
+    conversationRef.current = undefined
+    setConversation(undefined)
+    setDockClosing(false)
+    // Return keyboard focus to the stable trigger instead of leaving it on the
+    // unmounted collapse button (body).
+    requestAnimationFrame(() => {
+      const trigger = document.querySelector<HTMLElement>('[data-sidebar-right-expand]')
+      if (trigger !== null && trigger.isConnected) trigger.focus()
+    })
+    // Release after the provider has rendered without the Session, so the
+    // platform never sees a mounted consumer holding a released reference.
+    if (released !== undefined) setTimeout(() => { released.release() }, 0)
+  }
 
   const closeConversation = (): void => {
     setConversationOpen(false)
-    conversationRef.current?.release()
-    conversationRef.current = undefined
-    setConversation(undefined)
+    props.updatePreferences?.({ dockExpanded: false })
+    if (!wide) { finishCloseConversation(); return }
+    setDockClosing(true)
+    clearTimeout(dockCloseTimer.current)
+    dockCloseTimer.current = setTimeout(finishCloseConversation, 240)
   }
 
-  useModalLayer(conversationPaneRef, narrow && conversationOpen, closeConversation)
+  useEffect(() => {
+    if (!conversationOpen) return
+    clearTimeout(dockCloseTimer.current)
+    setDockClosing(false)
+  }, [conversationOpen])
 
+  useEffect(() => () => { clearTimeout(dockCloseTimer.current) }, [])
+
+  /* v8 ignore start -- browser-only conversation switcher actions */
+  const refreshTargets = (): void => { setConversationTargets(props.appConversationTargets()) }
+  /** The platform exposes ids here; the short label keeps two sessions distinct. */
+  const sessionLabel = (sessionId: string): string => {
+    const base = props.sessionTitle(sessionId) ?? t('conversation.sessionShort', { id: sessionId.slice(-6) })
+    const status = sessionStatusById.get(sessionId as SessionId)
+    if (status?.pendingInteraction !== undefined) return `${base} · ${t('dock.statusAttention')}`
+    if (status?.running === true) return `${base} · ${t('dock.statusRunning')}`
+    return base
+  }
+
+  const chooseConversation = async (sessionId: string): Promise<void> => {
+    const next = await props.selectAppConversation(sessionId)
+    if (next === undefined) return
+    conversationRef.current?.release()
+    conversationRef.current = next
+    setConversation(next)
+    setActiveDock({ id: sessionId, kind: 'app-conversation' })
+    props.updatePreferences?.({ dockExpanded: true, dockActive: sessionId })
+    setConversationOpen(true)
+    refreshTargets()
+  }
+
+  const newConversation = async (): Promise<void> => {
+    /* v8 ignore start -- the add-menu first-use branch reuses the header-chat setup, covered through that path */
+    if (props.appConversationTargets().length === 0) {
+      setSetupError(undefined)
+      setSetupPath(await props.suggestedAppConversationPath() ?? '')
+      setSetupOpen(true)
+      return
+    }
+    /* v8 ignore stop */
+    const next = await props.createAppConversation()
+    conversationRef.current?.release()
+    conversationRef.current = next
+    setConversation(next)
+    if (next.sessionId !== undefined) {
+      setActiveDock({ id: next.sessionId, kind: 'app-conversation' })
+      props.updatePreferences?.({ dockExpanded: true, dockActive: next.sessionId })
+    }
+    setConversationOpen(true)
+    refreshTargets()
+  }
+
+  /* v8 ignore stop */
   const toggleConversation = async (): Promise<void> => {
     if (conversationOpen) {
       closeConversation()
@@ -318,12 +473,17 @@ export function ApplicationsArea(props: ApplicationsAreaProps): ReactNode {
     const next = await props.openAppConversation()
     if (next === undefined) {
       setSetupError(undefined)
+      setSetupPath(await props.suggestedAppConversationPath() ?? '')
       setSetupOpen(true)
       return
     }
     conversationRef.current = next
     setConversation(next)
+    const active = props.appConversationTargets().at(-1) ?? (next.sessionId === undefined ? undefined : { sessionId: next.sessionId })
+    if (active !== undefined) setActiveDock({ id: active.sessionId, kind: 'app-conversation' })
+    props.updatePreferences?.({ dockExpanded: true, ...(active === undefined ? {} : { dockActive: active.sessionId }) })
     setConversationOpen(true)
+    refreshTargets()
   }
 
   const setupConversation = async (): Promise<void> => {
@@ -337,8 +497,12 @@ export function ApplicationsArea(props: ApplicationsAreaProps): ReactNode {
       setConversationOpen(true)
       setSetupOpen(false)
       setSetupPath('')
+      const active = props.appConversationTargets().at(-1) ?? (next.sessionId === undefined ? undefined : { sessionId: next.sessionId })
+        if (active !== undefined) setActiveDock({ id: active.sessionId, kind: 'app-conversation' })
+      props.updatePreferences?.({ dockExpanded: true, ...(active === undefined ? {} : { dockActive: active.sessionId }) })
+      refreshTargets()
     } catch (cause) {
-      setSetupError(t('conversation.setup.failed', { message: cause instanceof Error ? cause.message : String(cause) }))
+      setSetupError(setupErrorMessage(cause, t))
     } finally {
       setSetupBusy(false)
     }
@@ -352,16 +516,12 @@ export function ApplicationsArea(props: ApplicationsAreaProps): ReactNode {
     readonly children: ReactNode
   }) => ReactNode
 
-  // The drawer leaves in this same commit (its layer restores focus to the
-  // opener first), so the management dialog opens onto a settled focus point
-  // instead of racing the drawer's own cleanup.
   const openManage = (request: ManageRequest): void => {
-    setDrawerOpen(false)
     props.openManage(request)
   }
 
   // The shell's statuses, floating over the content (never a row above it).
-  const shellNotices: ShellNotice[] = []
+  const shellNotices: AreaNotice[] = []
   if (!state.watching) {
     shellNotices.push({
       id: 'connection', tone: 'error', text: t('conn.down'),
@@ -373,6 +533,12 @@ export function ApplicationsArea(props: ApplicationsAreaProps): ReactNode {
     shellNotices.push({
       id: 'error', tone: 'error', text: `${t('error.title')}: ${state.error}`,
       anchor: { 'data-app-error': '' },
+    })
+  }
+  if (state.apps?.some(row => row.activationUnavailable === true) === true) {
+    shellNotices.push({
+      id: 'activation', tone: 'warning', text: t('activation.unavailable'),
+      anchor: { 'data-app-activation-unavailable': '' },
     })
   }
   const refusal = active === undefined ? undefined : state.refusals.get(active.id)
@@ -403,10 +569,33 @@ export function ApplicationsArea(props: ApplicationsAreaProps): ReactNode {
       ],
     })
   }
-  const claimed = active === undefined ? undefined : state.claims.get(active.id)
-  const progress = active === undefined
-    ? []
-    : state.progress.filter(notice => notice.appId === active.id && claimed?.has(notice.callId) !== true)
+  // The active application's health is shell-level: the page itself must not
+  // spend a row on it. A permission refusal already explains this cause, so it
+  // is not repeated as a second notice.
+  if (refusal === undefined && !onboardingOpen && active !== undefined && statusOf(active) === 'available' && active.health === 'degraded') {
+    shellNotices.push({
+      id: 'health', tone: 'warning', text: t('status.degraded'),
+      ...(active.detail === undefined ? {} : { detail: active.detail }),
+      anchor: { 'data-app-health-degraded': '' },
+    })
+  }
+  // An in-session write confirmation is rendered by the Session conversation;
+  // when the dock is closed that card is out of sight. Surface the waiting
+  // answer in the header status control and let the button reopen the dock.
+  if (!conversationOpen && dockNeedsAnswer(conversationTargets, sessionStatusById)) {
+    shellNotices.push({
+      id: 'dock-pending',
+      tone: 'warning',
+      text: t('dock.pendingAttention'),
+      anchor: { 'data-dock-attention': '' },
+      actions: [{
+        label: t('dock.openPending'),
+        anchor: { 'data-dock-open-pending': '' },
+        onClick: () => { void toggleConversation() },
+      }],
+    })
+  }
+  const progress = active === undefined ? [] : state.progress.filter(notice => notice.appId === active.id)
   if (progress.length > 0) {
     shellNotices.push({
       id: 'progress', tone: 'info',
@@ -415,70 +604,293 @@ export function ApplicationsArea(props: ApplicationsAreaProps): ReactNode {
     })
   }
 
+  // ── The Session dock ─────────────────────────────────────────────────
+  const dockRequest = useDock(snapshot => snapshot)
+  const dockStatusOf = (sessionId: string): DockTabView['status'] => {
+    const status = dockStatusFor(sessionStatusById.get(sessionId as SessionId))
+    return status === undefined ? undefined : { tone: status.tone, label: t(status.labelKey) }
+  }
+  const withDockStatus = (tab: DockTabView, sessionId: string): DockTabView => {
+    const status = dockStatusOf(sessionId)
+    return status === undefined ? tab : { ...tab, status }
+  }
+  useEffect(() => { setConversationTargets(props.appConversationTargets()) }, [props.appConversationTargets])
+  const titleOf = (sessionId: string): string | undefined => props.sessionTitle(sessionId)
+  const appNameOf = (appId: string): string => {
+    const app = switchable.find(candidate => candidate.id === appId)
+    return app === undefined ? appId : displayName(app, views.get(app.id))
+  }
+  const devTab = (target: { readonly appId: string; readonly sessionId: string }, withApp: boolean): DockTabView => ({
+    id: target.sessionId,
+    kind: 'development',
+    title: titleOf(target.sessionId) ?? t('dock.developmentTitle'),
+    ...(withApp ? { appName: appNameOf(target.appId) } : {}),
+  })
+  const devView = (target: { readonly appId: string; readonly sessionId: string }, withApp: boolean): DockTabView => withDockStatus(devTab(target, withApp), target.sessionId)
+  const currentDevTabs: readonly DockTabView[] = active === undefined ? [] : props.developmentTargets(active.id).map(target => devView(target, false))
+  const otherDevTabs: readonly DockTabView[] = switchable
+    .filter(candidate => candidate.id !== active?.id)
+    .flatMap(candidate => props.developmentTargets(candidate.id).map(target => devView(target, true)))
+  const appTabs: readonly DockTabView[] = conversationTargets.map(target => withDockStatus({
+    id: target.sessionId,
+    kind: 'app-conversation',
+    title: titleOf(target.sessionId) ?? t('conversation.title'),
+  }, target.sessionId))
+  const normalViews: readonly DockTabView[] = normalTabs.map(sessionId => withDockStatus({
+    id: sessionId,
+    kind: 'normal',
+    title: titleOf(sessionId) ?? t('dock.normalSession'),
+  }, sessionId))
+  const mainDockTabs: readonly DockTabView[] = [...appTabs, ...currentDevTabs, ...normalViews]
+  const allDockTabs: readonly DockTabView[] = [...mainDockTabs, ...otherDevTabs]
+  const dockTabs: readonly DockTabView[] = mainDockTabs.filter(tab => !hiddenTabs.includes(tab.id))
+  const visibleOtherDevTabs: readonly DockTabView[] = otherDevTabs.filter(tab => !hiddenTabs.includes(tab.id))
+  const openableTabs: readonly DockTabView[] = allDockTabs.filter(tab => hiddenTabs.includes(tab.id))
+  const normalChoices = props.normalSessions()
+  const activeDockId = activeDock?.id ?? ''
+  // The dock follows the right panel's frame geometry: first open at 45% of
+  // the area, min 300, max min(70% of the area, area - 400 for the page).
+  const areaWidthForDock = areaWidth > 0 ? areaWidth : 1160
+  const dockMaxWidth = Math.max(300, Math.min(Math.round(areaWidthForDock * 0.7), areaWidthForDock - 400))
+  const effectiveDockWidth = Math.min(dockMaxWidth, Math.max(300, dockWidth === 0 ? Math.round(areaWidthForDock * 0.45) : dockWidth))
+
+  const setDockPreferences = (patch: Partial<{ dockExpanded: boolean; dockWidth: number; dockActive: string; dockOtherDevOpen: boolean; dockNormalTabs: readonly string[]; dockHidden: readonly string[] }>): void => {
+    props.updatePreferences?.(patch)
+  }
+
+  const openDevelopmentTab = async (sessionId: string, appId: string | undefined): Promise<void> => {
+    const selected = await props.selectDevelopmentSession(sessionId)
+    if (selected === undefined) return
+    const next = await props.retainDevelopmentSession(sessionId)
+    if (next === undefined) return
+    if (appId !== undefined) {
+      if (props.navigation !== undefined) void props.navigation.select(appId)
+      else props.select(appId)
+    }
+    conversationRef.current?.release()
+    conversationRef.current = next
+    setConversation(next)
+    setActiveDock({ id: sessionId, kind: 'development', ...(appId === undefined ? {} : { appId }) })
+    setConversationOpen(true)
+    setDockPreferences({ dockExpanded: true, dockActive: sessionId })
+  }
+
+  const openNormalTab = async (sessionId: string): Promise<void> => {
+    const next = await props.retainNormalSession(sessionId)
+    if (next === undefined) return
+    conversationRef.current?.release()
+    conversationRef.current = next
+    setConversation(next)
+    setActiveDock({ id: sessionId, kind: 'normal' })
+    setConversationOpen(true)
+    const nextTabs = normalTabs.includes(sessionId) ? normalTabs : [...normalTabs, sessionId]
+    setNormalTabs(nextTabs)
+    setDockPreferences({ dockExpanded: true, dockActive: sessionId, dockNormalTabs: nextTabs })
+  }
+
+  const closeDockTab = (sessionId: string): void => {
+    const isNormal = normalTabs.includes(sessionId)
+    const nextNormal = isNormal ? normalTabs.filter(id => id !== sessionId) : normalTabs
+    if (isNormal) setNormalTabs(nextNormal)
+    const nextHidden = isNormal || hiddenTabs.includes(sessionId) ? hiddenTabs : [...hiddenTabs, sessionId]
+    if (!isNormal) setHiddenTabs(nextHidden)
+    setDockPreferences({ ...(isNormal ? { dockNormalTabs: nextNormal } : { dockHidden: nextHidden }) })
+    if (activeDock?.id !== sessionId) return
+    const remaining = allDockTabs.find(tab => tab.id !== sessionId && !nextHidden.includes(tab.id))
+    if (remaining === undefined) {
+      conversationRef.current?.release()
+      conversationRef.current = undefined
+      setConversation(undefined)
+      setActiveDock(undefined)
+      return
+    }
+    void selectDockTab(remaining.id)
+  }
+
+  const togglePageContext = (sessionId: string): void => {
+    const next = contextOff.has(sessionId)
+    const updated = new Set(contextOff)
+    if (next) updated.delete(sessionId)
+    else updated.add(sessionId)
+    setContextOff(updated)
+    void props.setAppConversationContextEnabled(next, sessionId)
+  }
+
+  const closeDockTabsBatch = (ids: readonly string[], keepId: string): void => {
+    if (ids.length === 0) return
+    const closed = new Set(ids)
+    const nextNormal = normalTabs.filter(id => !closed.has(id))
+    const nextHidden = [...new Set([...hiddenTabs, ...ids.filter(id => !normalTabs.includes(id))])]
+    setNormalTabs(nextNormal)
+    setHiddenTabs(nextHidden)
+    setDockPreferences({ dockNormalTabs: nextNormal, dockHidden: nextHidden })
+    if (activeDock === undefined || !closed.has(activeDock.id)) return
+    void selectDockTab(keepId)
+  }
+
+  const closeOtherDockTabs = (keepId: string): void => {
+    closeDockTabsBatch(allDockTabs.filter(tab => tab.id !== keepId).map(tab => tab.id), keepId)
+  }
+
+  const closeDockTabsToRight = (fromId: string): void => {
+    const visible = allDockTabs.filter(tab => !hiddenTabs.includes(tab.id))
+    const index = visible.findIndex(tab => tab.id === fromId)
+    if (index < 0) return
+    closeDockTabsBatch(visible.slice(index + 1).map(tab => tab.id), fromId)
+  }
+
+  const selectDockTab = async (sessionId: string): Promise<void> => {
+    if (hiddenTabs.includes(sessionId)) {
+      const next = hiddenTabs.filter(id => id !== sessionId)
+      setHiddenTabs(next)
+      setDockPreferences({ dockHidden: next })
+    }
+    if (conversationTargets.some(target => target.sessionId === sessionId)) { await chooseConversation(sessionId); return }
+    const dev = [...currentDevTabs, ...otherDevTabs].find(tab => tab.id === sessionId)
+    if (dev !== undefined) {
+      const target = [...props.developmentTargets(active?.id ?? ''), ...switchable.flatMap(candidate => candidate.id === active?.id ? [] : props.developmentTargets(candidate.id))]
+        .find(entry => entry.sessionId === sessionId)
+      await openDevelopmentTab(sessionId, target?.appId)
+      return
+    }
+    if (normalTabs.includes(sessionId)) await openNormalTab(sessionId)
+  }
+
+  // Restore the remembered tab when the dock opens; a fresh dock starts on the
+  // remembered application conversation.
+  useEffect(() => {
+    if (!conversationOpen || activeDock !== undefined) return
+    const remembered = preferences.dockActive
+    const visible = conversationTargets.filter(candidate => !hiddenTabs.includes(candidate.sessionId))
+    const target = visible.find(candidate => candidate.sessionId === remembered) ?? visible.at(-1)
+    if (target !== undefined) { void chooseConversation(target.sessionId); return }
+    if (remembered !== undefined && normalTabs.includes(remembered) && !hiddenTabs.includes(remembered)) void openNormalTab(remembered)
+    // A remembered development tab is restored by the area's own tabs once the
+    // session list and page-context owner are ready; the app conversation is
+    // the safe fallback.
+  }, [conversationOpen, activeDock, conversationTargets, preferences.dockActive, hiddenTabs, normalTabs])
+
+
+  // One-shot request from the DSH conversation header.
+  useEffect(() => {
+    if (dockRequest === undefined) return
+    if (dockRequest.kind === 'app-conversation') {
+      // Read the LIVE target list, not the state that the mount effect has
+      // only just queued: on the area's first mount this effect used to see an
+      // empty state, consume the request and drop the Session.
+      const targets = props.appConversationTargets()
+      if (!targets.some(target => target.sessionId === dockRequest.sessionId)) return
+      props.consumeDock()
+      void chooseConversation(dockRequest.sessionId)
+      return
+    }
+    props.consumeDock()
+    if (dockRequest.kind === 'development') { void openDevelopmentTab(dockRequest.sessionId, dockRequest.appId); return }
+    void openNormalTab(dockRequest.sessionId)
+  }, [dockRequest, conversationTargets])
+
+  const startDockResize = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    if (event.button !== 0) return
+    event.preventDefault()
+    const handle = event.currentTarget
+    const pointerId = event.pointerId
+    const startX = event.clientX
+    const startWidth = effectiveDockWidth
+    const min = 300
+    const max = dockMaxWidth
+    let latest = startWidth
+    let frame: number | null = null
+    handle.setPointerCapture(pointerId)
+    setDockDragging(true)
+    const apply = (): void => { frame = null; setDockWidth(latest) }
+    const onMove = (move: PointerEvent): void => {
+      if (move.pointerId !== pointerId) return
+      latest = Math.min(max, Math.max(min, Math.round(startWidth + (startX - move.clientX))))
+      frame ??= requestAnimationFrame(apply)
+    }
+    const finish = (): void => {
+      if (frame !== null) { cancelAnimationFrame(frame); frame = null }
+      setDockWidth(latest)
+      setDockDragging(false)
+      handle.removeEventListener('pointermove', onMove)
+      handle.removeEventListener('pointerup', onUp)
+      handle.removeEventListener('pointercancel', finish)
+      handle.removeEventListener('lostpointercapture', finish)
+      if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId)
+      setDockPreferences({ dockWidth: latest })
+    }
+    const onUp = (): void => { finish() }
+    handle.addEventListener('pointermove', onMove)
+    handle.addEventListener('pointerup', onUp)
+    handle.addEventListener('pointercancel', finish)
+    handle.addEventListener('lostpointercapture', finish)
+  }
+
   return (
-    <div className={css.area} ref={root} data-applications-area data-narrow={narrow ? 'true' : undefined}>
-      {shellNotices.length > 0 && (
-        <div className={css.shellNotices} data-shell-notices role="region" aria-label={t('notices.label')}>
-          {shellNotices.slice(0, 2).map(notice => (
-            <div
-              key={notice.id}
-              className={css.shellNotice}
-              data-tone={notice.tone}
-              role={notice.tone === 'error' ? 'alert' : 'status'}
-              {...notice.anchor}
-            >
-              <span className={css.shellNoticeText}>{notice.text}</span>
-              {(notice.actions ?? []).map(action => (
-                <button
-                  key={action.label}
-                  type="button"
-                  className={css.shellNoticeAction}
-                  {...action.anchor}
-                  onClick={action.onClick}
-                >{action.label}</button>
-              ))}
+    <div className={css.area} ref={root} data-applications-area data-narrow={compact ? 'true' : undefined}>
+      <div className={css.stage} data-managing={managing ? 'true' : undefined}>
+      <div className={css.frame} data-app-frame data-wide={wide ? 'true' : undefined} data-app-id={active?.id} data-status={active === undefined ? undefined : statusOf(active)} data-dragging={dockDragging ? 'true' : undefined}>
+        <div className={css.topRow} data-app-top-row>
+          <div
+            className={css.appHeaderSlot}
+            style={!wide ? (conversationOpen ? { display: 'none' } : undefined) : { width: conversationOpen ? `calc(100% - ${effectiveDockWidth}px)` : '100%' }}
+          >
+            <AppHeader
+              app={active}
+              view={view}
+              tabs={split.tabs}
+              allApps={switchable}
+              pinned={split.pinned}
+              {...(split.temporary === undefined ? {} : { temporaryId: split.temporary.id })}
+              views={views}
+              loading={apps === undefined}
+              pendingApproval={pendingApprovalIds}
+              pending={state.confirmations.length}
+              notices={shellNotices}
+              backLabel={backLabel}
+              onBack={onAreaBack}
+              onSwitch={selectApp}
+              onPin={pinApp}
+              onUnpin={unpinApp}
+              onOrder={orderPinned}
+              onManage={(appId, tab, focus) => { openManage(focus === undefined ? { appId, tab } : { appId, tab, focus }) }}
+              onManageList={() => { openManage({ tab: defaultTab() }) }}
+              {...(conversationOpen || dockClosing ? {} : { onDockOpen: () => { void toggleConversation() } })}
+              onDevelop={(appId) => { selectApp(appId); setDevelopOpen(true) }}
+              t={t}
+            />
+          </div>
+          {(conversationOpen || dockClosing) && (
+            <div className={css.dockHeaderSlot} style={{ width: conversationOpen ? (wide ? `${effectiveDockWidth}px` : '100%') : 0 }}>
+              <ApplicationsDockHeader
+                tabs={dockTabs}
+                otherTabs={visibleOtherDevTabs}
+                activeId={activeDockId}
+                openableTabs={openableTabs}
+                onOpenTab={(id) => { void selectDockTab(id) }}
+                otherOpen={dockOtherOpen}
+                normalChoices={normalChoices}
+                onSelect={(id) => { void selectDockTab(id) }}
+                onClose={closeDockTab}
+                onCloseOthers={closeOtherDockTabs}
+                onCloseRight={closeDockTabsToRight}
+                onToggleOther={() => {
+                  const next = !dockOtherOpen
+                  setDockOtherOpen(next)
+                  setDockPreferences({ dockOtherDevOpen: next })
+                }}
+                onCollapse={closeConversation}
+                onNewConversation={() => { void newConversation() }}
+                onNewDevelopment={() => { setDevelopOpen(true) }}
+                onOpenNormal={(sessionId) => { void openNormalTab(sessionId) }}
+                onOpenInSession={(sessionId) => { props.openSession(sessionId) }}
+                narrow={!wide}
+                onBack={closeConversation}
+                t={t}
+              />
             </div>
-          ))}
-          {shellNotices.length > 2 && <p className={css.shellNoticeMore}>+{shellNotices.length - 2}</p>}
+          )}
         </div>
-      )}
-      <AppNavigation
-        apps={ordered}
-        views={views}
-        activeId={active?.id}
-        loading={apps === undefined}
-        pending={state.confirmations.length}
-        expanded={preferences.navExpanded}
-        narrow={narrow}
-        drawerOpen={drawerOpen}
-        onSelect={selectApplication}
-        onReorder={order => { props.setNavOrder(order) }}
-        onToggle={() => { props.setNavExpanded(!preferences.navExpanded) }}
-        onManage={() => { openManage({ tab: defaultTab(undefined) }) }}
-        onCloseDrawer={closeDrawer}
-        t={t}
-      />
-      <div className={css.frame} data-app-frame data-app-id={active?.id} data-status={active?.status}>
-        <AppHeader
-          app={active}
-          view={view}
-          switchable={ordered}
-          views={views}
-          narrow={narrow}
-          navExpanded={preferences.navExpanded}
-          pending={state.confirmations.length}
-          onOpenDrawer={() => { setDrawerOpen(true) }}
-          onToggleNav={() => { props.setNavExpanded(!preferences.navExpanded) }}
-          onSwitch={(appId) => { props.select(appId) }}
-          onManage={(appId, tab) => { openManage({ appId, tab }) }}
-          onChat={toggleConversation}
-          onDevelop={(appId) => { props.select(appId); setDevelopOpen(true) }}
-          canRecordBack={canRecordBack}
-          /* v8 ignore next -- only rendered when canRecordBack is true */
-          onRecordBack={() => { props.navigation?.back() }}
-          onBack={() => { props.close() }}
-          t={t}
-        />
         <div className={css.frameBody}>
           <AppSurface
           state={state}
@@ -490,7 +902,7 @@ export function ApplicationsArea(props: ApplicationsAreaProps): ReactNode {
           viewProps={props.viewProps}
           onRetry={() => { props.refresh() }}
           onRetryRead={() => { setReadEpoch(epoch => epoch + 1) }}
-          onManage={() => { openManage({ tab: defaultTab(undefined) }) }}
+          onManage={() => { openManage({ tab: defaultTab() }) }}
           onManagePermissions={(appId) => { openManage({ appId, tab: 'permissions' }) }}
           onAllowOnboarding={async (appId, capabilities, fingerprint) => {
             // The card's "全部允许" grants only the missing platform capabilities;
@@ -500,54 +912,93 @@ export function ApplicationsArea(props: ApplicationsAreaProps): ReactNode {
             return await props.markOnboardingSeen(appId, fingerprint)
           }}
           onLaterOnboarding={(appId, fingerprint) => props.markOnboardingSeen(appId, fingerprint)}
-          onDebug={(appId) => { openManage({ appId, tab: 'info' }) }}
-            onReleaseClaims={props.releaseClaims}
+          onboardingSuppressed={managing}
+          onDebug={(appId) => { openManage({ appId, tab: 'status' }) }}
             t={t}
           />
-          {conversationOpen && (
-            <aside
-              ref={conversationPaneRef}
-              className={narrow ? `${css.conversationPane} ${css.conversationPaneNarrow}` : css.conversationPane}
-              data-app-conversation-pane
-              {...(narrow ? { role: 'dialog', 'aria-modal': true, 'aria-label': t('conversation.title') } : {})}
-            >
-              <div className={css.conversationPaneHeader}>
-                <span className={css.conversationPaneTitle}>{t('conversation.title')}</span>
-                <button
-                  type="button"
-                  className={css.conversationPaneContext}
-                  data-app-conversation-app={active?.id}
-                  data-app-conversation-context={contextOn ? 'on' : 'off'}
-                  aria-pressed={contextOn}
-                  title={contextOn
-                    ? t('conversation.contextOnTitle', { label: page?.label ?? t('conversation.noPage') })
-                    : t('conversation.contextOffTitle')}
-                  onClick={() => {
-                    const next = !contextOn
-                    setContextOn(next)
-                    void props.setAppConversationContextEnabled(next)
-                  }}
-                >
-                  {contextOn
-                    ? (page?.label ?? (active === undefined ? t('conversation.noPage') : displayName(active, view)))
-                    : t('conversation.contextOff')}
-                </button>
-                <button
-                  type="button"
-                  className={css.headerIconButton}
-                  data-app-conversation-close
-                  aria-label={t('conversation.close')}
-                  onClick={closeConversation}
-                >
-                  ×
-                </button>
-              </div>
-              <SessionProvider session={conversation}>
-                {props.renderSlot('applications.conversation', {})}
-              </SessionProvider>
-            </aside>
+          {(conversationOpen || dockClosing) && (
+            <ApplicationsDockBody width={conversationOpen ? effectiveDockWidth : 0} narrow={!wide} t={t}>
+              {activeDock !== undefined && (activeDock.kind === 'app-conversation' || activeDock.kind === 'development') && (
+                <DockContextBar
+                  enabled={!contextOff.has(activeDock.id)}
+                  page={currentPage}
+                  onToggle={() => { togglePageContext(activeDock.id) }}
+                  t={t}
+                />
+              )}
+              {conversation === undefined
+                ? (
+                  <div className={css.dockEmpty} data-app-dock-empty>
+                    <p>{t('dock.empty')}</p>
+                    <Button size="sm" variant="outline" data-app-dock-empty-new onClick={() => { void newConversation() }}>{t('dock.newAppConversation')}</Button>
+                  </div>
+                )
+                : (
+                  <SessionProvider session={conversation}>
+                    {props.renderSlot('applications.conversation', {})}
+                  </SessionProvider>
+                )}
+            </ApplicationsDockBody>
           )}
         </div>
+        {conversationOpen && wide && (
+          <div
+            className={css.dockResize}
+            data-app-dock-resize
+            data-dragging={dockDragging ? 'true' : undefined}
+            style={{ left: `calc(100% - ${effectiveDockWidth}px)` }}
+            onPointerDown={startDockResize}
+          />
+        )}
+      </div>
+      {manage !== undefined && (
+        <ManagementPage
+          state={state}
+          views={views}
+          request={manage}
+          narrow={!wide}
+          currentApp={active}
+          currentView={view}
+          scroll={props.manageScroll}
+          onNavigate={props.openManage}
+          onReturn={closeManagement}
+          notices={shellNotices}
+          onOpenApp={openManagedApp}
+          networkProxy={props.networkProxy}
+          settingsProps={props.settingsProps}
+          viewProps={props.viewProps}
+          loadHistory={props.loadHistory}
+          loadTasks={props.loadTasks}
+          loadDataInfo={props.loadDataInfo}
+          restorePreview={props.restorePreview}
+          restoreData={props.restoreData}
+          exportData={props.exportData}
+          previewDataImport={props.previewDataImport}
+          importData={props.importData}
+          {...(props.reloadImportedData === undefined ? {} : { reloadImportedData: props.reloadImportedData })}
+          {...(props.pruneBackups === undefined ? {} : { pruneBackups: props.pruneBackups })}
+          loadGrants={props.loadGrants}
+          loadPolicies={props.loadPolicies}
+          setPolicy={props.setPolicy}
+          setActivation={props.setActivation}
+          checkHealth={props.checkHealth}
+          setAppModel={props.setAppModel}
+          loadModelCatalog={props.loadModelCatalog}
+          loadModelUsage={props.loadModelUsage}
+          loadModelLimits={props.loadModelLimits}
+          setModelLimits={props.setModelLimits}
+          loadConfirmations={props.loadConfirmations}
+          grant={props.grant}
+          revoke={props.revoke}
+          answer={props.answer}
+          cancelConfirmation={props.cancelConfirmation}
+          subscribeChanges={props.subscribeChanges}
+          delegations={props.delegations}
+          cancelDelegation={props.cancelDelegation}
+          openDelegation={props.openDelegation}
+          t={t}
+        />
+      )}
       </div>
       {setupOpen && (
         <Modal
@@ -592,7 +1043,7 @@ export function ApplicationsArea(props: ApplicationsAreaProps): ReactNode {
                 )}
               </div>
             </label>
-            <p className={css.conversationSetupHint}>{t('conversation.setup.hint')}</p>
+            <p className={css.conversationSetupHint} data-app-conversation-setup-hint>{t('conversation.setup.hint')}</p>
             {setupError !== undefined && (
               <p className={css.conversationSetupError} role="alert" data-app-conversation-setup-error>{setupError}</p>
             )}
@@ -607,53 +1058,112 @@ export function ApplicationsArea(props: ApplicationsAreaProps): ReactNode {
           </form>
         </Modal>
       )}
+      {delegation !== undefined && (
+        <Modal
+          open
+          headless
+          onClose={() => { if (!delegateBusy) props.answerDelegation('cancelled') }}
+          title={delegation.delegation.title}
+          className={css.dialog as string}
+        >
+          <div className={css.develop} data-delegate-dialog data-delegation-id={delegation.delegation.id}>
+            <div className={css.developHead}>
+              <strong>{delegation.delegation.title}</strong>
+              <button
+                type="button"
+                className={css.headerIconButton}
+                aria-label={t('develop.close')}
+                disabled={delegateBusy}
+                onClick={() => { props.answerDelegation('cancelled') }}
+              >
+                ×
+              </button>
+            </div>
+            <p className={css.developHint}>{t('delegation.sendHint', { app: delegation.delegation.appId })}</p>
+            <pre className={css.delegateInstructions} data-delegate-instructions>{delegation.delegation.instructions}</pre>
+            <label className={css.developField}>
+              <span>{t('delegation.target')}</span>
+              <select data-delegate-target value={delegateTarget} onChange={(event) => { setDelegateTarget(event.target.value) }}>
+                {props.appConversationTargets().map(target => <option key={target.sessionId} value={target.sessionId} title={target.sessionId}>{sessionLabel(target.sessionId)}</option>)}
+                <option value="new">{t('conversation.new')}</option>
+              </select>
+            </label>
+            {props.appConversationTargets().length === 0 ? (
+              <div className={css.developActions} data-delegate-no-target>
+                <p className={css.conversationSetupHint}>{t('delegation.setupFirst')}</p>
+                <Button
+                  data-delegate-setup
+                  onClick={() => {
+                    props.answerDelegation('cancelled')
+                    void newConversation()
+                  }}
+                >{t('conversation.setup.title')}</Button>
+              </div>
+            ) : null}
+            <label className={css.developField}>
+              <span>{t('delegation.supplement')}</span>
+              <textarea
+                className={css.developField}
+                data-delegate-supplement
+                value={delegateSupplement}
+                onChange={(event) => { setDelegateSupplement(event.target.value) }}
+                placeholder={t('delegation.supplementHint')}
+                rows={4}
+                maxLength={DELEGATE_SUPPLEMENT_MAX}
+              />
+              <span className={css.developHint} data-delegate-supplement-count>
+                {delegateSupplement.length}/{DELEGATE_SUPPLEMENT_MAX}
+              </span>
+            </label>
+            {delegateError === undefined ? null : <p className={css.conversationSetupError} role="alert" data-delegate-error>{delegateError}</p>}
+            <div className={css.developActions}>
+              <Button data-delegate-cancel disabled={delegateBusy} onClick={() => { props.answerDelegation('cancelled') }}>{t('conversation.setup.cancel')}</Button>
+              <Button
+                variant="primary"
+                data-delegate-send
+                disabled={delegateBusy || delegateTarget === '' || (delegateTarget === 'new' && props.appConversationTargets().length === 0)}
+                onClick={() => {
+                  setDelegateBusy(true)
+                  setDelegateError(undefined)
+                  void (async () => {
+                    try {
+                      let sessionId = delegateTarget
+                      if (delegateTarget === 'new') {
+                        const created = await props.createAppConversation()
+                        const createdId = (created as { readonly sessionId?: string }).sessionId
+                        ;(created as { readonly release?: () => void }).release?.()
+                        if (createdId === undefined) throw new Error(t('delegation.newSessionUnavailable'))
+                        sessionId = createdId
+                      }
+                      await props.sendDelegation(delegation.delegation.id, sessionId, delegateSupplement, delegation.delegation.appId)
+                      props.answerDelegation('sent')
+                      await chooseConversation(sessionId)
+                    } catch (error) {
+                      setDelegateBusy(false)
+                      const message = error instanceof Error ? error.message : String(error)
+                      setDelegateError(
+                        /not running|not pending|already executing|not an application-area/u.test(message)
+                          ? t('delegation.targetUnavailable')
+                          : describeError(error),
+                      )
+                    }
+                  })()
+                }}
+              >
+                {delegateBusy ? t('delegation.sending') : t('delegation.send')}
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
       {developOpen && active !== undefined && (
         <DevelopmentDialog
           appId={active.id}
           appName={displayName(active, view)}
           onClose={() => { setDevelopOpen(false) }}
           create={props.createDevelopmentSession}
-          openSession={props.openSession}
-          t={t}
-        />
-      )}
-      {manage !== undefined && (
-        <ManagementDialog
-          state={state}
-          views={views}
-          request={manage}
-          scroll={props.manageScroll}
-          onNavigate={props.openManage}
-          onClose={props.closeManage}
-          settingsProps={props.settingsProps}
-          viewProps={props.viewProps}
-          loadHistory={props.loadHistory}
-          loadTasks={props.loadTasks}
-          loadDataInfo={props.loadDataInfo}
-          restorePreview={props.restorePreview}
-          restoreData={props.restoreData}
-          exportData={props.exportData}
-          previewDataImport={props.previewDataImport}
-          importData={props.importData}
-          {...(props.reloadImportedData === undefined ? {} : { reloadImportedData: props.reloadImportedData })}
-          {...(props.pruneBackups === undefined ? {} : { pruneBackups: props.pruneBackups })}
-          loadGrants={props.loadGrants}
-          loadPolicies={props.loadPolicies}
-          setPolicy={props.setPolicy}
-          setActivation={props.setActivation}
-          setAppModel={props.setAppModel}
-          loadModelCatalog={props.loadModelCatalog}
-          loadModelUsage={props.loadModelUsage}
-          loadModelLimits={props.loadModelLimits}
-          loadCredentials={props.loadCredentials}
-          setCredential={props.setCredential}
-          deleteCredential={props.deleteCredential}
-          setModelLimits={props.setModelLimits}
-          loadConfirmations={props.loadConfirmations}
-          grant={props.grant}
-          revoke={props.revoke}
-          answer={props.answer}
-          cancelConfirmation={props.cancelConfirmation}
+          sessions={props.developmentTargets(active.id)}
+          openSession={(sessionId) => { void openDevelopmentTab(sessionId, active.id) }}
           t={t}
         />
       )}

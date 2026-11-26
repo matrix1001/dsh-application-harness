@@ -5,7 +5,7 @@
  * @module @matrix1001/dsh-application-harness-client-applications/client/DevelopmentDialog
  */
 import { useState, type ReactElement } from 'react'
-import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, Modal } from '@matrix1001/dsh-application-harness-client-chrome'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import css from './ApplicationsArea.module.css'
 
@@ -15,6 +15,7 @@ export interface DevelopmentDialogProps {
   readonly appName: string
   readonly onClose: () => void
   readonly create: (appId: string, path: string) => Promise<string>
+  readonly sessions: readonly { readonly appId: string; readonly sessionId: string }[]
   readonly openSession: (sessionId: string) => void
   readonly t: TranslateNS<'applications'>
 }
@@ -24,7 +25,7 @@ export interface DevelopmentDialogProps {
  * @param props - the app, the creation command and the locale seat.
  * @returns the modal.
  */
-export function DevelopmentDialog({ appId, appName, onClose, create, openSession, t }: DevelopmentDialogProps): ReactElement {
+export function DevelopmentDialog({ appId, appName, onClose, create, sessions, openSession, t }: DevelopmentDialogProps): ReactElement {
   const [path, setPath] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
@@ -51,6 +52,17 @@ export function DevelopmentDialog({ appId, appName, onClose, create, openSession
           <button type="button" className={css.headerIconButton} aria-label={t('develop.close')} onClick={onClose}>×</button>
         </div>
         <p className={css.developHint}>{t('develop.hint', { app: appName })}</p>
+        {/* v8 ignore start -- remembered development Sessions are covered by the panel flow */}
+        {sessions.length > 0 && (
+          <div className={css.developActions} data-develop-existing>
+            {sessions.map(entry => (
+              <Button key={entry.sessionId} data-develop-existing-session={entry.sessionId} onClick={() => { openSession(entry.sessionId) }}>
+                {entry.sessionId}
+              </Button>
+            ))}
+          </div>
+        )}
+        {/* v8 ignore stop */}
         {created === undefined ? (
           <>
             <label className={css.developField}>

@@ -85,7 +85,7 @@ describe('registration', () => {
       start: () => { throw new Error('no storage') },
     }))
     expect(registration.status()).toBe('failed')
-    expect(registration.failure()).toContain('no storage')
+    expect(registration.detail()).toContain('no storage')
     const outcome = await runtime.call(asUser, 'broken', 'echo', { text: 'x' })
     expect(outcome).toMatchObject({ status: 'rejected', error: { code: 'platform.unavailable' } })
   })
@@ -114,7 +114,6 @@ describe('one path for every caller', () => {
       },
     }))
     await runtime.register(callerApp('caller', 'target'))
-    await runtime.grant({ caller: asApp('caller'), capabilities: ['target#echo'], grantedAt: '2026-01-01T00:00:00.000Z' })
 
     expect(await runtime.call(asUser, 'target', 'echo', { text: 'a' })).toMatchObject({ status: 'success', result: 'a' })
     expect(await runtime.call(asAi, 'target', 'echo', { text: 'b' })).toMatchObject({ status: 'success', result: 'b' })
@@ -165,9 +164,6 @@ describe('one path for every caller', () => {
         },
       },
     })
-    const grantedAt = '2026-01-01T00:00:00.000Z'
-    await runtime.grant({ caller: asApp('origin'), capabilities: ['middle#relay'], grantedAt })
-    await runtime.grant({ caller: asApp('middle'), capabilities: ['third#echo'], grantedAt })
 
     const outcome = await runtime.call(asApp('origin'), 'middle', 'relay', { text: 'deep' })
     expect(outcome).toMatchObject({ status: 'success' })
@@ -239,20 +235,60 @@ describe('permission', () => {
     expect(await runtime.grantsOf()).toEqual([])
   })
 
+  it('hands the confirmation channel a bounded, redacted preview of the arguments', async () => {
+    let seen: { preview?: { effect: string; args: string } } | undefined
+    const runtime = new ApplicationRuntime()
+    runtime.useConfirmation({ ask: (request) => { seen = request; return Promise.resolve('denied') } })
+    const base = echoApp('preview')
+    await runtime.register({
+      ...base,
+      ops: {
+        echo: {
+          ...base.ops.echo!,
+          params: { text: { type: 'string' }, token: { type: 'string' }, body: { type: 'string' }, nested: { type: 'json' }, list: { type: 'json' }, small: { type: 'json' }, wide: { type: 'json' } },
+          exposure: { ai: 'confirm' },
+        },
+      },
+    })
+    expect(await runtime.call(asAiSession, 'preview', 'echo', { text: 'x'.repeat(3000), token: 'super-secret', body: 'visible', nested: { a: { b: { c: 'deep' } } }, list: Array.from({ length: 25 }, () => 1), small: [1, 2], wide: Object.fromEntries(Array.from({ length: 25 }, (_, index) => [`k${String(index)}`, index])) }))
+      .toMatchObject({ status: 'rejected', error: { code: 'platform.denied' } })
+    expect(seen?.preview?.effect).toBe('write')
+    const args = seen?.preview?.args ?? ''
+    expect(args).toContain('[redacted]')
+    expect(args).not.toContain('super-secret')
+    expect(args.length).toBeLessThanOrEqual(2049)
+    expect(args).toContain('visible')
+    expect(args).toContain('[depth]')
+    expect(args).toContain('[redacted]')
+    expect(args).toContain('[…]')
+  })
+
+  it('refuses a confirmation that waits past the runtime timeout', async () => {
+    const runtime = new ApplicationRuntime({ confirmationTimeoutMs: 10 })
+    runtime.useConfirmation({ ask: () => new Promise(() => {}) })
+    const base = echoApp('timeout')
+    await runtime.register({
+      ...base,
+      ops: { echo: { ...base.ops.echo!, exposure: { ai: 'confirm' } } },
+    })
+    const settled = await runtime.call(asAiSession, 'timeout', 'echo', { text: 'x' })
+    expect(settled).toMatchObject({ status: 'rejected', error: { code: 'platform.confirmation-unavailable' } })
+  })
+
   it('keeps a caller grant for the same application id across unregister and re-register', async () => {
     const runtime = new ApplicationRuntime()
     await runtime.register({
       ...echoApp('target'),
       ops: { echo: { ...echoApp('target').ops.echo!, exposure: { peers: 'open' } } },
     })
-    await runtime.register(callerApp('caller', 'target'))
-    await runtime.grant({ caller: asApp('caller'), capabilities: ['target#echo'], grantedAt: '2026-01-01T00:00:00.000Z' })
+    await runtime.register({ ...callerApp('caller', 'target'), capabilities: ['model'] })
+    await runtime.grant({ caller: asApp('caller'), capabilities: ['capability:model'], grantedAt: '2026-01-01T00:00:00.000Z' })
     await runtime.stop('caller')
     runtime.unregister('caller')
     // appId is the identity: unregistering the application does not erase what
     // the user approved for it; a re-registered application with the same id
     // inherits the approval (and the permission check still applies).
-    expect(await runtime.grantsOf()).toMatchObject([{ caller: asApp('caller'), capabilities: ['target#echo'] }])
+    expect(await runtime.grantsOf()).toMatchObject([{ caller: asApp('caller'), capabilities: ['capability:model'] }])
     await runtime.register(callerApp('caller', 'target'))
     expect(await runtime.call(asApp('caller'), 'target', 'echo', { text: 'x' })).toMatchObject({ status: 'success' })
   })
@@ -308,7 +344,7 @@ describe('permission', () => {
     }
     const runtime = new ApplicationRuntime()
     runtime.useGrantStore(failing)
-    await expect(runtime.grant({ caller: asApp('caller'), capabilities: ['target#echo'], grantedAt: '2026-01-01T00:00:00.000Z' })).rejects.toThrow(/disk full/u)
+    await expect(runtime.grant({ caller: asApp('caller'), capabilities: ['capability:model'], grantedAt: '2026-01-01T00:00:00.000Z' })).rejects.toThrow(/disk full/u)
 
     const unreadable: GrantStorePort = {
       list: () => Promise.reject(new Error('corrupt')),
@@ -353,16 +389,16 @@ describe('grant table consistency', () => {
     const runtime = new ApplicationRuntime()
     runtime.useGrantStore(store)
     const caller = asApp('caller')
-    await runtime.grant({ caller, capabilities: ['target#delete'], grantedAt: '2026-01-01T00:00:00.000Z' })
+    await runtime.grant({ caller, capabilities: ['capability:model'], grantedAt: '2026-01-01T00:00:00.000Z' })
     // Both start from the same moment: without one serial read-modify-write the
     // second save would be computed from the pre-revoke snapshot and put the
     // revoked capability back.
     await Promise.all([
-      runtime.revoke(caller, 'target#delete'),
-      runtime.grant({ caller, capabilities: ['target#read'], grantedAt: '2026-01-01T00:00:00.000Z' }),
+      runtime.revoke(caller, 'capability:model'),
+      runtime.grant({ caller, capabilities: ['capability:network'], grantedAt: '2026-01-01T00:00:00.000Z' }),
     ])
-    expect(held().flatMap((grant) => grant.capabilities)).toEqual(['target#read'])
-    expect(await runtime.grantsOf()).toMatchObject([{ capabilities: ['target#read'] }])
+    expect(held().flatMap((grant) => grant.capabilities)).toEqual(['capability:network'])
+    expect(await runtime.grantsOf()).toMatchObject([{ capabilities: ['capability:network'] }])
   })
 
   it('never lets a read that started before a change restore what the change removed', async () => {
@@ -441,17 +477,17 @@ describe('grant table consistency', () => {
     const runtime = new ApplicationRuntime()
     runtime.useGrantStore(store)
     const caller = asApp('caller')
-    await runtime.grant({ caller, capabilities: ['a#one', 'a#two'], grantedAt: '' })
+    await runtime.grant({ caller, capabilities: ['capability:model', 'capability:network'], grantedAt: '' })
     await Promise.all([
-      runtime.grant({ caller, capabilities: ['b#one'], grantedAt: '' }),
-      runtime.revoke(caller, 'a#one'),
-      runtime.grant({ caller: asApp('other'), capabilities: ['a#one'], grantedAt: '' }),
-      runtime.revoke(caller, 'a#two'),
+      runtime.grant({ caller, capabilities: ['capability:storage'], grantedAt: '' }),
+      runtime.revoke(caller, 'capability:model'),
+      runtime.grant({ caller: asApp('other'), capabilities: ['capability:model'], grantedAt: '' }),
+      runtime.revoke(caller, 'capability:network'),
     ])
-    expect(held().flatMap((grant) => grant.capabilities).sort()).toEqual(['a#one', 'b#one'])
+    expect(held().flatMap((grant) => grant.capabilities).sort()).toEqual(['capability:model', 'capability:storage'])
     expect(await runtime.grantsOf()).toMatchObject([
-      { caller: { kind: 'app', appId: 'caller' }, capabilities: ['b#one'] },
-      { caller: { kind: 'app', appId: 'other' }, capabilities: ['a#one'] },
+      { caller: { kind: 'app', appId: 'caller' }, capabilities: ['capability:storage'] },
+      { caller: { kind: 'app', appId: 'other' }, capabilities: ['capability:model'] },
     ])
   })
 
@@ -484,7 +520,7 @@ describe('grant table consistency', () => {
         return grants.length > 1 ? Promise.reject(new Error('disk full')) : Promise.resolve().then(() => { held = [...grants] })
       },
     })
-    await expect(runtime.grant({ caller: asApp('owner'), capabilities: ['target#echo'], grantedAt: '' })).rejects.toThrow(/disk full/u)
+    await expect(runtime.grant({ caller: asApp('owner'), capabilities: ['capability:model'], grantedAt: '' })).rejects.toThrow(/disk full/u)
     // The failed change was not cached: the next read asks the store again and
     // sees only what is really there.
     const before = reads
@@ -533,12 +569,12 @@ describe('execution outcomes', () => {
           description: 'refuses with a business code',
           params: { text: { type: 'string', required: true } },
           result: { type: 'string' },
-          execute: () => { throw new AppError('stale-version', 'the object moved on', true) },
+          execute: () => { throw new AppError('stale-version', 'the object moved on', true, { field: 'title', current: 4 }) },
         },
       },
     })
     const outcome = await runtime.call(asUser, 'careful', 'echo', { text: 'x' })
-    expect(outcome).toMatchObject({ status: 'failed', error: { code: 'app.stale-version', message: 'the object moved on' }})
+    expect(outcome).toMatchObject({ status: 'failed', error: { code: 'app.stale-version', message: 'the object moved on', details: { field: 'title', current: 4 } }})
   })
 
   it('treats a cancel request as a request: work that finishes anyway reports what it did', async () => {
@@ -766,6 +802,66 @@ describe('lifecycle', () => {
     expect(runtime.list()[0]?.status()).toBe('stop-incomplete')
   })
 
+  it('holds mounted starts until release and still respects a disabled activation', async () => {
+    const runtime = new ApplicationRuntime()
+    let starts = 0
+    runtime.useActivationResolver(id => id === 'off' ? 'disabled' : undefined)
+    runtime.holdStarts()
+    runtime.mount(echoApp('on', { start: () => { starts += 1 } }))
+    runtime.mount(echoApp('off', { start: () => { starts += 1 } }))
+    expect(runtime.list().map(entry => entry.status())).toEqual(['stopped', 'stopped'])
+    expect(starts).toBe(0)
+    runtime.releaseStarts()
+    await new Promise((resolve) => { setTimeout(resolve, 0) })
+    expect(starts).toBe(1)
+    expect(runtime.list().find(entry => entry.declaration.id === 'on')?.status()).toBe('available')
+    expect(runtime.list().find(entry => entry.declaration.id === 'off')?.status()).toBe('stopped')
+    expect(runtime.list().find(entry => entry.declaration.id === 'off')?.activation()).toBe('disabled')
+  })
+
+  it('defers an explicit enable and stops a never-started record while the gate is closed', async () => {
+    const runtime = new ApplicationRuntime()
+    let starts = 0
+    runtime.useActivationResolver(() => 'disabled')
+    runtime.holdStarts()
+    runtime.mount(echoApp('late', { start: () => { starts += 1 } }))
+    await runtime.setActivation('late', 'enabled')
+    expect(starts).toBe(0)
+    expect(runtime.list()[0]?.status()).toBe('stopped')
+    await runtime.stop('late')
+    runtime.releaseStarts()
+    await new Promise((resolve) => { setTimeout(resolve, 0) })
+    expect(starts).toBe(0)
+    expect(runtime.list()[0]?.status()).toBe('stopped')
+  })
+
+  it('returns the terminal stopped state on a retry after the late work ended, without re-running the hook', async () => {
+    const runtime = new ApplicationRuntime({ stopBudgetMs: 10 })
+    let release: (() => void) | undefined
+    let stopCalls = 0
+    await runtime.register({
+      ...echoApp('slowstop'),
+      ops: {
+        echo: {
+          description: 'waits until released',
+          params: { text: { type: 'string', required: true } },
+          result: { type: 'string' },
+          execute: async () => { await new Promise<void>((resolve) => { release = resolve }); return 'done' },
+        },
+      },
+      stop: () => { stopCalls += 1 },
+    })
+    const work = runtime.call(asUser, 'slowstop', 'echo', { text: 'x' })
+    expect(await runtime.stop('slowstop')).toBe('stop-incomplete')
+    release?.()
+    await work
+    await new Promise((resolve) => { setTimeout(resolve, 0) })
+    expect(runtime.list()[0]?.status()).toBe('stopped')
+    expect(stopCalls).toBe(1)
+    expect(await runtime.stop('slowstop')).toBe('stopped')
+    expect(stopCalls).toBe(1)
+  })
+
   it('reports a stop hook that failed after the budget, and never claims the application stopped', async () => {
     const problems: string[] = []
     const runtime = new ApplicationRuntime({ stopBudgetMs: 10, onProblem: (problem) => { problems.push(problem) } })
@@ -820,7 +916,7 @@ describe('lifecycle', () => {
     const handle = await registration
     await new Promise((resolve) => { setTimeout(resolve, 0) })
     expect(handle.status()).toBe('stopped')
-    expect(handle.failure()).toBeUndefined()
+    expect(handle.detail()).toBeUndefined()
     expect(problems.join(' ')).toContain('start failed after its stop began: start broke late')
   })
 
@@ -842,7 +938,7 @@ describe('lifecycle', () => {
     release?.()
     const registration = await registering
     expect(registration.status()).toBe('failed')
-    expect(registration.failure()).toBe('start broke')
+    expect(registration.detail()).toBe('start broke')
     expect(runtime.list()).toEqual([])
     // The id is free again for a fresh load.
     expect((await runtime.register(echoApp('doomed'))).status()).toBe('available')
@@ -1259,19 +1355,13 @@ describe('grant validation and AI principals', () => {
     })
     const ai = { kind: 'ai' as const, sessionId: 's1' }
     const at = '2026-01-01T00:00:00.000Z'
-    expect(() => runtime.validateGrant({ caller: ai, capabilities: ['ghost#op'], grantedAt: at })).toThrow(/unregistered/u)
-    expect(() => runtime.validateGrant({ caller: ai, capabilities: ['target#missing'], grantedAt: at })).toThrow(/no operation/u)
-    expect(() => runtime.validateGrant({ caller: ai, capabilities: ['target#closed'], grantedAt: at })).toThrow(/not open/u)
-    expect(() => runtime.validateGrant({ caller: { kind: 'ai' }, capabilities: ['target#open'], grantedAt: at })).toThrow(/anonymous/u)
+    expect(() => runtime.validateGrant({ caller: ai, capabilities: ['ghost#op'], grantedAt: at })).toThrow(/operation grants were removed/u)
+    expect(() => runtime.validateGrant({ caller: ai, capabilities: ['target#missing'], grantedAt: at })).toThrow(/operation grants were removed/u)
+    expect(() => runtime.validateGrant({ caller: { kind: 'ai' }, capabilities: ['capability:model'], grantedAt: at })).toThrow(/anonymous/u)
     expect(() => runtime.validateGrant({ caller: ai, capabilities: ['capability:model'], grantedAt: at })).toThrow(/do not use/u)
-    expect(() => runtime.validateGrant({ caller: ai, capabilities: ['target'], grantedAt: at })).toThrow(/not <application>/u)
+    expect(() => runtime.validateGrant({ caller: ai, capabilities: ['target'], grantedAt: at })).toThrow(/not capability/u)
     expect(() => runtime.validateGrant({ caller: ai, capabilities: [], grantedAt: at })).toThrow(/at least one/u)
     expect(() => runtime.validateGrant({ caller: ai, capabilities: ['capability:'], grantedAt: at })).toThrow(/empty platform/u)
-    runtime.validateGrant({ caller: ai, capabilities: ['target#open'], grantedAt: at })
-    runtime.validateGrant({ caller: { kind: 'app', appId: 'target' }, capabilities: ['target#open'], grantedAt: at })
-    // A human can be granted any registered operation; a platform-capability
-    // grant for an application that does not exist yet is deferred, not lost.
-    runtime.validateGrant({ caller: { kind: 'human' }, capabilities: ['target#closed'], grantedAt: at })
     runtime.validateGrant({ caller: { kind: 'app', appId: 'not-registered' }, capabilities: ['capability:model'], grantedAt: at })
     expect(() => runtime.validateGrant({ caller: { kind: 'app', appId: 'target' }, capabilities: ['capability:storage'], grantedAt: at })).toThrow(/does not declare/u)
     runtime.validateGrant({ caller: { kind: 'app', appId: 'target' }, capabilities: ['capability:model'], grantedAt: at })
@@ -1436,6 +1526,7 @@ describe('assertDeclarable', () => {
     let captured: CallOutcome | undefined
     await runtime.register({
       ...echoApp('owner'),
+      capabilities: ['model'],
       calls: ['target'],
       start: (ctx) => {
         // Background work is a task; its context carries the application's own
@@ -1446,7 +1537,7 @@ describe('assertDeclarable', () => {
         })
       },
     })
-    const grant: CapabilityGrant = { caller: asApp('owner'), capabilities: ['target#echo'], grantedAt: '2026-01-01T00:00:00.000Z' }
+    const grant: CapabilityGrant = { caller: asApp('owner'), capabilities: ['capability:model'], grantedAt: '2026-01-01T00:00:00.000Z' }
     await runtime.grant(grant)
     await new Promise((resolve) => { setTimeout(resolve, 30) })
     expect(captured).toMatchObject({ status: 'success' })
@@ -1461,7 +1552,6 @@ describe('assertDeclarable', () => {
     })
     // The grant exists before the hook runs: a start hook's call is checked
     // exactly like an operation's (same declaration, same grant, same identity).
-    await runtime.grant({ caller: asApp('owner'), capabilities: ['target#echo'], grantedAt: '2026-01-01T00:00:00.000Z' })
     let outcome: CallOutcome | undefined
     await runtime.register({
       ...echoApp('owner'),

@@ -15,33 +15,31 @@ afterEach(() => {
 })
 
 describe('the area preferences', () => {
-  it('starts expanded, remembers what the human chose, and comes back to it on a reload', () => {
+  it('starts at host order, remembers what the human chose, and comes back to it on a reload', () => {
     const store = createPreferences()
     expect(store.getSnapshot()).toEqual(PREFERENCE_DEFAULTS)
-    store.set({ ...store.getSnapshot(), navExpanded: false, lastAppId: 'workbook' })
-    expect(store.getSnapshot()).toEqual({ navExpanded: false, lastAppId: 'workbook', navOrder: [] })
+    store.set({ ...store.getSnapshot(), lastAppId: 'workbook' })
+    expect(store.getSnapshot()).toEqual({ lastAppId: 'workbook' })
     // A reload is a fresh store over the same origin's storage.
     expect(JSON.parse(localStorage.getItem(PREFERENCES_KEY) as string)).toEqual({
-      navExpanded: false,
       lastAppId: 'workbook',
-      navOrder: [],
     })
     const reloaded = createPreferences()
-    expect(reloaded.getSnapshot()).toEqual({ navExpanded: false, lastAppId: 'workbook', navOrder: [] })
-    // The human's own navigation order rides the same record.
-    store.set({ ...store.getSnapshot(), navOrder: ['info-hub', 'workbook'] })
-    expect(createPreferences().getSnapshot().navOrder).toEqual(['info-hub', 'workbook'])
+    expect(reloaded.getSnapshot()).toEqual({ lastAppId: 'workbook' })
+    // The fixed tab list (membership and order) rides the same record.
+    store.set({ ...store.getSnapshot(), pinned: ['info-hub', 'workbook'] })
+    expect(createPreferences().getSnapshot().pinned).toEqual(['info-hub', 'workbook'])
   })
 
-  it('keeps the navigation toggle in memory when the browser refuses to store, and persists nothing', () => {
+  it('keeps a preference in memory when the browser refuses to store, and persists nothing', () => {
     // Quota, private mode: the write throws, the page still works.
     vi.spyOn(console, 'error').mockImplementation(() => {})
     vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
       throw new Error('QuotaExceededError')
     })
     const store = createPreferences()
-    expect(() => { store.set({ navExpanded: false, navOrder: [] }) }).not.toThrow()
-    expect(store.getSnapshot().navExpanded).toBe(false)
+    expect(() => { store.set({ pinned: ['info-hub'] }) }).not.toThrow()
+    expect(store.getSnapshot().pinned).toEqual(['info-hub'])
     // Nothing was persisted, so the next load falls back to the defaults rather
     // than half-applying a preference the storage never held.
     expect(createPreferences().getSnapshot()).toEqual(PREFERENCE_DEFAULTS)

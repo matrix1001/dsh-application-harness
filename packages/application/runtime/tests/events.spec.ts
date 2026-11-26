@@ -98,18 +98,70 @@ describe('events', () => {
     expect(received).toEqual([])
   })
 
-  it('requires an open declaration, a subscriber declaration and a user grant', async () => {
+  it('keeps the intent without failing start when a registered publisher has not opened the event', async () => {
     const runtime = new ApplicationRuntime()
-    await runtime.register(publisher())
-    await runtime.register(subscriber())
+    await runtime.register(publisher({ events: { changed: { description: 'not open yet' } } }))
+    const started: string[] = []
+    const received: AppEvent[] = []
+    await runtime.register(subscriber({
+      start: async (ctx) => {
+        started.push('started')
+        await ctx.subscribe('publisher', 'changed', (event) => { received.push(event) })
+      },
+    }))
+    expect(started).toEqual(['started'])
+    // Publishing the closed event skips delivery but keeps the intent.
+    runtime.publishEvent('publisher', 'changed')
+    expect(received).toEqual([])
     const noop = (): void => {}
     await expect(runtime.subscribe('missing', 'publisher', 'changed', noop)).rejects.toThrow(/no application missing/u)
-    await expect(runtime.subscribe('subscriber', 'missing', 'changed', noop)).rejects.toThrow(/no application missing/u)
-    await expect(runtime.subscribe('subscriber', 'publisher', 'unknown', noop)).rejects.toThrow(/does not declare the event/u)
-    await expect(runtime.subscribe('subscriber', 'publisher', 'private', noop)).rejects.toThrow(/not open/u)
+    await runtime.register(subscriber({ id: 'wide', subscriptions: [
+      { appId: 'publisher', type: 'changed' },
+      { appId: 'publisher', type: 'unknown' },
+      { appId: 'publisher', type: 'private' },
+    ] }))
+    // Registered but not open is a wait, not a rejection.
+    await expect(runtime.subscribe('wide', 'publisher', 'unknown', noop)).resolves.toBeTypeOf('function')
+    await expect(runtime.subscribe('wide', 'publisher', 'private', noop)).resolves.toBeTypeOf('function')
     await runtime.register(otherWithoutSubscriptions())
     await expect(runtime.subscribe('other', 'publisher', 'changed', noop)).rejects.toThrow(/does not declare the subscription/u)
-    await expect(runtime.subscribe('subscriber', 'publisher', 'changed', noop)).rejects.toThrow(/not approved/u)
+    // An unregistered publisher is deferred, not refused: an application may
+    // subscribe before the application it watches starts.
+    await runtime.register(subscriber({ id: 'watcher', subscriptions: [{ appId: 'ghost', type: 'changed' }] }))
+    await expect(runtime.subscribe('watcher', 'ghost', 'changed', noop)).resolves.toBeTypeOf('function')
+  })
+
+  it('records a subscription before the approval and delivers once granted', async () => {
+    const runtime = new ApplicationRuntime({ grants: store([]) })
+    const received: AppEvent[] = []
+    await runtime.register(publisher())
+    await runtime.register(subscriber())
+    await runtime.subscribe('subscriber', 'publisher', 'changed', (event) => { received.push(event) })
+    runtime.publishEvent('publisher', 'changed')
+    expect(received).toEqual([])
+    await runtime.grant({ caller: { kind: 'app', appId: 'subscriber' }, capabilities: ['event:publisher#changed'], grantedAt: at })
+    runtime.publishEvent('publisher', 'changed')
+    expect(received).toHaveLength(1)
+    // Replacing the approval stops delivery but keeps the intent, so approving
+    // again resumes it without a restart.
+    await runtime.revoke({ kind: 'app', appId: 'subscriber' }, 'publisher')
+    runtime.publishEvent('publisher', 'changed')
+    expect(received).toHaveLength(1)
+    await runtime.grant({ caller: { kind: 'app', appId: 'subscriber' }, capabilities: ['event:publisher#changed'], grantedAt: at })
+    runtime.publishEvent('publisher', 'changed')
+    expect(received).toHaveLength(2)
+    await runtime.stop('subscriber')
+  })
+
+  it('defers a subscription whose publisher is not registered yet', async () => {
+    const runtime = new ApplicationRuntime({ grants: store([grant(['event:publisher#changed'])]) })
+    const received: AppEvent[] = []
+    await runtime.register(subscriber())
+    await runtime.subscribe('subscriber', 'publisher', 'changed', (event) => { received.push(event) })
+    await runtime.register(publisher())
+    runtime.publishEvent('publisher', 'changed')
+    expect(received).toHaveLength(1)
+    await runtime.stop('subscriber')
   })
 
   it('validates the publisher, event type and every reference', async () => {
@@ -148,7 +200,33 @@ describe('events', () => {
     await runtime.stop('publisher')
   })
 
-  it('skips bindings for another event and keeps a subscriber binding when the publisher stops', async () => {
+  it('drops a binding when the grant table is replaced without that grant', async () => {
+    const runtime = new ApplicationRuntime({ grants: store([grant(['event:publisher#changed'])]) })
+    const received: AppEvent[] = []
+    await runtime.register(publisher())
+    await runtime.register(subscriber())
+    await runtime.subscribe('subscriber', 'publisher', 'changed', (event) => { received.push(event) })
+    runtime.useGrantStore(store([]))
+    runtime.publishEvent('publisher', 'changed')
+    expect(received).toEqual([])
+    await runtime.stop('subscriber')
+  })
+
+  it('drops a binding when the publisher closes the event after it was subscribed', async () => {
+    const runtime = new ApplicationRuntime({ grants: store([grant(['event:publisher#changed'])]) })
+    const received: AppEvent[] = []
+    await runtime.register(publisher())
+    await runtime.register(subscriber())
+    await runtime.subscribe('subscriber', 'publisher', 'changed', (event) => { received.push(event) })
+    await runtime.stop('publisher')
+    runtime.unregister('publisher')
+    await runtime.register(publisher({ events: { changed: { description: 'now closed', subscription: 'closed' } } }))
+    expect(runtime.publishEvent('publisher', 'changed')).toBeDefined()
+    expect(received).toEqual([])
+    await runtime.stop('subscriber')
+  })
+
+  it('skips bindings for another event and drops delivery after the publisher stops', async () => {
     const runtime = new ApplicationRuntime({ grants: store([grant(['event:publisher#changed'])]) })
     const received: AppEvent[] = []
     await runtime.register(publisher())
@@ -156,9 +234,11 @@ describe('events', () => {
     await runtime.subscribe('subscriber', 'publisher', 'changed', (event) => { received.push(event) })
     runtime.publishEvent('publisher', 'other')
     expect(received).toEqual([])
-    // Stopping the publisher walks the subscriber's binding (no match) without removing it.
+    // The publisher's stop makes the binding stale; publish returns the event
+    // but the live check removes the binding before delivery.
     await runtime.stop('publisher')
     expect(runtime.publishEvent('publisher', 'changed')).toBeDefined()
+    expect(received).toEqual([])
     await runtime.stop('subscriber')
   })
 

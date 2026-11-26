@@ -7,7 +7,6 @@ test('parseValidateArgs accepts the isolated validation flags', () => {
   assert.deepEqual(parseValidateArgs(['--app', 'notes', '--port', '3200', '--keep']), {
     app: 'notes', port: 3200, keep: true, help: false,
   })
-  assert.equal(parseValidateArgs(['--app', 'notes', '--checkout', '/tmp/checkout']).checkout, '/tmp/checkout')
   assert.equal(parseValidateArgs(['--app', 'notes', '--root', 'tmp/x']).root, resolve('tmp/x'))
   assert.equal(parseValidateArgs(['--help']).help, true)
 })

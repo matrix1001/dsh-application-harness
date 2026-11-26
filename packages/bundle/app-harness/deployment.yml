@@ -5,7 +5,7 @@
 schemaVersion: 1
 
 # 部署等级：Local = 单机、单用户、单进程（当前唯一交付形态）。框架不持有工作区
-# 账本：业务数据由各应用自己的文档承载（见下面的 workspaceFiles / homeFiles）。
+# 账本：业务数据由各应用自己的文档承载（持久位置见下面的 homeFiles）。
 # 另两级（Managed / Shared）在本仓未实现，显式列出以表明能力边界。
 deployment:
   level: local
@@ -20,12 +20,10 @@ deployment:
       description: 多用户/多宿主共享存储；本仓未实现
       implemented: false
 
-# 平台版本：声明线（本仓 pin）。执行线随 checkout、registry 线随 npm，
-# 三线差异由 scripts/verify-execution-line.mjs 在 release:check 内对照。
+# 平台版本：本仓只跟 npm 已发布的 DSH 版本；没有 platform checkout 执行线。
 platform:
-  declaredLine: 0.2.2-rc.2
-  executionSource: checkout | registry
-  note: 日常部署自平台 checkout 启动（执行线 = checkout）；CI 用 registry 线。
+  declaredLine: 0.2.3-alpha.2
+  note: 运行与构建都来自 npm 已发布线（node scripts/deps.mjs 安装），CI 与本地同一条线。
 
 # 服务集合：bundle patch 的机制行（id → 包名，逐行对照
 # packages/bundle/app-harness/cordis.patch.yml）。门禁按 id 前缀把 `client-`/`ui-`
@@ -49,35 +47,26 @@ services:
 # 应用集合：由各包 package.json 的 dsh.appRow 声明，经
 # scripts/generate-bundle-patch.mjs 聚合进 bundle patch 生成段。
 applications:
+  - id: home
+    package: '@matrix1001/dsh-application-harness-home'
   - id: notes
     package: '@matrix1001/dsh-application-harness-notes'
-  - id: tasks
-    package: '@matrix1001/dsh-application-harness-tasks'
-  - id: calendar
-    package: '@matrix1001/dsh-application-harness-calendar'
+  - id: todo
+    package: '@matrix1001/dsh-application-harness-todo'
   - id: inbox
     package: '@matrix1001/dsh-application-harness-inbox'
-  - id: usage
-    package: '@matrix1001/dsh-application-harness-usage'
-  - id: disk-space
-    package: '@matrix1001/dsh-application-harness-disk-space'
   - id: git-browser
     package: '@matrix1001/dsh-application-harness-git-browser'
-  - id: workspace-review
-    package: '@matrix1001/dsh-application-harness-workspace-review'
 
 # 客户端能力：客户端插件包（各自有 dsh.client 半与自己的 bundle）。
 client:
   packages:
     - '@matrix1001/dsh-application-harness-client-applications'
+    - '@matrix1001/dsh-application-harness-home-view'
     - '@matrix1001/dsh-application-harness-notes-view'
-    - '@matrix1001/dsh-application-harness-tasks-view'
-    - '@matrix1001/dsh-application-harness-calendar-view'
+    - '@matrix1001/dsh-application-harness-todo-view'
     - '@matrix1001/dsh-application-harness-inbox-view'
-    - '@matrix1001/dsh-application-harness-usage-view'
-    - '@matrix1001/dsh-application-harness-disk-space-view'
     - '@matrix1001/dsh-application-harness-git-browser-view'
-    - '@matrix1001/dsh-application-harness-workspace-review-view'
   # 静态库：没有 dsh.client 半，被视图包直接值导入并内联进各自 bundle
   # （purity gate 的 INLINE_WORKSPACE 白名单）。
   inlined:
@@ -105,9 +94,10 @@ execution:
 
 # 家目录业务文件（harness home，cwd 无关）：持久化存储与应用自有配置这类「跟人走」
 # 的数据。真源 = bundle patch 行的 config（应用自己的走 dsh.appRow.config），经
-# dshHomePath 解析到 harness home。与上面 workspaceFiles 的绑定同样做双向核对：
-# 每条声明都必须能在 bundle patch 或包 dsh.appRow.config 找到绑定，反之出现的每个
-# dshHomePath(...) 与 `${process.cwd()}/<相对路径>` 也必须在这里列出。
+# dshHomePath 解析到 harness home。homeFiles 的绑定做双向核对（本部署未声明
+# workspaceFiles）：每条声明都必须能在 bundle patch 或包 dsh.appRow.config 找到
+# 绑定，反之出现的每个 dshHomePath(...) 与 `${process.cwd()}/<相对路径>` 也必须
+# 在这里列出。
 # **其他组合文件不在扫描面内**（例如 execution.compositions 列出的
 # examples/*/cordis.yml），它们的路径绑定不参与此处的双向检查。
 homeFiles:
@@ -147,10 +137,13 @@ homeFiles:
   - path: dshHomePath('application-harness/tasks.jsonl')
     owner: '@matrix1001/dsh-application-harness-host-bridge'
     declaredBy: bundle patch row app-bridge (config.tasksPath)
-  - path: dshHomePath('application-harness/secrets.json')
+  - path: dshHomePath('application-harness/delegations.json')
     owner: '@matrix1001/dsh-application-harness-host-bridge'
-    declaredBy: bundle patch row app-bridge (config.secretsPath)
-  - path: dshHomePath('application-harness/disk-space/index.db')
-    owner: '@matrix1001/dsh-application-harness-disk-space'
-    declaredBy: dsh.appRow.config.databasePath
+    declaredBy: bundle patch row app-bridge (config.delegationsPath)
 
+  # 笔记附件字节：应用自管的目录（不是单文件），位于同一 harness home 下。笔记文档只存
+  # 附件元数据，所以平台整库备份不含这些字节；附件的备份路径是笔记自己的 JSON 导出/导入
+  # （预算内内联 base64，超出预算只给元数据与警告）。
+  - path: dshHomePath('application-harness/notes/attachments')
+    owner: '@matrix1001/dsh-application-harness-notes'
+    declaredBy: notes package dsh.appRow config (attachmentsPath)

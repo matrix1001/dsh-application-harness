@@ -109,6 +109,20 @@ describe('the bridge onboarding face', () => {
     }
   })
 
+  it('includes the process command declaration in the fingerprint', async () => {
+    const runner = demoApp('runner', {
+      capabilities: ['process'],
+      process: [{ executable: 'git', commands: ['status'], purpose: 'read' }],
+    })
+    const { bridge, dispose } = await host([runner])
+    try {
+      expect(await bridge.markOnboardingSeen('runner', 'capability:process|process:git:status:read'))
+        .toMatchObject({ apps: { runner: { fingerprint: 'capability:process|process:git:status:read' } } })
+    } finally {
+      await dispose()
+    }
+  })
+
   it('fingerprints an application with no declared capabilities as the empty string', async () => {
     const bare = demoApp('bare')
     delete (bare as { capabilities?: readonly string[] }).capabilities

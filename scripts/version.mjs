@@ -15,10 +15,11 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import semver from 'semver'
+import { packageManifests } from './package-areas.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const PREFIX = '@matrix1001/dsh-application-harness'
@@ -35,22 +36,19 @@ function requestedVersion() {
 
 /** Every publishable package manifest in the release train. */
 function manifests() {
-  const files = []
-  for (const area of ['application', 'client', 'examples', 'bundle']) {
-    const areaDir = join(ROOT, 'packages', area)
-    for (const dir of readdirSync(areaDir).sort()) {
-      const file = join(areaDir, dir, 'package.json')
+  return packageManifests(ROOT)
+    .map((file) => {
       try {
-        const manifest = JSON.parse(readFileSync(file, 'utf8'))
-        if (typeof manifest.name === 'string' && (manifest.name === PREFIX || manifest.name.startsWith(`${PREFIX}-`)) && manifest.private !== true) {
-          files.push({ file, manifest })
-        }
+        return { file, manifest: JSON.parse(readFileSync(file, 'utf8')) }
       } catch {
-        // A directory without a manifest is not a package.
+        // A vanished/partial manifest is not a publishable package.
+        return undefined
       }
-    }
-  }
-  return files
+    })
+    .filter((entry) => entry !== undefined)
+    .filter(({ manifest }) => typeof manifest.name === 'string'
+      && (manifest.name === PREFIX || manifest.name.startsWith(`${PREFIX}-`))
+      && manifest.private !== true)
 }
 
 const version = requestedVersion()

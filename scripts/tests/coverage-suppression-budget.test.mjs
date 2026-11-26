@@ -13,8 +13,7 @@ const PACKAGES = join(ROOT, 'packages')
  * control), 124 for the on-disk store's always-present byte size, and 125 for
  * the import-confirm guard (the control renders only after a preview), and
  * 126 for a file vanishing between a walk and its candidate stat, and 190 for
- * the eight new application surfaces (calendar, inbox, usage, disk-space,
- * git-browser, workspace-review, notes and tasks editors): their defensive
+ * the four application surfaces (notes, todo, inbox and git-browser editors): their defensive
  * malformed-input/UI-only branches are marked in place, while line/function
  * coverage stays at 100%. */
 const BUDGET = 190

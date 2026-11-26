@@ -1,9 +1,9 @@
 {
   "name": "@matrix1001/dsh-application-harness-client-chrome",
   "description": "Shared application world-view page chrome (Section + TabBar): a browser-static library each consuming client bundle inlines",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "engines": {
-    "dsh": ">=0.2.2-rc.2 <0.3.0-0"
+    "dsh": "0.2.3-alpha.2"
   },
   "publishConfig": {
     "access": "public"
@@ -35,14 +35,15 @@
   "devDependencies": {
     "@testing-library/react": "^16.1.0",
     "@types/react": "~18.3.1",
+    "@types/react-dom": "^18.3.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "@deepseek-ai/cordis": "4.1.0",
+    "@deepseek-ai/cordis": "4.2.0-alpha.1",
     "@matrix1001/dsh-application-harness-client-applications": "workspace:*",
     "@matrix1001/dsh-application-harness-host-bridge": "workspace:*"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "4.1.0"
+    "@deepseek-ai/cordis": "4.2.0-alpha.1"
   },
   "author": "matrix1001"
 }

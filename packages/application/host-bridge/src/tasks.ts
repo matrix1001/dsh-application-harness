@@ -11,12 +11,11 @@
  * @module @matrix1001/dsh-application-harness-host-bridge/tasks
  */
 
-import { appendFile, mkdir, readFile, rename, rm, stat } from 'node:fs/promises'
-import { dirname } from 'node:path'
-import { isMissingFile, reasonOf } from '@matrix1001/dsh-application-harness-store/atomic'
 import type {
-  Caller, JsonValue, TaskError, TaskOrigin, TaskProgress, TaskSnapshot, TaskState,
+  JsonValue, TaskError, TaskOrigin, TaskProgress, TaskSnapshot, TaskState,
 } from './types.ts'
+import { reasonOf } from '@matrix1001/dsh-application-harness-store/atomic'
+import { appendRotated, callerOf, isRecord, readJsonl } from './jsonl.ts'
 
 /** The soft per-file ceiling: the next state append rotates first once this is exceeded. */
 export const TASK_FILE_LIMIT = 2 * 1024 * 1024
@@ -101,14 +100,7 @@ export class FileTasks {
   private appendState(task: TaskSnapshot): void {
     const text = `${JSON.stringify(task)}\n`
     const run = async (): Promise<void> => {
-      await mkdir(dirname(this.path), { recursive: true })
-      const size = await stat(this.path).then(info => info.size).catch(() => 0)
-      if (size > 0 && size + Buffer.byteLength(text) > TASK_FILE_LIMIT) {
-        const rotated = `${this.path}.1`
-        await rm(rotated, { force: true })
-        await rename(this.path, rotated)
-      }
-      await appendFile(this.path, text)
+      await appendRotated(this.path, text, TASK_FILE_LIMIT)
     }
     const attempt = this.chain.then(run, run)
     this.chain = attempt.catch((error: unknown) => {
@@ -130,28 +122,13 @@ export class FileTasks {
   private async read(): Promise<readonly TaskSnapshot[]> {
     const records = new Map<string, TaskSnapshot>()
     for (const path of [`${this.path}.1`, this.path]) {
-      let text: string
-      try {
-        text = await readFile(path, 'utf8')
-      } catch (error: unknown) {
-        if (!isMissingFile(error)) this.report(`tasks: ${path} cannot be read: ${reasonOf(error)}`)
-        continue
-      }
-      let bad = 0
-      for (const line of text.split('\n')) {
-        if (line.trim() === '') continue
-        try {
-          const task = taskOf(JSON.parse(line))
-          if (task === undefined) bad += 1
-          else records.set(task.taskId, task)
-        } catch {
-          bad += 1
-        }
-      }
+      const { records: tasks, bad } = await readJsonl(path, taskOf, this.report, 'tasks')
+      for (const task of tasks) records.set(task.taskId, task)
       if (bad > 0) this.report(`tasks: skipped ${String(bad)} malformed line(s) in ${path}`)
     }
     return [...records.values()]
   }
+
 }
 
 const TASK_STATES: readonly TaskState[] = ['running', 'cancelling', 'succeeded', 'failed', 'cancelled', 'interrupted']
@@ -213,22 +190,4 @@ function progressOf(value: unknown): TaskProgress | undefined {
 function errorOf(value: unknown): TaskError | undefined {
   if (!isRecord(value) || typeof value.code !== 'string' || typeof value.message !== 'string') return undefined
   return { code: value.code, message: value.message }
-}
-
-function callerOf(value: unknown): Caller | undefined {
-  if (!isRecord(value)) return undefined
-  if (value.kind === 'human') return { kind: 'human' }
-  if (value.kind === 'app' || value.kind === 'background') {
-    return typeof value.appId === 'string' && value.appId !== '' ? { kind: value.kind, appId: value.appId } : undefined
-  }
-  if (value.kind !== 'ai') return undefined
-  return {
-    kind: 'ai',
-    ...(typeof value.sessionId === 'string' ? { sessionId: value.sessionId } : {}),
-    ...(typeof value.turnId === 'string' ? { turnId: value.turnId } : {}),
-  }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

@@ -66,6 +66,7 @@ export function collectArtifacts(root = ROOT) {
     if (existsSync(join(root, name))) found.add(name)
   }
 
+  const packageRoots = []
   const packages = join(root, 'packages')
   if (existsSync(packages)) {
     for (const area of readdirSync(packages)) {
@@ -73,15 +74,26 @@ export function collectArtifacts(root = ROOT) {
       if (firstSegment(area) === 'node_modules' || !lstatSync(areaPath).isDirectory()) continue
       for (const pkg of readdirSync(areaPath)) {
         const pkgPath = join(areaPath, pkg)
-        if (!lstatSync(pkgPath).isDirectory()) continue
-        for (const dir of PACKAGE_ARTIFACT_DIRS) {
-          if (existsSync(join(pkgPath, dir))) found.add(relative(root, join(pkgPath, dir)))
-        }
-        for (const entry of readdirSync(pkgPath)) {
-          if (ARTIFACT_SUFFIXES.some((suffix) => entry.endsWith(suffix))) {
-            found.add(relative(root, join(pkgPath, entry)))
-          }
-        }
+        if (lstatSync(pkgPath).isDirectory()) packageRoots.push(pkgPath)
+      }
+    }
+  }
+  const apps = join(root, 'apps')
+  if (existsSync(apps)) {
+    for (const app of readdirSync(apps)) {
+      for (const face of ['host', 'view']) {
+        const pkgPath = join(apps, app, face)
+        if (existsSync(pkgPath) && lstatSync(pkgPath).isDirectory()) packageRoots.push(pkgPath)
+      }
+    }
+  }
+  for (const pkgPath of packageRoots) {
+    for (const dir of PACKAGE_ARTIFACT_DIRS) {
+      if (existsSync(join(pkgPath, dir))) found.add(relative(root, join(pkgPath, dir)))
+    }
+    for (const entry of readdirSync(pkgPath)) {
+      if (ARTIFACT_SUFFIXES.some((suffix) => entry.endsWith(suffix))) {
+        found.add(relative(root, join(pkgPath, entry)))
       }
     }
   }

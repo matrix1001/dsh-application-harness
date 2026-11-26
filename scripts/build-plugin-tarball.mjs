@@ -3,7 +3,7 @@
  * Build one self-contained installable bundle tarball.
  *
  * A DSH profile installs the bundle with `dsh plugin add <tarball>`. The bundle
- * declares its 23 own packages as dependencies, so a normal tarball would make
+ * declares its own packages as dependencies, so a normal tarball would make
  * the user configure a private registry. Instead this script vendors those
  * packages into the bundle's `node_modules` and records them as
  * `bundleDependencies`; the result is one asset with no registry lookup for
@@ -16,7 +16,7 @@
  * as a clean, self-contained asset. Own packages are still packed with pnpm so
  * their `workspace:` dependencies are rewritten.
  *
- * Run `node scripts/build-release.mjs` first: this script packs the existing
+ * Run `pnpm run build` first: this script packs the existing
  * `lib/` products and never chooses a platform build line by itself.
  *
  * Usage:
@@ -30,10 +30,10 @@ import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, write
 import { createHash } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { packageDirs } from './package-areas.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const BUNDLE_DIR = join(ROOT, 'packages', 'bundle', 'app-harness')
-const AREAS = ['application', 'client', 'examples']
 const WORK = join(ROOT, 'tmp', 'plugin-tarball')
 const ASSETS = join(WORK, 'assets')
 const PACK_ROOT = join(WORK, 'pack')
@@ -62,17 +62,13 @@ function tarballName(name, version) {
 function ownPackages(bundle) {
   const names = Object.keys(bundle.dependencies).filter((name) => name.startsWith(PREFIX))
   const found = new Map()
-  for (const area of AREAS) {
-    const base = join(ROOT, 'packages', area)
-    for (const dir of readdirSync(base)) {
-      const file = join(base, dir, 'package.json')
-      if (!existsSync(file)) continue
-      const manifest = json(file)
-      if (names.includes(manifest.name)) found.set(manifest.name, { dir: join(base, dir), manifest })
-    }
+  for (const dir of packageDirs(ROOT)) {
+    const file = join(dir, 'package.json')
+    const manifest = json(file)
+    if (names.includes(manifest.name)) found.set(manifest.name, { dir, manifest })
   }
   const missing = names.filter((name) => !found.has(name))
-  if (missing.length > 0) throw new Error(`bundle dependencies not found in packages/: ${missing.join(', ')}`)
+  if (missing.length > 0) throw new Error(`bundle dependencies not found in the workspace: ${missing.join(', ')}`)
   return found
 }
 
@@ -97,6 +93,18 @@ function packBundle() {
   return path
 }
 
+/** Remove local-only sourcemap comments from an assembled pack tree. */
+function stripSourceMapComments(root) {
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const path = join(root, entry.name)
+    if (entry.isDirectory()) { stripSourceMapComments(path); continue }
+    if (!entry.name.endsWith('.js')) continue
+    const text = readFileSync(path, 'utf8')
+    const stripped = text.replace(/^\/\/# sourceMappingURL=.*$/gmu, '')
+    if (stripped !== text) writeFileSync(path, stripped)
+  }
+}
+
 /** Copy the files a published bundle needs into the pack root. */
 function copyBundle() {
   mkdirSync(PACK_ROOT, { recursive: true })
@@ -117,7 +125,7 @@ function copyBundle() {
 function main() {
   const bundle = json(join(BUNDLE_DIR, 'package.json'))
   if (bundle.name !== BUNDLE) throw new Error(`unexpected bundle name: ${bundle.name}`)
-  if (!existsSync(join(BUNDLE_DIR, 'lib', 'index.js'))) throw new Error('bundle lib/index.js is missing — run node scripts/build-release.mjs first')
+  if (!existsSync(join(BUNDLE_DIR, 'lib', 'index.js'))) throw new Error('bundle lib/index.js is missing — run `pnpm run build` first')
   const own = ownPackages(bundle)
   const version = bundle.version
   rmSync(WORK, { recursive: true, force: true })
@@ -134,6 +142,7 @@ function main() {
   }
 
   copyBundle()
+  stripSourceMapComments(PACK_ROOT)
   const manifestPath = join(PACK_ROOT, 'package.json')
   const release = json(manifestPath)
   for (const name of own.keys()) release.dependencies[name] = version
@@ -152,19 +161,52 @@ function main() {
   // Verify the asset independently of the build tree: every own package is
   // present, no workspace protocol leaked into a manifest, and the bundle
   // patch/license are included.
-  const listing = execFileSync('tar', ['-tzf', target], { encoding: 'utf8' })
+  const listing = execFileSync('tar', ['-tzf', target], { encoding: 'utf8' }).split('\n').filter(Boolean)
   if (listing.includes('package/../')) throw new Error('tarball contains a parent-relative path')
   for (const name of own.keys()) {
     if (!listing.includes(`package/node_modules/${name}/package.json`)) throw new Error(`tarball is missing ${name}`)
   }
-  if (!listing.includes('package/cordis.patch.yml')) throw new Error('tarball is missing cordis.patch.yml')
-  if (!listing.includes('package/LICENSE')) throw new Error('tarball is missing LICENSE')
-  if (!listing.includes('package/locale/en.json')) throw new Error('tarball is missing locale/en.json')
+  for (const required of [
+    'package/cordis.patch.yml',
+    'package/deployment.yml',
+    'package/LICENSE',
+    'package/locale/en.json',
+    'package/locale/zh.json',
+    'package/lib/index.js',
+    'package/lib/types/index.d.ts',
+  ]) {
+    if (!listing.includes(required)) throw new Error(`tarball is missing ${required}`)
+  }
   const extracted = join(WORK, 'verify')
   mkdirSync(extracted, { recursive: true })
   execFileSync('tar', ['-xzf', target, '-C', extracted], { stdio: 'pipe' })
-  for (const file of [join(extracted, 'package', 'package.json'), ...own.keys().map((name) => join(extracted, 'package', 'node_modules', ...name.split('/'), 'package.json'))]) {
-    if (readFileSync(file, 'utf8').includes('workspace:')) throw new Error(`${file} still contains workspace:`)
+  const nestedManifests = [join(extracted, 'package', 'package.json'), ...own.keys().map((name) => join(extracted, 'package', 'node_modules', ...name.split('/'), 'package.json'))]
+  const deployment = readFileSync(join(extracted, 'package', 'deployment.yml'), 'utf8')
+  const declaredLine = /declaredLine:\s*(\S+)/u.exec(deployment)?.[1]
+  if (declaredLine === undefined) throw new Error('tarball deployment.yml has no platform.declaredLine')
+  for (const file of nestedManifests) {
+    const text = readFileSync(file, 'utf8')
+    if (text.includes('workspace:')) throw new Error(`${file} still contains workspace:`)
+    const manifest = JSON.parse(text)
+    if (manifest.version !== version) throw new Error(`${file} is ${manifest.version}, release is ${version}`)
+    if (manifest.engines?.dsh !== undefined && manifest.engines.dsh !== declaredLine) {
+      throw new Error(`${file} engines.dsh ${manifest.engines.dsh} does not match ${declaredLine}`)
+    }
+    for (const field of ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']) {
+      for (const [name, value] of Object.entries(manifest[field] ?? {})) {
+        if (name.startsWith('@deepseek-ai/dsh') && value !== declaredLine) {
+          throw new Error(`${file} ${field}.${name}=${value} does not match ${declaredLine}`)
+        }
+      }
+    }
+  }
+  // Shipped JS must not leak the build machine, and every sourceMappingURL
+  // must point at a file the tarball actually ships.
+  const absolute = /(?:^|[\s"'`(=:,])\/(?:home|Users)\/[^/\s"'`]+\//u
+  for (const item of listing.filter(entry => entry.endsWith('.js'))) {
+    const source = readFileSync(join(extracted, item), 'utf8')
+    if (absolute.test(source)) throw new Error(`${item} contains a build-machine absolute path`)
+    if (source.includes('sourceMappingURL=')) throw new Error(`${item} still carries a sourceMappingURL after packaging`)
   }
   process.stdout.write(`\nplugin tarball: ${target}\n`)
   process.stdout.write(`size: ${(bytes.length / 1024 / 1024).toFixed(2)} MiB\n`)

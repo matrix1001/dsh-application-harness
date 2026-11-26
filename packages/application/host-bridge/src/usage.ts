@@ -4,8 +4,7 @@
  * credentials. Missing usage is counted separately, never as zero.
  * @module @matrix1001/dsh-application-harness-host-bridge/usage
  */
-import { existsSync } from 'node:fs'
-import { readVersionedJson, writeVersionedJson } from './platform-files.ts'
+import { AppTableStore } from './app-table.ts'
 import type { ModelUsageSummary } from './types.ts'
 
 /** One completed model call as the port reports it. */
@@ -36,36 +35,26 @@ function summaryOf(value: unknown): ModelUsageSummary {
  * The usage table: loaded once, updated serially, written atomically.
  */
 export class ModelUsageStore {
-  private readonly entries = new Map<string, ModelUsageSummary>()
-  private queue: Promise<void> = Promise.resolve()
-  private readonly path: string
+  private readonly table: AppTableStore<ModelUsageSummary>
 
-  constructor(path: string) { this.path = path }
+  constructor(path: string) {
+    this.table = new AppTableStore(path, 'model-usage table', summaryOf)
+  }
 
   /** Load the table; a corrupt file is reported by the host and treated as empty. */
   async load(): Promise<void> {
-    if (!existsSync(this.path)) return
-    const record = await readVersionedJson(this.path, 1, 'model-usage table', (document) => {
-      const apps = document.apps
-      if (typeof apps !== 'object' || apps === null || Array.isArray(apps)) throw new Error('the model-usage table needs an apps object')
-      const parsed: Record<string, ModelUsageSummary> = {}
-      for (const [appId, value] of Object.entries(apps)) parsed[appId] = summaryOf(value)
-      return parsed
-    })
-    /* v8 ignore next -- a file that disappears between the existence check and the read is treated as empty */
-    for (const [appId, summary] of Object.entries(record ?? {})) this.entries.set(appId, summary)
+    await this.table.load()
   }
 
   /** One application's aggregate (or the empty one). */
-  get(appId: string): ModelUsageSummary { return this.entries.get(appId) ?? emptyUsage() }
+  get(appId: string): ModelUsageSummary { return this.table.get(appId) ?? emptyUsage() }
 
   /** Record one completed call and persist. */
   async record(appId: string, record: ModelUsageRecord): Promise<void> {
     const now = new Date().toISOString()
-    this.queue = this.queue.then(async () => {
-      const previous = this.entries.get(appId)
+    await this.table.update(appId, (previous) => {
       const current = previous ?? emptyUsage()
-      const next: ModelUsageSummary = {
+      return {
         calls: current.calls + 1,
         succeeded: current.succeeded + (record.status === 'success' ? 1 : 0),
         failed: current.failed + (record.status === 'failed' ? 1 : 0),
@@ -80,15 +69,6 @@ export class ModelUsageStore {
         lastStatus: record.status,
         ...(record.model === undefined ? (current.lastModel === undefined ? {} : { lastModel: current.lastModel }) : { lastModel: record.model }),
       }
-      this.entries.set(appId, next)
-      try {
-        await writeVersionedJson(this.path, 1, { apps: Object.fromEntries(this.entries) })
-      } catch (error) {
-        if (previous === undefined) this.entries.delete(appId)
-        else this.entries.set(appId, previous)
-        throw error
-      }
     })
-    await this.queue
   }
 }

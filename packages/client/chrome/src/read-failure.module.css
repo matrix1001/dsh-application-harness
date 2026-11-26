@@ -1,0 +1,53 @@
+.failure {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-group);
+  padding: var(--app-space-block) var(--app-space-section);
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-left: 3px solid var(--dsw-alias-state-warn-primary);
+  border-radius: var(--app-radius);
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font-size: var(--app-font-body);
+  line-height: var(--app-line-normal);
+}
+
+.failure[data-read-failure='undeclared'] {
+  border-left-color: var(--dsw-alias-state-error-primary);
+}
+
+.title {
+  margin: 0;
+  font-weight: 600;
+}
+
+.body {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--app-space-group);
+}
+
+.diagnostic {
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--app-font-meta);
+}
+
+.diagnostic summary {
+  cursor: pointer;
+}
+
+.diagnostic code {
+  display: block;
+  margin-top: var(--app-space-tight);
+  overflow-wrap: anywhere;
+}
+
+.diagnostic p {
+  margin: var(--app-space-tight) 0 0;
+  overflow-wrap: anywhere;
+}

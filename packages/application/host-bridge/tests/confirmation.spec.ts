@@ -28,6 +28,8 @@ describe('out-of-session confirmation', () => {
     expect(question).toMatchObject({ id: 'confirmation-1', caller: { kind: 'ai' }, capability: 'secret-app#secret' })
     expect(Date.parse(question!.at)).not.toBeNaN()
     expect(question!.reason).toContain('secret-app#secret')
+    expect(question!.preview).toMatchObject({ effect: 'write' })
+    expect(question!.preview?.args).toBe('{}')
 
     // Allowing runs the call once, and clears the question.
     expect(bridge.answerConfirmation(question!.id, 'allowed-once')).toBe(true)

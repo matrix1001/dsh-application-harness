@@ -16,9 +16,21 @@
 
 import { useState, useSyncExternalStore } from 'react'
 import type { JsonValue } from '@matrix1001/dsh-application-harness-host-bridge/client'
-import type { ApplicationUiState, ApplicationUiStore } from '@matrix1001/dsh-application-harness-client-applications/client'
 
 const NOOP_SUBSCRIBE = (): (() => void) => () => {}
+
+/** The fields of one application's view state (JSON data only). */
+export type ApplicationUiState = Readonly<Record<string, JsonValue>>
+
+/** One write into the view state: named fields, with `undefined` dropping a field. */
+export type ApplicationUiPatch = Readonly<Record<string, JsonValue | undefined>>
+
+/** The view-state store the shell hands one registered page. */
+export interface ApplicationUiStore {
+  getSnapshot(): ApplicationUiState
+  set(patch: ApplicationUiPatch): void
+  subscribe(listener: () => void): () => void
+}
 
 /** A partial test double is not a store: only a complete face may receive a write. */
 function usableStore(ui: ApplicationUiStore | undefined): ApplicationUiStore | undefined {

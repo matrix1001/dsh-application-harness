@@ -1,4 +1,4 @@
-/* The record vocabulary the management dialog and the debug form share:
+/* The record vocabulary the management page and the debug form share:
  * sections, record cards, capability rows, one call's outcome. Semantic
  * aliases only (the shared --dsw-* tokens), no literal colors. */
 
@@ -57,38 +57,10 @@
   font-size: var(--app-font-meta);
 }
 
-.recordMetaText {
-  color: var(--dsw-alias-label-secondary);
-  font-size: var(--app-font-meta);
-}
-
 .recordMessage {
   margin: 0;
   color: var(--dsw-alias-label-secondary);
   font-size: var(--app-font-body);
-}
-
-.capabilities {
-  display: flex;
-  flex-direction: column;
-  gap: var(--app-space-tight);
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.capability {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--app-space-group);
-}
-
-.capabilityText {
-  display: flex;
-  flex-direction: column;
-  gap: var(--app-space-hairline);
-  min-width: 0;
 }
 
 .needTitle {
@@ -157,17 +129,29 @@
   cursor: pointer;
 }
 
+.confirmPreview {
+  display: flex;
+  gap: var(--app-space-group, 8px);
+  align-items: flex-start;
+  overflow-wrap: anywhere;
+}
+
+.confirmPreview code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .needDetails code {
   display: block;
   margin-top: 4px;
   color: var(--dsw-alias-label-secondary);
-  font-family: var(--dsw-font-family-mono, ui-monospace, monospace);
+  font-family: ui-monospace, monospace;
   overflow-wrap: anywhere;
 }
 
 .code {
   color: var(--dsw-alias-label-secondary);
-  font-family: var(--dsw-font-family-mono, ui-monospace, monospace);
+  font-family: ui-monospace, monospace;
   font-size: var(--app-font-meta);
 }
 
@@ -218,7 +202,7 @@
   padding: 8px;
   overflow: auto;
   border-radius: var(--dsw-radius-sm, 6px);
-  font-family: var(--dsw-font-family-mono, ui-monospace, monospace);
+  font-family: ui-monospace, monospace;
   font-size: var(--app-font-meta);
   background: var(--dsw-alias-bg-base);
 }
@@ -272,7 +256,7 @@
 .textarea {
   min-height: 96px;
   resize: vertical;
-  font-family: var(--dsw-font-family-mono, ui-monospace, monospace);
+  font-family: ui-monospace, monospace;
 }
 
 .formError {

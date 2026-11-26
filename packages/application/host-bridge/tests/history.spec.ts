@@ -49,6 +49,20 @@ describe('FileHistory: append, load, window', () => {
     await reloaded.flush()
   })
 
+  it('round-trips a process command field', async () => {
+    const path = join(temp(), 'history.jsonl')
+    const history = new FileHistory(path, () => {})
+    history.write(record('process', { op: 'process', command: 'git status' }))
+    await history.flush()
+    expect((await new FileHistory(path, () => {}).history())[0]).toMatchObject({ op: 'process', command: 'git status' })
+  })
+
+  it('drops a record whose process command is not a string', async () => {
+    const path = join(temp(), 'history.jsonl')
+    writeFileSync(path, `${JSON.stringify({ ...record('process', { op: 'process' }), command: 7 })}\n`)
+    expect(await new FileHistory(path, () => {}).history()).toEqual([])
+  })
+
   it('skips malformed lines and reports them once', async () => {
     const path = join(temp(), 'history.jsonl')
     const valid = record('good')

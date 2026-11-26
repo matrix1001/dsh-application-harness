@@ -24,12 +24,12 @@ describe('the watch stream', () => {
     try {
       expect(await nextFrame(stream)).toMatchObject({ kind: 'ready', apps: [] })
       runtime.mount({ ...demoApp(), start: () => start.promise })
-      expect(await nextFrame(stream)).toMatchObject({ kind: 'lifecycle', appId: 'demo', apps: [{ status: 'starting' }] })
+      expect(await nextFrame(stream)).toMatchObject({ kind: 'lifecycle', appId: 'demo', apps: [{ runtime: 'starting' }] })
       start.resolve()
-      expect(await nextFrame(stream)).toMatchObject({ kind: 'lifecycle', apps: [{ status: 'available' }] })
+      expect(await nextFrame(stream)).toMatchObject({ kind: 'lifecycle', apps: [{ runtime: 'ready' }] })
       await runtime.stop('demo')
-      expect(await nextFrame(stream)).toMatchObject({ kind: 'lifecycle', apps: [{ status: 'stopping' }] })
-      expect(await nextFrame(stream)).toMatchObject({ kind: 'lifecycle', apps: [{ status: 'stopped' }] })
+      expect(await nextFrame(stream)).toMatchObject({ kind: 'lifecycle', apps: [{ runtime: 'stopping' }] })
+      expect(await nextFrame(stream)).toMatchObject({ kind: 'lifecycle', apps: [{ runtime: 'stopped' }] })
       runtime.unregister('demo')
       expect(await nextFrame(stream)).toMatchObject({ kind: 'lifecycle', apps: [] })
     } finally {
@@ -47,7 +47,7 @@ describe('the watch stream', () => {
     const ready = await nextFrame(stream)
     expect(ready).toMatchObject({ kind: 'ready' })
     if (ready.kind !== 'ready') throw new Error('expected the ready frame')
-    expect(ready.apps.map((app) => [app.id, app.status])).toEqual([['demo', 'available'], ['secret-app', 'available']])
+    expect(ready.apps.map((app) => [app.id, app.runtime])).toEqual([['demo', 'ready'], ['secret-app', 'ready']])
     expect(ready.apps[0]?.ops[0]).toMatchObject({ name: 'echo', exposure: {} })
 
     await bridge.call('demo', 'touch', {})

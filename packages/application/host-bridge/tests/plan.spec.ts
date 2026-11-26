@@ -23,15 +23,15 @@ describe('data plans', () => {
       const preview = bridge.dataImportPreview('alpha', json)
       expect(preview.planId).toMatch(/^plan_/u)
       expect(preview.expiresAt).toBeGreaterThan(Date.now())
-      const first = await bridge.dataImport('alpha', json, preview.planId, 'req-1')
-      const replay = await bridge.dataImport('alpha', json, preview.planId, 'req-1')
+      const first = await bridge.dataImport('alpha', preview.planId, 'req-1')
+      const replay = await bridge.dataImport('alpha', preview.planId, 'req-1')
       expect(replay).toEqual(first)
       expect(readdirSync(join(dirOf(db))).filter(name => name.startsWith('app-data.sqlite.before-import-'))).toHaveLength(1)
-      await expect(bridge.dataImport('alpha', json, preview.planId, 'req-2')).rejects.toThrow(/already committed/u)
+      await expect(bridge.dataImport('alpha', preview.planId, 'req-2')).rejects.toThrow(/already committed/u)
       // The explicit cancel path removes a plan before it is committed.
       const discarded = bridge.dataImportPreview('alpha', json)
       expect(bridge.discardDataPlan(discarded.planId!)).toBe(true)
-      await expect(bridge.dataImport('alpha', json, discarded.planId, 'req-3')).rejects.toThrow(/missing or expired/u)
+      await expect(bridge.dataImport('alpha', discarded.planId, 'req-3')).rejects.toThrow(/missing or expired/u)
     } finally {
       await dispose()
     }
@@ -47,7 +47,7 @@ describe('data plans', () => {
       const json = bridge.dataExport('alpha').json
       for (let index = 0; index < 6; index += 1) {
         const preview = bridge.dataImportPreview('alpha', json)
-        await bridge.dataImport('alpha', json, preview.planId, `req-${String(index)}`)
+        await bridge.dataImport('alpha', preview.planId, `req-${String(index)}`)
       }
       expect(bridge.dataInfo('alpha').backupCount).toBe(5)
     } finally {
@@ -64,19 +64,19 @@ describe('data plans', () => {
     try {
       const json = bridge.dataExport('alpha').json
       const preview = bridge.dataImportPreview('alpha', json)
-      await expect(bridge.dataImport('alpha', json, preview.planId)).rejects.toThrow(/request id/u)
-      await expect(bridge.dataImport('beta', json, preview.planId, 'req')).rejects.toThrow(/different application/u)
+      await expect(bridge.dataImport('alpha', preview.planId, '')).rejects.toThrow(/request id/u)
+      await expect(bridge.dataImport('beta', preview.planId, 'req')).rejects.toThrow(/different application/u)
       const backupStore = new SqliteDataStore({ dbPath: db })
       const backup = backupStore.backupTo(`${db}.before-import-kind`)
       backupStore.close()
       const restorePlan = bridge.dataRestorePreview('alpha', backup)
-      await expect(bridge.dataImport('alpha', json, restorePlan.planId, 'req')).rejects.toThrow(/different application or operation/u)
+      await expect(bridge.dataImport('alpha', restorePlan.planId, 'req')).rejects.toThrow(/different application or operation/u)
       let first: string | undefined
       for (let index = 0; index < 51; index += 1) {
         const next = bridge.dataImportPreview('alpha', json)
         first ??= next.planId
       }
-      await expect(bridge.dataImport('alpha', json, first, 'req')).rejects.toThrow(/missing or expired/u)
+      await expect(bridge.dataImport('alpha', first!, 'req')).rejects.toThrow(/missing or expired/u)
     } finally {
       await dispose()
     }
@@ -94,7 +94,7 @@ describe('data plans', () => {
       const changed = new SqliteDataStore({ dbPath: db })
       changed.putDocument('alpha', 'settings', { theme: 'light' })
       changed.close()
-      await expect(bridge.dataImport('alpha', json, preview.planId, 'req')).rejects.toThrow(/changed since the import preview/u)
+      await expect(bridge.dataImport('alpha', preview.planId, 'req')).rejects.toThrow(/changed since the import preview/u)
     } finally {
       await dispose()
     }
@@ -113,7 +113,7 @@ describe('data plans', () => {
       const json = bridge.dataExport('alpha').json
       const preview = bridge.dataImportPreview('alpha', json)
       vi.setSystemTime(now.getTime() + 6 * 60 * 1000)
-      await expect(bridge.dataImport('alpha', json, preview.planId, 'req')).rejects.toThrow(/expired/u)
+      await expect(bridge.dataImport('alpha', preview.planId, 'req')).rejects.toThrow(/expired/u)
     } finally {
       await dispose()
     }
@@ -129,10 +129,10 @@ describe('data plans', () => {
     const { bridge, dispose } = await host([demoApp('alpha')], {}, { dataPath: db })
     try {
       const preview = bridge.dataRestorePreview('alpha', backup)
-      const first = await bridge.dataRestore('alpha', backup, preview.previewFingerprint, preview.planId, 'req-1')
-      const replay = await bridge.dataRestore('alpha', backup, preview.previewFingerprint, preview.planId, 'req-1')
+      const first = await bridge.dataRestore('alpha', preview.planId, 'req-1')
+      const replay = await bridge.dataRestore('alpha', preview.planId, 'req-1')
       expect(replay).toEqual(first)
-      await expect(bridge.dataRestore('alpha', backup, preview.previewFingerprint, preview.planId, 'req-2')).rejects.toThrow(/already committed/u)
+      await expect(bridge.dataRestore('alpha', preview.planId, 'req-2')).rejects.toThrow(/already committed/u)
     } finally {
       await dispose()
     }
@@ -183,7 +183,7 @@ describe('data plans', () => {
       const inFlight = bridge.call('alpha', 'lateWrite', {})
       await running
       // Never an unhandled rejection: the refusal is settled into a value.
-      const committing = bridge.dataImport('alpha', json, preview.planId, 'req-1').then(
+      const committing = bridge.dataImport('alpha', preview.planId, 'req-1').then(
         value => ({ ok: true as const, value }),
         (error: unknown) => ({ ok: false as const, error }),
       )
@@ -237,7 +237,7 @@ describe('data plans', () => {
       const preview = bridge.dataRestorePreview('alpha', backup)
       const inFlight = bridge.call('alpha', 'lateWrite', {})
       await running
-      const committing = bridge.dataRestore('alpha', backup, preview.previewFingerprint, preview.planId, 'req-1').then(
+      const committing = bridge.dataRestore('alpha', preview.planId, 'req-1').then(
         value => ({ ok: true as const, value }),
         (error: unknown) => ({ ok: false as const, error }),
       )

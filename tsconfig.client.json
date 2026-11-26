@@ -20,19 +20,17 @@
   // belongs to the host aggregate, which excludes this program's `*.client.*`
   // in turn. `exclude` wins over `include`, so the test glob above stays broad.
   "exclude": [
-    "packages/client/*/tests/**/*.host.spec.ts"
+    "packages/client/*/tests/**/*.host.spec.ts",
+    "apps/*/view/tests/**/*.host.spec.ts"
   ],
   "references": [
     { "path": "./packages/client/applications" },
     { "path": "./packages/client/chrome" },
     { "path": "./packages/client/object-reference" },
-    { "path": "./packages/client/notes-view" },
-    { "path": "./packages/client/tasks-view" },
-    { "path": "./packages/client/calendar-view" },
-    { "path": "./packages/client/inbox-view" },
-    { "path": "./packages/client/usage-view" },
-    { "path": "./packages/client/disk-space-view" },
-    { "path": "./packages/client/git-browser-view" },
-    { "path": "./packages/client/workspace-review-view" }
+    { "path": "./apps/home/view" },
+    { "path": "./apps/notes/view" },
+    { "path": "./apps/todo/view" },
+    { "path": "./apps/inbox/view" },
+    { "path": "./apps/git-browser/view" }
   ]
 }

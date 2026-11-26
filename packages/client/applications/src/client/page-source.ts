@@ -20,14 +20,25 @@ import { pageToken } from './page-token.ts'
 /** The name this source registers under: the chip's owner id and its menu group key. */
 export const PAGE_SOURCE_NAME = 'page'
 
+/** Which Sessions receive page context, and which application a development Session is bound to. */
+export interface PageSourceSessions {
+  /** Whether the Session may attach page context (application-area or development). */
+  readonly isOwner: (sessionId: string) => boolean
+  /** The application a development Session is bound to, if it is one. */
+  readonly boundApp: (sessionId: string) => string | undefined
+}
+
 /**
  * Build the source one plugin mount owns.
  * @param pageContext - the store the mounted page reports into.
+ * @param t - the applications dictionary.
+ * @param sessions - the Session ownership test; absent keeps the row offered everywhere.
  * @returns the trigger source (register it through `ctx.inputTriggers`).
  */
 export function createPageSource(
   pageContext: PageContextService,
   t?: TranslateNS<'applications'>,
+  sessions?: PageSourceSessions,
 ): InputTriggerSource {
   return {
     trigger: '@',
@@ -35,9 +46,12 @@ export function createPageSource(
     // The single row names the page itself; a group title would only repeat it.
     showGroupTitle: false,
     order: -10,
-    candidates: () => {
+    candidates: (session) => {
       const context = pageContext.current()
       if (context === undefined) return Promise.resolve([])
+      if (sessions !== undefined && !sessions.isOwner(session.sessionId)) return Promise.resolve([])
+      const boundApp = sessions?.boundApp(session.sessionId)
+      if (boundApp !== undefined && context.appId !== boundApp) return Promise.resolve([])
       return Promise.resolve([candidateOf(context, t?.('reference.currentPage') ?? 'Current page')])
     },
     onPick: ({ candidate }) => {

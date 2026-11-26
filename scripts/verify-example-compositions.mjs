@@ -45,8 +45,9 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import yaml from 'js-yaml'
+import { applyEntryPatches, parseEntryYaml } from '@deepseek-ai/cordis-plugin-include'
 import { insertedRowsOf, patchRowsOf } from './descriptor-rows.mjs'
+import { appHostDirs, appViewDirs } from './package-areas.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const BUNDLE_PATCH = join(ROOT, 'packages/bundle/app-harness/cordis.patch.yml')
@@ -59,29 +60,22 @@ const INCLUDE_NAME = '@deepseek-ai/cordis-plugin-include'
 
 /** Parse a patch composition into its row list (raw rows with id + name). */
 function parseRows(text, file) {
-  // `!!js "..."` tags are a yaml convention for js template expressions; the
-  // tag is custom js-yaml schema material that bore no yaml meaning before it,
-  // so strip the marker and let the value parse as a plain string — the gate
-  // only reads ids and names anyway.
+  // Parse with the loader's own dialect (YAML 1.2 core + `!!js`), so the gate
+  // reads exactly what the loader reads instead of a second parser's idea of it.
   let doc
   try {
-    doc = yaml.loadAll(text.replaceAll('!!js ', ''))
-  } catch {
-    throw new Error(`unparseable yaml at ${file}`)
+    doc = parseEntryYaml(text)
+  } catch (cause) {
+    throw new Error(`unparseable yaml at ${file}: ${String(cause?.message ?? cause)}`)
   }
   // A patch document is a top-level list of rows (a `- id: …` list with no
   // wrapper, e.g. examples/applications) or an `insert:` block, either as a
-  // mapping or as the single element of a top-level list.
-  let d = Array.isArray(doc) ? doc[0] : doc
-  if (Array.isArray(d) && d[0]?.insert) d = d[0]
-  const list = Array.isArray(d) ? d : d?.insert
-  if (!Array.isArray(list)) {
-    throw new Error(`no row list found at ${file} (expected a top-level list or an "insert:" block)`)
-  }
-  // The platform's patch shape allows rows and `insert:` elements in ONE list
-  // (`examples/applications/ui-usage-fixture.patch.yml` is exactly that: two
-  // overrides plus an inserted fixture row) — flatten the inserts so the gate
-  // reads it like the loader does.
+  // mapping or as the single element of a top-level list. A list may mix rows
+  // and `insert:` elements in one document; flatten both the same way.
+  let list
+  if (Array.isArray(doc)) list = doc
+  else if (doc !== null && typeof doc === 'object' && doc.insert !== undefined) list = Array.isArray(doc.insert) ? doc.insert : [doc.insert]
+  else throw new Error(`no row list found at ${file} (expected a top-level list or an "insert:" block)`)
   const rows = []
   for (const item of list) {
     if (item !== null && typeof item === 'object' && item.insert !== undefined) {
@@ -108,9 +102,22 @@ function parseRows(text, file) {
 function effectiveRows(text, file, seen = new Set()) {
   const here = resolve(file)
   if (seen.has(here)) throw new Error(`include cycle at ${file}`)
-  seen = new Set(seen).add(here)
+  return expandRows(parseRows(text, file), file, new Set(seen).add(here))
+}
+
+/**
+ * Expand the include rows of one composition, applying the loader's own patch
+ * dialect to each included document (`applyEntryPatches`). This is the same
+ * code path the loader runs, so a patch shape the gate has not seen is applied
+ * correctly instead of being rejected by a second implementation.
+ * @param rows - parsed rows of the current document.
+ * @param file - the document's path (for diagnostics and relative includes).
+ * @param seen - the include chain, for cycle detection.
+ * @returns the effective mounted rows.
+ */
+function expandRows(rows, file, seen) {
   const out = []
-  for (const row of parseRows(text, file)) {
+  for (const row of rows) {
     if (row.name !== INCLUDE_NAME) {
       out.push(row)
       continue
@@ -123,25 +130,22 @@ function effectiveRows(text, file, seen = new Set()) {
     if (!existsSync(target)) {
       throw new Error(`include target ${target} (referenced by ${file}) does not exist`)
     }
-    out.push(...effectiveRows(readFileSync(target, 'utf8'), target, seen))
+    if (seen.has(target)) throw new Error(`include cycle at ${target}`)
     const patches = row.config?.patches ?? []
     if (!Array.isArray(patches)) {
       throw new Error(`include row "${row.id}" at ${file} carries a non-array config.patches`)
     }
-    for (const patch of patches) {
-      if (patch !== null && typeof patch === 'object' && typeof patch.id === 'string') {
-        throw new Error(`include patch "${patch.id}" at ${file} targets existing rows — the gate only expands id-less "insert" patches; extend it`)
-      }
-      if (patch !== null && typeof patch === 'object' && patch.insert !== undefined) {
-        const inserted = Array.isArray(patch.insert) ? patch.insert : [patch.insert]
-        if (inserted.some((row) => typeof row?.id !== 'string')) {
-          throw new Error(`include patch insert at ${file} carries rows without an id`)
-        }
-        out.push(...inserted)
-      } else {
-        throw new Error(`include patch at ${file} uses "${Object.keys(patch ?? {}).join(', ') || 'no keys'}" — the gate only expands id-less "insert" patches; extend it`)
-      }
+    const warnings = []
+    let patched
+    try {
+      patched = applyEntryPatches(parseRows(readFileSync(target, 'utf8'), target), patches, (message) => warnings.push(String(message)))
+    } catch (cause) {
+      throw new Error(`include patches at ${file} could not be applied: ${String(cause?.message ?? cause)}`)
     }
+    if (warnings.length > 0) {
+      throw new Error(`include patches at ${file} did not apply: ${warnings.join('; ')}`)
+    }
+    out.push(...expandRows(patched.data, target, new Set(seen).add(target)))
   }
   return out
 }
@@ -194,20 +198,17 @@ function overlayFiles() {
 /** The example rows (id → declaration) from each package's `dsh.appRow`. */
 function exampleAppRows() {
   const map = new Map()
-  for (const group of ['examples', 'client']) {
-    for (const sub of readdirSync(join(ROOT, 'packages', group)).sort()) {
-      const pkgFile = join(ROOT, 'packages', group, sub, 'package.json')
-      if (!existsSync(pkgFile)) continue
-      let pkg
-      try {
-        pkg = JSON.parse(readFileSync(pkgFile, 'utf8'))
-      } catch {
-        continue // A malformed manifest is the package's own problem; the row is just skipped.
-      }
-      const row = pkg === null || typeof pkg !== 'object' ? undefined : pkg.dsh?.appRow
-      if (row === undefined) continue
-      map.set(row.id, row)
+  for (const dir of [...appHostDirs(ROOT), ...appViewDirs(ROOT)]) {
+    const pkgFile = join(dir, 'package.json')
+    let pkg
+    try {
+      pkg = JSON.parse(readFileSync(pkgFile, 'utf8'))
+    } catch {
+      continue // A malformed manifest is the package's own problem; the row is just skipped.
     }
+    const row = pkg === null || typeof pkg !== 'object' ? undefined : pkg.dsh?.appRow
+    if (row === undefined) continue
+    map.set(row.id, row)
   }
   return map
 }

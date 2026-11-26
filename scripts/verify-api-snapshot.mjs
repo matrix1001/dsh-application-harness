@@ -76,6 +76,7 @@ import { globSync } from 'node:fs'
 import { join, relative, resolve, dirname, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { STALE_ENTRY_GRACE_MS, newestSourceMtime } from './deployment-packages.mjs'
+import { packageDirs } from './package-areas.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -514,9 +515,9 @@ export function surfaceOf(root, dir, packages = new Map(), memo = new Map(), rea
  * @returns package directories relative to `root`.
  */
 export function publishablePackages(root) {
-  return globSync('packages/*/*/package.json', { cwd: root })
-    .map((path) => dirname(path))
-    .filter((dir) => dir.startsWith('packages/typert') === false)
+  return packageDirs(root)
+    .map(dir => relative(root, dir))
+    .filter(dir => dir.startsWith('packages/typert') === false)
     .sort()
 }
 

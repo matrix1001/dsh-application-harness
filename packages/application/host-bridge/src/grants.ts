@@ -59,8 +59,8 @@ export class GrantFileStore implements GrantStorePort {
       GRANT_TABLE_VERSION,
       'application grant table',
       (document) => grantsOfDocument(document, this.path),
-    )
-    return grants ?? []
+    ) ?? []
+    return grants
   }
 
   /**
@@ -93,6 +93,7 @@ function grantOfWire(value: unknown): CapabilityGrant | undefined {
   if (caller === undefined) return undefined
   const capabilities = value.capabilities
   if (!Array.isArray(capabilities) || capabilities.length === 0 || capabilities.some(entry => typeof entry !== 'string' || entry === '')) return undefined
+  if (capabilities.some(entry => !entry.startsWith('capability:') && !entry.startsWith('event:'))) return undefined
   if (typeof value.grantedAt !== 'string') return undefined
   return { caller, capabilities: capabilities as string[], grantedAt: value.grantedAt }
 }

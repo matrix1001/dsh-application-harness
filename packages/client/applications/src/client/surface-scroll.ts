@@ -21,7 +21,7 @@ const positions = new Map<string, number>()
 /**
  * Where one area's positions live. The default is this module's own map (the
  * business surface, which belongs to the browser page); a caller whose memory
- * belongs to an INSTANCE — the management dialog's, cleared when an application
+ * belongs to an INSTANCE — the management page's, cleared when an application
  * unregisters — passes its own (`manage.ts`).
  */
 export interface SurfaceMemory {

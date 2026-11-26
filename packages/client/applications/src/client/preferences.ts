@@ -1,6 +1,6 @@
 /**
  * The application area's own layout preferences: which application the human
- * was last on, and whether the navigation column is expanded. Kept apart from
+ * was last on and the order of the application tabs. Kept apart from
  * business data, drafts and grants (they belong to the applications and the
  * host), and apart from the per-application view state (that belongs to each
  * application): a lost preference only costs one click, so storage that
@@ -14,7 +14,7 @@
  * @module @matrix1001/dsh-application-harness-client-applications/client/preferences
  */
 
-import { createSnapshotStore, type SnapshotStore } from '@deepseek-ai/dsh-client-store'
+import { createSnapshotStore, type SnapshotStore } from '@matrix1001/dsh-application-harness-client-chrome'
 
 /** The storage key (namespaced + versioned, as the platform's own preferences are). */
 export const PREFERENCES_KEY = 'dsh.applications.preferences.v1'
@@ -23,32 +23,44 @@ export const PREFERENCES_KEY = 'dsh.applications.preferences.v1'
 export interface ApplicationPreferences {
   /** The application the human was last on; absent before the first choice. */
   readonly lastAppId?: string | undefined
-  /** Whether the desktop navigation column is expanded. */
-  readonly navExpanded: boolean
   /**
-   * The human's own order of the page applications (host ids). Empty means the
-   * host registration order; ids that no longer exist are ignored, and an
-   * application the list does not name is appended in host order.
+   * The page applications fixed to the tab strip, in the human's order.
+   * Absent means "all page applications are fixed" (a fresh deployment);
+   * `[]` means every page application is in the more-applications menu.
+   * Ids that no longer exist are ignored.
    */
-  readonly navOrder: readonly string[]
+  readonly pinned?: readonly string[] | undefined
   /**
    * The application area's dedicated conversation: the Workspace that owns it
    * and the Session the pane shows. Absent before the first-use setup; the
    * ids are a UI mapping, never business data.
    */
   readonly appConversation?: { readonly workspaceId: string; readonly sessionId: string } | undefined
+  /** The application-area conversations, in creation order; the active target is above. */
+  readonly appConversations?: readonly { readonly workspaceId: string; readonly sessionId: string }[] | undefined
+  /** Development Sessions by application; UI mapping only. */
+  readonly developmentSessions?: readonly { readonly appId: string; readonly sessionId: string }[] | undefined
+  /** Whether the application-area dock is expanded; absent = collapsed. */
+  readonly dockExpanded?: boolean | undefined
+  /** The dock's remembered width in px. */
+  readonly dockWidth?: number | undefined
+  /** The Session the dock last showed. */
+  readonly dockActive?: string | undefined
+  /** Whether the other applications' development tabs are unfolded. */
+  readonly dockOtherDevOpen?: boolean | undefined
+  /** Normal Sessions opened as dock tabs (the session ids). */
+  readonly dockNormalTabs?: readonly string[] | undefined
+  /** Session tabs explicitly closed in the dock (the Session remains in its list). */
+  readonly dockHidden?: readonly string[] | undefined
 }
 
 /**
- * The defaults of a fresh deployment: navigation expanded, host order.
+ * The defaults of a fresh deployment: every page application fixed, host order.
  *
- * The platform sidebar exposes one 应用 entry, not the eight application rows;
- * entering the area with the column folded left the user with a single app and
- * no visible way to discover the rest. The area is one click wide, and the
- * narrow drawer still exists, so expanding on first entry is the discoverable
- * default; a human who prefers it folded keeps that preference.
+ * A fresh deployment needs no stored list; the saved `pinned` list only starts
+ * once the human edits the navigation, and then it also carries the order.
  */
-export const PREFERENCE_DEFAULTS: ApplicationPreferences = { navExpanded: true, navOrder: [] }
+export const PREFERENCE_DEFAULTS: ApplicationPreferences = {}
 
 /**
  * Create the preference store. Persistence rides the platform's snapshot store

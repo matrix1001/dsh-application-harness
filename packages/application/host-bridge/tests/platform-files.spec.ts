@@ -51,6 +51,15 @@ describe('the versioned-JSON primitive', () => {
     })).rejects.toThrow(/not a string/)
   })
 
+  it('refuses to overwrite a record this process could not read, except for an explicit repair', async () => {
+    writeFileSync(path, '{')
+    await expect(readVersionedJson(path, 1, 'record', () => 1)).rejects.toThrow(/not valid JSON/)
+    await expect(writeVersionedJson(path, 1, { value: 'clobber' })).rejects.toThrow(/refusing to overwrite/u)
+    expect(readFileSync(path, 'utf8')).toBe('{')
+    await writeVersionedJson(path, 1, { value: 'repaired' }, { allowAfterReadFailure: true })
+    expect(JSON.parse(readFileSync(path, 'utf8')).value).toBe('repaired')
+  })
+
   it('rejects when the write cannot reach the file', async () => {
     const file = join(root, 'not-a-directory')
     writeFileSync(file, 'x')

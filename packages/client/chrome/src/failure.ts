@@ -95,3 +95,26 @@ export interface FailureDetail {
   /** The host's own message, when it carried one. */
   readonly message?: string | undefined
 }
+
+/** The successful value of a call, or `undefined` when it did not succeed. */
+export function outcomeValue<T>(outcome: CallOutcome | undefined): T | undefined {
+  return outcome?.status === 'success' ? outcome.result as T : undefined
+}
+
+/** The host's diagnostic message for a failed/rejected/unknown call. */
+export function outcomeMessage(outcome: CallOutcome | undefined): string | undefined {
+  if (outcome === undefined || outcome.status === 'success' || outcome.status === 'cancelled') return undefined
+  return outcome.error?.message
+}
+
+/** The shared failure classification and its wire facts, in one read. */
+export function outcomeFailure(outcome: CallOutcome | undefined): { readonly kind: FailureKind } & FailureDetail {
+  if (outcome === undefined || outcome.status === 'success' || outcome.status === 'cancelled') {
+    return { kind: failureKindOf(outcome) }
+  }
+  return {
+    kind: failureKindOf(outcome),
+    ...(outcome.error?.code === undefined ? {} : { code: outcome.error.code }),
+    ...(outcome.error?.message === undefined ? {} : { message: outcome.error.message }),
+  }
+}

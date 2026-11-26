@@ -1,32 +1,28 @@
 #!/usr/bin/env node
 /**
- * The daily **checkout launch** wrapper (T2): resolve this run's execution
- * source → resolve the workspace its world belongs to → check the client
- * artifacts it will load → then boot dsh from the checkout, IN the workspace.
+ * The daily **launch** wrapper: resolve this run's runtime → resolve the
+ * workspace its world belongs to → check the client artifacts it will load →
+ * then boot dsh from the installed platform line, IN the workspace.
  *
- * Why a wrapper: the daily launch is `(cd <platform checkout> && pnpm dsh
- * --profile application-harness)`, which executes the CHECKOUT's platform packages, not
- * this repo's pinned registry line. After a platform update, a stale or missing
- * build output (most visibly a client bundle) used to surface only as a blank
- * page inside the running app (2026-09-10 startup incident). The order below is
- * fixed: nothing launches when the preflight fails.
+ * Why a wrapper: a stale or missing build output (most visibly a client
+ * bundle) used to surface only as a blank page inside the running app
+ * (2026-09-10 startup incident). The order below is fixed: nothing launches
+ * when the preflight fails.
  *
- * Runtime source and workspace are two different things (AR2n④, D2): the child
- * keeps the CHECKOUT as its code source while its cwd is the **workspace**
+ * Runtime source and workspace are two different things (AR2n④, D2): the
+ * child's code source is the published `@deepseek-ai/dsh` installed in this
+ * repo (`node scripts/deps.mjs`), while its cwd is the **workspace**
  * (`$DSH_WORKSPACE`, else `~/dsh-workspaces/<profile>`, see
- * scripts/workspace.mjs), the one directory the workspace data
- * (`${cwd}/.dsh-applications/…`, the applications' own documents) lives in.
- * Handing the child the checkout as its cwd put that data where a re-clone or
- * `git clean -xdf` destroys it, and made this wrapper and `setup.mjs --launch`
- * boot two different worlds from one profile.
+ * scripts/workspace.mjs), which owns the legacy `.dsh-applications/` world.
+ * The applications' documents themselves live in the harness-home SQLite
+ * store (`$DSH_HOME/application-harness/app-data.sqlite`). Handing the child
+ * the repo as its cwd would put the legacy world where a re-clone or
+ * `git clean -xdf` destroys it.
  *
- * The code source is the checkout's **CLI entry**, resolved by
- * `scripts/platform-checkout.mjs` and handed to `node` — not a `pnpm dsh`
+ * The CLI is resolved as an ENTRY and handed to `node` — not a `pnpm dsh`
  * invocation. A package-manager lookup finds its project root by walking up
  * from the child's cwd, and the child's cwd is the workspace, which has no
- * `package.json`: `pnpm dsh` therefore ran in the nearest ancestor manifest
- * (moving that install's own packages aside) or died with
- * ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND — never in the checkout (2026-09-23).
+ * `package.json` (2026-09-23).
  *
  * The world is adopted before the child exists, and never by guessing: one
  * legacy world is moved in (source and target printed), two worlds with data
@@ -36,29 +32,20 @@
  * a defect of the repository this gate is about; only a real launch refuses.
  *
  * What the preflight does NOT do: pull, build, or repair anything — not this
- * workspace, not the checkout, not the profile. It resolves the entry points
+ * workspace, not the install, not the profile. It resolves the entry points
  * this deployment loads (the deployment descriptor + each package's `exports`),
- * rejects a workspace inside the checkout or this repo (a world there is not
- * protected by `.gitignore`), and reports the exact file and the build command
- * that produces it. "The file exists" is not "it is fresh and it runs":
- * freshness stays the build's job and runnability the browser e2e's.
+ * rejects a workspace inside this repo (a world there is not protected by
+ * `.gitignore`), and reports the exact file and the build command that
+ * produces it. "The file exists" is not "it is fresh and it runs": freshness
+ * stays the build's job and runnability the browser e2e's.
  *
- * The direct commands stay available and stay un-prechecked (see the note setup
- * prints); this wrapper is the pre-checked lane.
- *
- * `--check-only` is also the preflight chain's ONLY executor in the quality
- * gate: `release:check` runs it, so the chain below is not a wrapper nobody
- * calls (AR2″a, `preflight-never-gated`). Where no platform checkout exists —
- * CI, which deliberately does not fetch one (PL8) — it degrades the way
- * `verify-platform-package-set.mjs` and `vendor-platform-src --check` do: one
- * explicit `UNVERIFIED` line, exit 0, and the line SAYS the chain did not run
- * rather than implying it passed. A real launch is never degraded this way.
+ * `--check-only` is the preflight chain's ONLY executor in the quality gate:
+ * `release:check` runs it.
  *
  * Usage:
- *   node scripts/launch-apps.mjs [--checkout <path>] [--profile <name>] [--check-only] [-- <dsh args>]
- *     --checkout <path>   the platform checkout to launch from (default: $DSH_CHECKOUT or ~/deepseek-harness)
+ *   node scripts/launch-apps.mjs [--profile <name>] [--check-only] [-- <dsh args>]
  *     --profile <name>    the dsh profile (default: application-harness)
- *     --check-only        run the preflight and exit (0 = ready or UNVERIFIED, 1 = problems)
+ *     --check-only        run the preflight and exit (0 = ready, 1 = problems)
  *     --dry-run           print the launch plan without executing it
  *     -- <dsh args>       extra args forwarded verbatim to dsh (e.g. --no-open), except that a
  *                         relative `--patch` overlay is made absolute against the invocation cwd
@@ -67,7 +54,7 @@
  *     DSH_WORKSPACE       the workspace the world belongs to (default: ~/dsh-workspaces/<profile>;
  *                         a relative value resolves against the invocation cwd)
  *     DSH_WORKSPACE_LEGACY  `path.delimiter`-separated directories a legacy `.dsh-applications/` may live in
- *                         (default: this repo + the platform checkout; empty = no legacy world)
+ *                         (default: this repo; empty = no legacy world)
  * @module
  */
 
@@ -82,119 +69,70 @@ import {
   checkDeploymentEntries, deploymentDirOf, deploymentPackages, DEPLOYMENT_DESCRIPTOR,
   missingBuildArtifacts, missingCompositionArtifacts, PROFILE_DEFAULT, resolveProfileDir,
 } from './deployment-packages.mjs'
-import { resolveDshBin, unbuiltCheckoutMessage } from './platform-checkout.mjs'
 import { prepareWorkspace, resolveWorkspace, WORKSPACES_DIRNAME, worldDirOf, workspaceProblems } from './workspace.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
-/** The default platform checkout (the daily-launch execution line). */
-export function defaultCheckout(env = process.env, home = homedir()) {
-  return env.DSH_CHECKOUT !== undefined && env.DSH_CHECKOUT !== '' ? env.DSH_CHECKOUT : join(home, 'deepseek-harness')
+/** The installed platform line's CLI entry (what `node scripts/deps.mjs` wrote). */
+export function installedDshBin(root = ROOT) {
+  return join(root, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
 }
 
 /**
- * Resolve the launch plan (D2): the runtime's execution source and the
- * workspace the child runs IN, as two fields — one `cwd` used to mean both, and
- * that is how the world ended up inside the checkout. The runtime source stays
- * the platform checkout's CLI entry; the child's cwd is the workspace.
- * @param {{ checkout: string, profile: string, extra?: string[], workspace?: string, env?: Record<string, string | undefined>, home?: string, cli?: { bin: string, source: string } }} options - the resolved checkout, profile, forwarded args, an explicit workspace (else `$DSH_WORKSPACE` → `~/dsh-workspaces/<profile>`), and an optional pre-resolved CLI (the preflight and the spawn share one resolution; tests inject it).
- * @returns {{ runtimeSource: { checkout: string, cmd: string, args: string[], source: string, note: string }, workspaceCwd: string }} the plan.
+ * Resolve the launch plan (D2): the runtime and the workspace the child runs
+ * IN, as two fields — one `cwd` used to mean both, and that is how the world
+ * ended up inside the repo. The runtime is the installed platform CLI; the
+ * child's cwd is the workspace.
+ * @param {{ profile: string, extra?: string[], workspace?: string, env?: Record<string, string | undefined>, home?: string, cli?: { bin: string } }} options - the profile, forwarded args, an explicit workspace (else `$DSH_WORKSPACE` → `~/dsh-workspaces/<profile>`), and an optional pre-resolved CLI (the preflight and the spawn share one resolution; tests inject it).
+ * @returns {{ runtimeSource: { cmd: string, args: string[], source: string, note: string }, workspaceCwd: string }} the plan.
  */
-export function launchPlan({ checkout, profile, extra = [], workspace, env = process.env, home = homedir(), cli }) {
-  // The CLI is a resolved ENTRY, not a package manager lookup. `pnpm dsh` used
-  // to be the line here, and it cannot be: its project root is found by walking
-  // UP from the child's cwd (the workspace, which has no `package.json`), so it
-  // either ran in whatever ancestor manifest it found ($HOME's, moving that
-  // install's packages aside) or died with ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND —
-  // never in the checkout it was supposed to execute (2026-09-23, after AR2n④
-  // moved the child's cwd off the checkout). `resolveDshBin` is this repo's one
-  // answer to "which dsh binary", and it takes the checkout explicitly.
-  const resolved = cli ?? resolveDshBin({ repoRoot: ROOT, checkout, env, exists: existsSync })
+export function launchPlan({ profile, extra = [], workspace, env = process.env, home = homedir(), cli }) {
+  // The CLI is a resolved ENTRY, not a package manager lookup: `pnpm dsh` finds
+  // its project root by walking UP from the child's cwd (the workspace, which
+  // has no `package.json`) — never the install it was supposed to execute
+  // (2026-09-23).
+  const resolved = cli ?? { bin: installedDshBin(ROOT) }
   return {
     runtimeSource: {
-      checkout,
       cmd: process.execPath,
       args: [resolved.bin, '--profile', profile, ...extra],
-      source: resolved.source,
-      // The note names what would RUN, not what was asked for: a checkout
-      // without a built CLI resolves to the registry-line binary, and saying
-      // "the CLI runs from <checkout>" there would be the same kind of
-      // near-truth the `pnpm dsh` line told (the preflight refuses either way).
-      note: resolved.source === 'checkout'
-        ? `platform checkout at ${checkout} — the CLI runs from ${resolved.bin} (execution line = checkout; the repo pin constrains types/CI only)`
-        : `platform checkout at ${checkout} has no built CLI (${resolved.source}) — the registry-line dsh at ${resolved.bin} is what would run; a real launch refuses`,
+      source: 'install',
+      note: `the installed platform line — the CLI runs from ${resolved.bin}`,
     },
     workspaceCwd: workspace ?? resolveWorkspace({ profile, env, home }),
   }
 }
 
 /**
- * Whether a platform checkout exists at this path — the preflight's execution
- * source, and the condition its degraded form is keyed on. A directory that is
- * not a checkout (no `package.json`) counts as absent: the preflight would only
- * report it, and `--check-only` must answer the same way for both.
- * @param checkout - the resolved checkout path.
- * @param exists - the existence probe (injectable for the tests).
- * @returns the verdict.
- */
-export function checkoutPresent(checkout, exists = existsSync) {
-  return exists(join(checkout, 'package.json'))
-}
-
-/**
- * The preflight: everything that must hold before the checkout lane boots.
- * @param {{ root?: string, checkout: string, profile?: string, env?: Record<string, string | undefined>, profileDir?: string, deploymentDir?: string, workspace?: string, home?: string }} options - the repo root, the checkout, the profile, and optional explicit directories (the tests point both halves at one fixture).
+ * The preflight: everything that must hold before the launch boots.
+ * @param {{ root?: string, profile?: string, env?: Record<string, string | undefined>, profileDir?: string, deploymentDir?: string, workspace?: string, home?: string }} options - the repo root, the profile, and optional explicit directories (the tests point both halves at one fixture).
  * @returns {Array<{ name: string, file?: string, hint: string }>} one entry per problem (empty = ready).
  */
-export function preflight({ root = ROOT, checkout, profile = PROFILE_DEFAULT, env = process.env, profileDir, deploymentDir, extraPatches = [], workspace, home = homedir() }) {
+export function preflight({ root = ROOT, profile = PROFILE_DEFAULT, env = process.env, profileDir, deploymentDir, extraPatches = [], workspace, home = homedir() }) {
   const problems = []
-  // The workspace: the world must not live inside the checkout or this repo
-  // (AR2n④, D3). The judgement is on canonical paths, never string prefixes —
-  // a trailing slash or a symlink is still the same directory. The caller
-  // prints both resolved absolute paths; this is the fail-closed half.
+  // The workspace: the world must not live inside this repo (AR2n④, D3). The
+  // judgement is on canonical paths, never string prefixes — a trailing slash
+  // or a symlink is still the same directory. The caller prints both resolved
+  // absolute paths; this is the fail-closed half.
   const workspaceCwd = workspace ?? resolveWorkspace({ profile, env, home })
-  for (const problem of workspaceProblems({ workspace: workspaceCwd, repoRoot: root, checkout })) problems.push(problem)
-  if (!existsSync(join(checkout, 'package.json'))) {
+  for (const problem of workspaceProblems({ workspace: workspaceCwd, repoRoot: root })) problems.push(problem)
+  // The runtime: the installed platform line. Without it there is nothing for
+  // the CLI's own module graph to resolve.
+  const bin = installedDshBin(root)
+  if (!existsSync(bin)) {
     problems.push({
-      name: `platform checkout ${checkout}`,
-      hint: 'not a checkout (no package.json) — pass --checkout <path> or set DSH_CHECKOUT; the registry lane is `dsh --profile application-harness`',
-    })
-    return problems
-  }
-  // The checkout lane runs the platform from ITS workspace: without an install
-  // there is nothing for the CLI's own module graph to resolve.
-  if (!existsSync(join(checkout, 'node_modules'))) {
-    problems.push({
-      name: `platform checkout ${checkout}/node_modules`,
-      hint: 'the checkout is not installed — run (checkout): pnpm install',
-    })
-  }
-  // The executable this launch will run, resolved the same way the spawn
-  // resolves it (one resolution, both consumers). Three verdicts, and only one
-  // of them may launch: a checkout whose CLI is not built is a problem with a
-  // build remedy, and a checkout with no CLI package at all is not the shape
-  // this lane launches (`resolveDshBin` falls back to the registry line there,
-  // which is a DIFFERENT execution line than the one this wrapper promises).
-  const cli = resolveDshBin({ repoRoot: root, checkout, exists: existsSync })
-  if (cli.source === 'unbuilt-checkout') {
-    problems.push({ name: `platform CLI ${cli.bin}`, file: cli.bin, hint: unbuiltCheckoutMessage(cli) })
-  } else if (cli.source === 'npm') {
-    problems.push({
-      name: `platform CLI ${join(checkout, 'apps', 'cli')}`,
-      file: join(checkout, 'apps', 'cli'),
-      hint: 'the checkout declares no platform CLI — this lane launches the checkout\'s own `apps/cli` and never the registry line; pass a real checkout or set DSH_CHECKOUT',
+      name: `installed platform CLI ${bin}`,
+      file: bin,
+      hint: 'the installed platform line is missing — run: node scripts/deps.mjs',
     })
   }
   // The entries the composition will ACTUALLY load, resolved from the profile's
-  // bundle list → each bundle's patch rows → each package's own exports. Both
-  // sides are covered (the checkout's platform packages AND this repo's), and
-  // only mounted rows are demanded: a package that merely exists in the checkout
-  // is not a deployment requirement (T2).
+  // bundle list → each bundle's patch rows → each package's own exports.
   const resolvedProfileDir = profileDir ?? resolveProfileDir({ profile, env })
   // The launcher's own `--patch` overlays ride the forwarded dsh arguments; the
   // preflight composes them onto the shipped layers, so a row only an overlay
   // mounts is required too (PL7 ①).
-  const composition = missingCompositionArtifacts({ checkout, profileDir: resolvedProfileDir, extraPatches })
+  const composition = missingCompositionArtifacts({ installRoot: root, profileDir: resolvedProfileDir, extraPatches })
   for (const entry of composition.missing) {
     problems.push({
       name: entry.name,
@@ -302,11 +240,10 @@ export function resolvePatchArgs(args, cwd = process.cwd()) {
 
 /** Parse the CLI arguments (exported for the script tests). */
 export function parseArgs(argv, env = process.env, home = homedir()) {
-  const opts = { checkout: defaultCheckout(env, home), profile: PROFILE_DEFAULT, checkOnly: false, dryRun: false, extra: [] }
+  const opts = { profile: PROFILE_DEFAULT, checkOnly: false, dryRun: false, extra: [] }
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
-    if (arg === '--checkout') opts.checkout = argv[++index]
-    else if (arg === '--profile') opts.profile = argv[++index]
+    if (arg === '--profile') opts.profile = argv[++index]
     else if (arg === '--check-only') opts.checkOnly = true
     else if (arg === '--dry-run') opts.dryRun = true
     // Everything after `--` is dsh's; stop parsing so nothing is forwarded twice.
@@ -319,16 +256,15 @@ export function parseArgs(argv, env = process.env, home = homedir()) {
 
 function usage() {
   process.stdout.write(`usage: node scripts/launch-apps.mjs [options] [-- <dsh args>]\n\n`
-    + `  --checkout <path>   platform checkout to launch from (default: $DSH_CHECKOUT or ~/deepseek-harness)\n`
     + `  --profile <name>    dsh profile (default: ${PROFILE_DEFAULT})\n`
-    + `  --check-only        run the preflight and exit (0 = ready or UNVERIFIED, 1 = problems)\n`
+    + `  --check-only        run the preflight and exit (0 = ready, 1 = problems)\n`
     + `  --dry-run           print the launch plan without executing it\n`
-    + `\nThe runtime comes from the checkout; the workspace data (the applications' own\ndocuments) lives in the workspace, which the child process runs in:\n`
+    + `\nThe runtime comes from the installed platform line; the workspace data (the\napplications' own documents) lives in the workspace, which the child runs in:\n`
     + `  DSH_WORKSPACE       the workspace directory\n`
     + `                      (default: ~/${WORKSPACES_DIRNAME}/<profile>; a relative value resolves against the invocation cwd)\n`
     + `  DSH_WORKSPACE_LEGACY  PATH-style separated ('${delimiter}') directories a legacy .dsh-applications/ may live in\n`
-    + `                      (default: this repo + the platform checkout; empty = no legacy world)\n`
-    + `The workspace is refused when it sits inside the checkout or this repo. A legacy world is\n`
+    + `                      (default: this repo; empty = no legacy world)\n`
+    + `The workspace is refused when it sits inside this repo. A legacy world is\n`
     + `adopted only when it is the ONLY one: two worlds with data refuse to launch (never merged,\n`
     + `never picked between). --check-only never writes and never adopts: it reports such a world\n`
     + `as UNVERIFIED (reason + the by-hand fix, exit 0) instead of failing this repository's gate.\n`)
@@ -342,14 +278,16 @@ function main() {
   // given. Once they are the same strings, the preflight's "the overlay exists"
   // is a statement about the file the boot will actually open.
   const extra = resolvePatchArgs(opts.extra)
-  const plan = launchPlan({ checkout: opts.checkout, profile: opts.profile, extra })
+  const plan = launchPlan({ profile: opts.profile, extra })
   // Both resolved absolute paths, on every run — the preflight's own report
-  // (D3): where the runtime comes from, and which workspace owns the world.
-  // The platform state directory is resolved by the same `dshHomePath`
-  // convention the host uses (the child inherits this environment), so the
-  // grants/onboarding/history records are visible without opening the profile.
+  // (D3): where the runtime comes from, and which workspace owns the legacy
+  // world directory. The platform state directory and the app data file are
+  // resolved by the same `dshHomePath` convention the host uses (the child
+  // inherits this environment), so grants/onboarding/history and the business
+  // document store are visible without opening the profile.
   process.stdout.write(`[launch-apps] runtime source: ${plan.runtimeSource.note}\n`
-    + `[launch-apps] workspace: ${plan.workspaceCwd} (the world lives in ${worldDirOf(plan.workspaceCwd)})\n`
+    + `[launch-apps] workspace: ${plan.workspaceCwd} (legacy world directory: ${worldDirOf(plan.workspaceCwd)})\n`
+    + `[launch-apps] application data: ${dshHomePath('application-harness/app-data.sqlite')}\n`
     + `[launch-apps] platform state: ${dshHomePath('application-harness')}\n`)
   // The world's own state — the ONE call, in the mode the lane calls for. The
   // inspection path (check lane / `--dry-run`) never writes; the launch path
@@ -358,20 +296,18 @@ function main() {
   const preparing = opts.checkOnly !== true && opts.dryRun !== true
   const worldOf = (dryRun) => {
     try {
-      return prepareWorkspace({ workspace: plan.workspaceCwd, repoRoot: ROOT, checkout: opts.checkout, dryRun })
+      return prepareWorkspace({ workspace: plan.workspaceCwd, repoRoot: ROOT, dryRun })
     } catch (error) {
       process.stderr.write(`[launch-apps] ${String(error.message ?? error)}\n`)
       process.exit(1)
     }
   }
-  // The world is NOT the checkout's business: the check lane inspects it BEFORE
-  // the degraded branch below, so a machine without a checkout still hears that
-  // a real launch would be refused. The verdict is reported at the END (the
-  // preflight chain below still runs — it is the quality gate's only executor,
-  // AR2″a `preflight-never-gated`). A refusal is not reported as a failure —
-  // this machine's data layout is not a defect of the repository under test —
-  // but it is NOT a pass either: UNVERIFIED, with the reason and the by-hand
-  // fix, and nothing written. The launch itself refuses (scripts/workspace.mjs).
+  // The check lane inspects the world BEFORE the preflight runs, so the reason
+  // a real launch would be refused is reported even when the preflight fails.
+  // A refusal is not a failure — this machine's data layout is not a defect of
+  // the repository under test — but it is NOT a pass either: UNVERIFIED, with
+  // the reason and the by-hand fix, and nothing written. The launch itself
+  // refuses (scripts/workspace.mjs).
   let world
   if (!preparing) world = worldOf(true)
   // The check lane's verdict on the world: NOT a pass (the reason and the
@@ -396,21 +332,8 @@ function main() {
     process.stdout.write(`[launch-apps] ${world.note}\n`)
     return false
   }
-  // The degraded form (AR2″a, `preflight-never-gated`): with no checkout there
-  // is nothing to resolve the composition against, so `--check-only` says so and
-  // exits 0 instead of failing — the same convention as the two gates that need
-  // a checkout (PL8: CI does not fetch one). It is deliberately NOT a pass: the
-  // line names the chain and states that it did not run. Only the CHECK lane
-  // degrades; a real launch still refuses to boot from a missing checkout. The
-  // world's verdict is checkout-INDEPENDENT, so it is reported here too (only
-  // the CHECK lane reaches this branch, where `world` is the read-only one).
-  if (opts.checkOnly && !checkoutPresent(opts.checkout)) {
-    reportWorld()
-    process.stdout.write(`[launch-apps] UNVERIFIED — no platform checkout at ${opts.checkout}; the preflight chain (composition artifacts, build artifacts, profile links) was NOT executed here. Run it where a checkout exists: node scripts/launch-apps.mjs --check-only\n`)
-    return
-  }
   const problems = preflight({
-    checkout: opts.checkout, profile: opts.profile, workspace: plan.workspaceCwd, extraPatches: patchArgsOf(extra),
+    profile: opts.profile, workspace: plan.workspaceCwd, extraPatches: patchArgsOf(extra),
   })
   if (problems.length > 0) {
     process.stderr.write(`[launch-apps] ${problems.length} preflight problem(s) — not launching:\n`)

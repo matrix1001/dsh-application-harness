@@ -16,7 +16,7 @@ function run(...args) {
 test('lists the named steps without running one', () => {
   const result = run('--list')
   assert.equal(result.status, 0)
-  for (const name of ['typecheck', 'test', 'coverage', 'build', 'scripts', 'contracts', 'platform', 'smoke', 'smoke-tooled']) {
+  for (const name of ['typecheck', 'docs', 'coverage', 'build', 'scripts', 'contracts', 'platform', 'smoke', 'smoke-tooled']) {
     assert.match(result.stdout, new RegExp(`^${name}\\s`, 'm'))
   }
 })
@@ -33,10 +33,9 @@ test('rejects an unknown flag', () => {
   assert.match(result.stderr, /unknown argument: --wat/)
 })
 
-test('every release:check command is a named gate command', () => {
+test('release:check delegates to the named gate', () => {
   const listed = JSON.parse(run('--json').stdout)
-  const gate = new Set(listed.flatMap(step => step.commands))
+  assert.ok(listed.length > 0)
   const release = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).scripts['release:check']
-  const commands = release.split(' && ').map(command => command.trim())
-  assert.deepEqual(commands.filter(command => !gate.has(command)), [], 'release:check drifted from the named gate')
+  assert.equal(release, 'node scripts/gate.mjs', 'release:check must delegate to the named gate')
 })

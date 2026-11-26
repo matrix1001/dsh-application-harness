@@ -27,27 +27,33 @@ describe('object resolution', () => {
     const runtime = new ApplicationRuntime()
     await runtime.register(objectApp())
     const ref = { appId: 'objects', type: 'task', id: '1' }
-    expect(await runtime.resolveObject({ kind: 'human' }, ref)).toEqual({ ref, title: 'Task 1', summary: 'open' })
-    expect(await runtime.resolveObject({ kind: 'ai', sessionId: 's' }, ref)).toEqual({ ref, title: 'Task 1', summary: 'open' })
+    expect(await runtime.resolveObject({ kind: 'human' }, ref)).toEqual({ ok: true, value: { ref, title: 'Task 1', summary: 'open' } })
+    expect(await runtime.resolveObject({ kind: 'ai', sessionId: 's' }, ref)).toEqual({ ok: true, value: { ref, title: 'Task 1', summary: 'open' } })
   })
 
-  it('refuses malformed, unknown or failed references', async () => {
+  it('answers with the stable reason instead of throwing', async () => {
     const runtime = new ApplicationRuntime()
     await runtime.register(objectApp())
-    await expect(runtime.resolveObject({ kind: 'human' }, { appId: '', type: 'task', id: '1' })).rejects.toThrow(/non-empty/u)
-    await expect(runtime.resolveObject({ kind: 'human' }, { appId: 'missing', type: 'task', id: '1' })).rejects.toThrow(/no application/u)
-    await expect(runtime.resolveObject({ kind: 'human' }, { appId: 'objects', type: 'missing', id: '1' })).rejects.toThrow(/does not declare the object type/u)
+    expect(await runtime.resolveObject({ kind: 'human' }, { appId: '', type: 'task', id: '1' }))
+      .toMatchObject({ ok: false, error: { code: 'platform.object-invalid-ref' } })
+    expect(await runtime.resolveObject({ kind: 'human' }, { appId: 'missing', type: 'task', id: '1' }))
+      .toMatchObject({ ok: false, error: { code: 'platform.object-unknown-app' } })
+    expect(await runtime.resolveObject({ kind: 'human' }, { appId: 'objects', type: 'missing', id: '1' }))
+      .toMatchObject({ ok: false, error: { code: 'platform.object-unknown-type' } })
     const failing = new ApplicationRuntime()
     await failing.register(objectApp({}, () => { throw new AppError('missing', 'task not found') }))
-    await expect(failing.resolveObject({ kind: 'human' }, { appId: 'objects', type: 'task', id: '1' })).rejects.toThrow(/task not found/u)
+    // The owning operation's own code is the reference's reason: a caller can
+    // tell "the object is gone" apart from "the reference could not be checked".
+    expect(await failing.resolveObject({ kind: 'human' }, { appId: 'objects', type: 'task', id: '1' }))
+      .toEqual({ ok: false, error: { code: 'app.missing', message: 'task not found' } })
   })
 
   it('refuses a resolver result that does not match the requested ref or display shape', async () => {
     const bad = async (value: unknown): Promise<void> => {
       const runtime = new ApplicationRuntime()
       await runtime.register(objectApp({}, () => value))
-      await expect(runtime.resolveObject({ kind: 'human' }, { appId: 'objects', type: 'task', id: '1' }))
-        .rejects.toThrow(/(resolution|different object reference|display title|summary must)/u)
+      expect(await runtime.resolveObject({ kind: 'human' }, { appId: 'objects', type: 'task', id: '1' }))
+        .toMatchObject({ ok: false, error: { code: 'platform.object-invalid-resolution', message: expect.stringMatching(/(resolution|different object reference|display title|summary must)/u) } })
     }
     await bad(null)
     await bad([])
@@ -63,7 +69,7 @@ describe('object resolution', () => {
     const runtime = new ApplicationRuntime()
     await runtime.register(objectApp({}, id => ({ ref: { appId: 'objects', type: 'task', id }, title: 'Task' })))
     expect(await runtime.resolveObject({ kind: 'human' }, { appId: 'objects', type: 'task', id: '1' }))
-      .toEqual({ ref: { appId: 'objects', type: 'task', id: '1' }, title: 'Task' })
+      .toEqual({ ok: true, value: { ref: { appId: 'objects', type: 'task', id: '1' }, title: 'Task' } })
     expect(() => new ApplicationRuntime().mount(objectApp({ objectTypes: { 'Bad Type': { resolveOperation: 'resolve' } } })))
       .toThrow(/must match/u)
     expect(() => new ApplicationRuntime().mount(objectApp({ objectTypes: { task: { resolveOperation: 'missing' } } })))

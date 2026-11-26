@@ -11,6 +11,34 @@ function app(over: Partial<AppDeclaration> = {}): AppDeclaration {
 }
 
 describe('activation', () => {
+  it('honours the pre-read activation snapshot before any host reconciler runs', async () => {
+    let starts = 0
+    const runtime = new ApplicationRuntime({ activation: { disabled: ['activation'] } })
+    const registration = runtime.mount(app({ start: () => { starts += 1 } }))
+    await Promise.resolve()
+    expect(registration.activation()).toBe('disabled')
+    expect(registration.status()).toBe('stopped')
+    expect(starts).toBe(0)
+  })
+
+  it('disables every application when the pre-read activation table failed', async () => {
+    let starts = 0
+    const runtime = new ApplicationRuntime({ activation: { disabled: [], failure: 'corrupt' } })
+    const registration = runtime.mount(app({ start: () => { starts += 1 } }))
+    await Promise.resolve()
+    expect(registration.activation()).toBe('disabled')
+    expect(starts).toBe(0)
+  })
+
+  it('still starts an application absent from a successful pre-read snapshot', async () => {
+    let starts = 0
+    const runtime = new ApplicationRuntime({ activation: { disabled: [] } })
+    const registration = runtime.mount(app({ start: () => { starts += 1 } }))
+    await Promise.resolve()
+    expect(registration.activation()).toBe('enabled')
+    expect(starts).toBe(1)
+  })
+
   it('mounts disabled without starting, and refuses calls and tasks', async () => {
     let starts = 0
     const runtime = new ApplicationRuntime()

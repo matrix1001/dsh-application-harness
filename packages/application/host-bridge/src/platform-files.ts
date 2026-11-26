@@ -27,6 +27,13 @@ import { readFile } from 'node:fs/promises'
 import { isMissingFile, reasonOf, writeFileAtomic } from '@matrix1001/dsh-application-harness-store/atomic'
 
 /**
+ * Files this process failed to read/validate. A later save must not replace
+ * bytes the process never understood (11 §1.1); only an explicit repair path
+ * may override the poison.
+ */
+const unreadable = new Set<string>()
+
+/**
  * Read one versioned JSON record.
  * @param path - the JSON file to read.
  * @param version - the schema version this build writes.
@@ -36,6 +43,21 @@ import { isMissingFile, reasonOf, writeFileAtomic } from '@matrix1001/dsh-applic
  * @throws when the file exists but cannot be read, parsed, versioned or validated.
  */
 export async function readVersionedJson<T>(
+  path: string,
+  version: number,
+  noun: string,
+  parse: (document: Record<string, unknown>) => T,
+): Promise<T | undefined> {
+  try {
+    return await readVersionedJsonUnpoisoned(path, version, noun, parse)
+  } catch (error) {
+    unreadable.add(path)
+    throw error
+  }
+}
+
+/** The actual read/parse path; the public wrapper records failures. */
+async function readVersionedJsonUnpoisoned<T>(
   path: string,
   version: number,
   noun: string,
@@ -75,8 +97,13 @@ export async function writeVersionedJson(
   path: string,
   version: number,
   body: Record<string, unknown>,
+  options: { readonly allowAfterReadFailure?: boolean } = {},
 ): Promise<void> {
+  if (unreadable.has(path) && options.allowAfterReadFailure !== true) {
+    throw new Error(`the record ${path} could not be read in this process; refusing to overwrite it (repair or restore it first)`)
+  }
   await writeFileAtomic(path, JSON.stringify({ schemaVersion: version, ...body }))
+  unreadable.delete(path)
 }
 
 /**

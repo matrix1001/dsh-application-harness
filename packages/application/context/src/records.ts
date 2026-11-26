@@ -22,21 +22,14 @@ import type { ApplicationRuntime, Caller } from '@matrix1001/dsh-application-har
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { PageRecordFacts, PageRecordKind, PageRecordReference, PageReference } from './types.ts'
 
-/** How many characters of a body a note's excerpt keeps before it is shortened. */
-export const EXCERPT_CHARS = 120
-
 /** How one record family is laid out in its application's read result. */
 interface PageRecordFamily {
   /** The result member holding this family's records. */
   readonly collection: string
   /** The field that names the record in one line. */
   readonly labelField: string
-  /** The label field holds a body: only its first line, bounded, is kept. */
-  readonly excerpt?: true
   /** The field whose presence marks the record soft-deleted. */
-  readonly deletedField?: string
-  /** The field whose presence marks the record archived. */
-  readonly archivedField?: string
+  readonly deletedField: string
 }
 
 /** Where one application's page records live, and how to read them back. */
@@ -60,26 +53,10 @@ export const PAGE_RECORD_SOURCES: Readonly<Record<string, PageRecordSource>> = {
       note: { collection: 'notes', labelField: 'title', deletedField: 'deletedAt' },
     },
   },
-  tasks: {
+  todo: {
     op: 'contextState',
     families: {
       task: { collection: 'tasks', labelField: 'title', deletedField: 'deletedAt' },
-      project: { collection: 'projects', labelField: 'name', deletedField: 'deletedAt' },
-    },
-  },
-  calendar: {
-    op: 'contextState',
-    families: {
-      event: { collection: 'events', labelField: 'title', deletedField: 'deletedAt' },
-    },
-  },
-  workbook: {
-    op: 'workbookState',
-    families: {
-      note: { collection: 'notes', labelField: 'text', excerpt: true, deletedField: 'deleted' },
-      task: { collection: 'tasks', labelField: 'title', deletedField: 'deletedAt' },
-      event: { collection: 'events', labelField: 'title', deletedField: 'deletedAt' },
-      project: { collection: 'projects', labelField: 'name', deletedField: 'deletedAt', archivedField: 'archivedAt' },
     },
   },
 }
@@ -182,7 +159,6 @@ function factsOf(record: PageRecordReference, family: PageRecordFamily, fields: 
     id: record.id,
     ...(label === undefined ? {} : { label }),
     ...(marked(fields, family.deletedField) ? { deleted: true as const } : {}),
-    ...(marked(fields, family.archivedField) ? { archived: true as const } : {}),
   }
 }
 
@@ -196,19 +172,7 @@ function factsOf(record: PageRecordReference, family: PageRecordFamily, fields: 
 function labelOf(fields: Record<string, JsonValue>, family: PageRecordFamily): string | undefined {
   const raw = fields[family.labelField]
   if (typeof raw !== 'string' || raw === '') return undefined
-  return family.excerpt === true ? excerptOf(raw) : raw
-}
-
-/**
- * The first line of one body, bounded. The body itself stays in the
- * application: only the line that names it travels as context.
- * @param text - the body.
- * @returns its first line, trimmed, shortened with an ellipsis when over the budget.
- */
-function excerptOf(text: string): string {
-  const newline = text.indexOf('\n')
-  const line = (newline < 0 ? text : text.slice(0, newline)).trim()
-  return line.length <= EXCERPT_CHARS ? line : `${line.slice(0, EXCERPT_CHARS - 1)}…`
+  return raw
 }
 
 /**
@@ -216,11 +180,10 @@ function excerptOf(text: string): string {
  * an absent field is not set; any other value (a soft-delete stamp, a `true`)
  * is.
  * @param fields - the record's own value.
- * @param field - the marker field of the family, when it declares one.
+ * @param field - the family's marker field.
  * @returns whether the marker is set.
  */
-function marked(fields: Record<string, JsonValue>, field: string | undefined): boolean {
-  if (field === undefined) return false
+function marked(fields: Record<string, JsonValue>, field: string): boolean {
   const value = fields[field]
   return value !== undefined && value !== false
 }

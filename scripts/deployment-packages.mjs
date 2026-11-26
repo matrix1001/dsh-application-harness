@@ -3,7 +3,7 @@
  * The deployment package set, profile-path resolution, and launch preflight —
  * **one read-only source** for `setup.mjs` (which installs the profile),
  * `dev-apps.mjs` (which verifies the link channel), and `launch-apps.mjs`
- * (which pre-checks the checkout launch).
+ * (which pre-checks the installed launch).
  *
  * The set is defined by **explicit package areas plus the application-harness naming
  * rule** — deliberately NOT by `private` and NOT by "a `lib/` directory
@@ -31,16 +31,15 @@
  */
 
 import { existsSync, readFileSync, readdirSync, realpathSync as realpathSyncNode, statSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
-import { dirname, join, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { load as parseYamlRaw, DEFAULT_SCHEMA, Type } from 'js-yaml'
-
-/** The package areas whose `@matrix1001/dsh-application-harness*` packages the profile deploys, in order. */
-export const PACKAGE_AREAS = ['packages/application', 'packages/client', 'packages/examples']
+import { packageManifests } from './package-areas.mjs'
 
 /**
  * The tolerance of the stale-artifact check (PL4, extended to host rows by
- * AR2 ② 2026-09-19), in milliseconds: a single checkout or install writes
+ * AR2 ② 2026-09-19), in milliseconds: a single install or rebuild writes
  * `src/` and `lib/` in filesystem order, so the sources can end up marginally
  * newer than a freshly built artifact. Only a REAL edit (seconds and beyond) is
  * reported as stale.
@@ -80,7 +79,7 @@ export const DEPLOYMENT_DESCRIPTOR = 'packages/bundle/app-harness/deployment.yml
 /** The default profile name. */
 export const PROFILE_DEFAULT = 'application-harness'
 
-/** This module's own checkout root (the caller's root stays injectable). */
+/** This module's own repository root (the caller's root stays injectable). */
 export const OWN_ROOT = resolve(dirname(new URL(import.meta.url).pathname), '..')
 
 /** Whether a package name is one this harness deploys (the naming rule, not a directory heuristic). */
@@ -94,18 +93,7 @@ export function isDeploymentPackageName(name) {
  * @returns {string[]} absolute `package.json` paths that exist.
  */
 export function workspaceManifests(root) {
-  const out = []
-  for (const group of PACKAGE_AREAS) {
-    const base = join(root, group)
-    if (!existsSync(base)) continue
-    for (const entry of readdirSync(base)) {
-      const abs = join(base, entry, 'package.json')
-      if (existsSync(abs)) out.push(abs)
-    }
-  }
-  const bundle = join(root, BUNDLE_MANIFEST)
-  if (existsSync(bundle)) out.push(bundle)
-  return out
+  return packageManifests(root)
 }
 
 /**
@@ -366,19 +354,18 @@ export function mergedPatchRowNames(layers) {
 }
 
 /**
- * A resolver over the launch's execution source: the platform checkout's own
- * workspace packages first (the checkout lane runs THOSE), then the checkout's
- * installed node_modules, then the profile's installed packages.
- * @param {{ checkout: string, profileDir: string, repoRoot?: string }} options - the checkout, the profile, and this repo's root.
- * @returns {{ resolve: (name: string) => string | undefined, root: (dir: string) => 'checkout' | 'repo' | 'profile', workspace: Map<string, string> }} the resolver, with the workspace name → directory map it resolves through.
+ * A resolver over the installed platform line: this repo's own workspace
+ * packages, then the repo's and the profile's installed node_modules — the
+ * platform packages are the published ones `node scripts/deps.mjs` installed.
+ * @param {{ installRoot?: string, profileDir: string, repoRoot?: string }} options - the install root (default: this repo), the profile, and this repo's root.
+ * @returns {{ resolve: (name: string) => string | undefined, root: (dir: string) => 'repo' | 'profile' | 'install', workspace: Map<string, string> }} the resolver, with the workspace name → directory map it resolves through.
  */
-export function packageResolver({ checkout, profileDir, repoRoot = OWN_ROOT }) {
+export function packageResolver({ installRoot = OWN_ROOT, profileDir, repoRoot = OWN_ROOT }) {
   const workspace = new Map()
-  // BOTH workspaces are scanned: the checkout's platform packages (the checkout
-  // lane executes those) and this repo's own packages (the profile links them
-  // straight out of the workspace, so they are never under any node_modules).
-  // Checkout first: where the two could disagree, the launched tree wins.
-  for (const tree of [checkout, repoRoot]) {
+  // This repo's packages: the profile links them straight out of the workspace,
+  // so they are never under any node_modules. Platform packages resolve from
+  // the install root's node_modules below.
+  for (const tree of [repoRoot]) {
     for (const group of ['packages', join('packages', 'bundle')]) {
       const base = join(tree, group)
       if (!existsSync(base)) continue
@@ -400,7 +387,14 @@ export function packageResolver({ checkout, profileDir, repoRoot = OWN_ROOT }) {
       }
     }
   }
-  const roots = [checkout, profileDir, repoRoot]
+  const roots = [installRoot, repoRoot, profileDir]
+  // Published platform packages live in the installed CLI's dependency closure
+  // (pnpm's virtual store), not as flat root symlinks. Resolve them the way Node
+  // resolves from the entry the launcher actually runs.
+  const anchors = [
+    join(installRoot, 'package.json'),
+    join(installRoot, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
+  ].filter((path) => existsSync(path)).map((path) => createRequire(realpathSyncNode(path)))
   return {
     resolve(name) {
       const local = workspace.get(name)
@@ -409,11 +403,20 @@ export function packageResolver({ checkout, profileDir, repoRoot = OWN_ROOT }) {
         const candidate = join(root, 'node_modules', name)
         if (existsSync(join(candidate, 'package.json'))) return candidate
       }
+      for (const anchor of anchors) {
+        try {
+          return dirname(anchor.resolve(`${name}/package.json`))
+        } catch {
+          // Not in this closure; try the next anchor.
+        }
+      }
       return undefined
     },
     root(dir) {
-      if (dir.startsWith(checkout)) return 'checkout'
-      if (dir.startsWith(repoRoot)) return 'repo'
+      const rel = relative(installRoot, dir)
+      if (!rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel)) {
+        return rel.split(sep).includes('node_modules') ? 'install' : 'repo'
+      }
       return 'profile'
     },
     workspace,
@@ -529,18 +532,18 @@ export function bundlePatchFiles(bundle) {
  * A package declaring `dsh.client` (the browser roster) must have its `./client`
  * bundle built; every other row must have its row subpath's entry. Rows the
  * composition does not mount are never demanded, and a package that merely
- * exists in the checkout is not checked.
- * @param {{ checkout: string, profileDir: string, repoRoot?: string, readYaml?: (text: string) => unknown }} options - the launch's sources.
+ * exists in the install root is not checked.
+ * @param {{ installRoot: string, profileDir: string, repoRoot?: string, readYaml?: (text: string) => unknown, extraPatches?: string[] }} options - the launch's sources.
  * @returns {{ missing: Array<{name: string, file: string, where: string, hint: string}>, checked: number, rows: number }} the problems and the checked counts.
  */
-export function missingCompositionArtifacts({ checkout, profileDir, repoRoot = OWN_ROOT, readYaml = parsePatchYaml, extraPatches = [] }) {
+export function missingCompositionArtifacts({ installRoot, profileDir, repoRoot = OWN_ROOT, readYaml = parsePatchYaml, extraPatches = [] }) {
   const missing = []
   // Client bundles whose source tree is NEWER than the built artifact (PL4):
   // the missing-artifact check cannot see the "a pull edited an existing client
   // package without adding a row" case — the row still resolves, it just serves
   // the previous bytes.
   const stale = []
-  const resolver = packageResolver({ checkout, profileDir, repoRoot })
+  const resolver = packageResolver({ installRoot, profileDir, repoRoot })
   const profileManifestPath = join(profileDir, 'package.json')
   if (!existsSync(profileManifestPath)) {
     return { missing: [{ name: 'profile', file: profileManifestPath, where: 'profile', hint: `profile not found — bootstrap it: node scripts/setup.mjs` }], stale: [], checked: 0, rows: 0 }
@@ -559,7 +562,7 @@ export function missingCompositionArtifacts({ checkout, profileDir, repoRoot = O
     if (typeof bundle !== 'string') continue
     const dir = resolver.resolve(bundle)
     if (dir === undefined) {
-      missing.push({ name: bundle, file: join(checkout, 'node_modules', bundle), where: 'checkout', hint: 'bundle package not installed — run (checkout): pnpm install' })
+      missing.push({ name: bundle, file: join(installRoot, 'node_modules', bundle), where: 'install', hint: 'bundle package not installed — run: node scripts/deps.mjs' })
       continue
     }
     let patchFiles
@@ -576,7 +579,14 @@ export function missingCompositionArtifacts({ checkout, profileDir, repoRoot = O
     for (const patchFile of patchFiles) {
       const patchPath = join(dir, patchFile)
       if (!existsSync(patchPath)) {
-        missing.push({ name: `${bundle} patch`, file: patchPath, where: resolver.root(dir), hint: 'bundle patch missing — rebuild it' })
+        missing.push({
+          name: `${bundle} patch`,
+          file: patchPath,
+          where: resolver.root(dir),
+          hint: resolver.root(dir) === 'install'
+            ? 'bundle patch missing from the installed package — reinstall: node scripts/deps.mjs'
+            : 'bundle patch missing — rebuild it',
+        })
         continue
       }
       layers.push(readYaml(readFileSync(patchPath, 'utf8')))
@@ -601,7 +611,7 @@ export function missingCompositionArtifacts({ checkout, profileDir, repoRoot = O
     const { name, subpath } = splitSpecifier(specifier)
     const dir = resolver.resolve(name)
     if (dir === undefined) {
-      missing.push({ name: specifier, file: join(checkout, 'node_modules', name), where: 'checkout', hint: 'row package not installed — run (checkout): pnpm install' })
+      missing.push({ name: specifier, file: join(installRoot, 'node_modules', name), where: 'install', hint: 'row package not installed — run: node scripts/deps.mjs' })
       continue
     }
     const where = resolver.root(dir)
@@ -634,10 +644,16 @@ export function missingCompositionArtifacts({ checkout, profileDir, repoRoot = O
         where,
         hint: where === 'repo'
           ? (client ? 'client bundle missing — build it: (repo) pnpm exec tsdown   # or node scripts/dev-apps.mjs' : 'host entry missing — build it: (repo) pnpm run build')
-          : 'platform artifact missing — build it: (checkout) pnpm run build',
+          : where === 'install'
+            ? 'published platform artifact missing — reinstall: node scripts/deps.mjs'
+            : 'profile artifact missing — rebuild the profile package',
       })
       continue
     }
+    // Published platform packages are immutable inputs: this repo does not
+    // rebuild their artifacts, so their source mtimes say nothing about
+    // freshness.
+    if (where === 'install') continue
     // A mounted row whose artifact resolves RESOLVES but predates the sources it
     // was built from serves the previous bytes. This applies to every mounted
     // row — host entries included, not just client bundles (AR2 ②): a host entry
@@ -665,7 +681,7 @@ export function missingCompositionArtifacts({ checkout, profileDir, repoRoot = O
         where,
         hint: where === 'repo'
           ? `stale ${what}: ${cause} is newer than ${artifact} — rebuild it: (repo) ${client ? 'pnpm exec tsdown   # or node scripts/dev-apps.mjs' : 'pnpm run build'}`
-          : `stale ${what}: ${cause} is newer than ${artifact} — rebuild it: (checkout) pnpm run build`,
+          : `stale ${what}: ${cause} is newer than ${artifact} — rebuild it: pnpm run build`,
       })
     }
   }
@@ -674,14 +690,18 @@ export function missingCompositionArtifacts({ checkout, profileDir, repoRoot = O
 
 /**
  * Resolve how `setup --launch` will boot dsh — and say what that resolution
- * actually VERIFIED (T2). The launch path is the registry/PATH line
- * (DSH_BIN → PATH → npx), not the platform checkout, so the wrapper's checkout
- * preflight does not cover it: `npx` fetches from the registry and cannot be
- * verified locally, and a bin/DSH_BIN path is verified only by existing.
+ * actually VERIFIED (T2). The installed platform line comes first (the same
+ * packages `node scripts/deps.mjs` wrote), then an explicit bin, then PATH,
+ * then the registry fallback.
  * @param {{ dshBin?: string, env?: Record<string, string | undefined>, onPath?: (name: string) => boolean, exists?: (path: string) => boolean }} options - the explicit bin, the environment, and the probes.
  * @returns {{ cmd: string, args: string[], source: string, verified: boolean, note: string }} the plan plus its provenance.
  */
-export function resolveLaunchSource({ dshBin, env = process.env, onPath = () => false, exists = existsSync, profileArgs = [] } = {}) {
+export function resolveLaunchSource({ dshBin, env = process.env, onPath = () => false, exists = existsSync, profileArgs = [], repoRoot = OWN_ROOT } = {}) {
+  const installed = join(repoRoot, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+  if (exists(installed)) {
+    return { cmd: process.execPath, args: [installed, ...profileArgs], source: 'install', verified: true,
+      note: `the installed platform line at ${installed}` }
+  }
   if (dshBin !== undefined && dshBin !== '') {
     return { cmd: process.execPath, args: [dshBin, ...profileArgs], source: '--dsh', verified: exists(dshBin),
       note: exists(dshBin) ? 'explicit bin found on disk' : 'explicit bin path does not exist' }
@@ -693,5 +713,5 @@ export function resolveLaunchSource({ dshBin, env = process.env, onPath = () => 
   }
   if (onPath('dsh')) return { cmd: 'dsh', args: profileArgs, source: 'PATH', verified: true, note: 'dsh resolved on PATH' }
   return { cmd: 'npx', args: ['@deepseek-ai/dsh', ...profileArgs], source: 'npx', verified: false,
-    note: 'no local dsh found — npx fetches @deepseek-ai/dsh from the registry; the execution line is NOT the platform checkout' }
+    note: 'no installed platform line and no dsh on PATH — npx fetches @deepseek-ai/dsh from the registry' }
 }

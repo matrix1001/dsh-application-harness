@@ -96,13 +96,13 @@ describe('platform model port', () => {
       agentDefaultModel: routed,
       applicationModelLimits: { begin: async () => { throw new Error('disabled') } },
     }), 'review')
-    await expect(denied.ask({ prompt: 'hi', background: true, capabilities: door() })).rejects.toMatchObject({ code: 'model-limit-exceeded' })
+    await expect(denied.ask({ prompt: 'hi', background: true, capabilities: door() })).rejects.toMatchObject({ code: 'platform.model-limit-exceeded' })
     const deniedString = createPlatformModelPort(fakeCtx({
       llm: fakeLlm(textChunks('never')).llm,
       agentDefaultModel: routed,
       applicationModelLimits: { begin: async () => { throw 'disabled' } },
     }), 'review')
-    await expect(deniedString.ask({ prompt: 'hi', background: true, capabilities: door() })).rejects.toMatchObject({ code: 'model-limit-exceeded' })
+    await expect(deniedString.ask({ prompt: 'hi', background: true, capabilities: door() })).rejects.toMatchObject({ code: 'platform.model-limit-exceeded' })
   })
 
   it('records success, failure and cancellation without changing the answer', async () => {
@@ -150,9 +150,9 @@ describe('platform model port', () => {
     const parsed = await port.ask({ prompt: 'json', capabilities: door(), parse: (text) => JSON.parse(text) as { ok: boolean } })
     expect(parsed.structured).toEqual({ ok: true })
     await expect(port.ask({ prompt: 'json', capabilities: door(), parse: () => { throw new Error('shape') } }))
-      .rejects.toMatchObject({ code: 'model-invalid-output' })
+      .rejects.toMatchObject({ code: 'platform.model-invalid-output' })
     await expect(port.ask({ prompt: 'json', capabilities: door(), parse: () => { throw 'shape' } }))
-      .rejects.toMatchObject({ code: 'model-invalid-output' })
+      .rejects.toMatchObject({ code: 'platform.model-invalid-output' })
   })
 
   it('reports provider failures and the caller cancellation distinctly', async () => {
@@ -175,7 +175,7 @@ describe('platform model port', () => {
       llm: fakeLlm([{ type: 'finish', reason: { kind: 'aborted', failure: { code: 'ABORTED', message: 'stopped' } } }]).llm,
       agentDefaultModel: routed,
     }))
-    await expect(remoteAbort.ask({ prompt: 'hi', capabilities: door() })).rejects.toMatchObject({ code: 'model-failed' })
+    await expect(remoteAbort.ask({ prompt: 'hi', capabilities: door() })).rejects.toMatchObject({ code: 'platform.model-failed' })
   })
 })
 

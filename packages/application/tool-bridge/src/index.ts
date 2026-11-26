@@ -22,6 +22,24 @@ import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { ApplicationRuntime, AppRegistration } from '@matrix1001/dsh-application-harness-runtime'
 
 export const name = 'application-harness-tool-bridge'
+/** One application row for the model-facing view/read action (public state axis). */
+function appRow(entry: AppRegistration): JsonValue {
+  const runtime = entry.status() === 'available' ? 'ready' : entry.status() === 'starting' ? 'starting' : entry.status() === 'stopping' || entry.status() === 'stop-incomplete' ? 'stopping' : 'stopped'
+  const row: Record<string, JsonValue> = {
+    appId: entry.declaration.id,
+    name: entry.declaration.name,
+    description: entry.declaration.description,
+    runtime,
+    activation: entry.activation(),
+    ...(runtime === 'ready' ? { health: entry.health() } : {}),
+  }
+  const reason = entry.reason()
+  if (reason !== undefined) row.reason = reason
+  const detail = entry.detail()
+  if (detail !== undefined) row.detail = detail
+  return row
+}
+
 
 /** The bridge needs the tool registry to register into and the runtime to read and call. */
 export const inject = ['tools', 'applications']
@@ -34,6 +52,9 @@ export const PAGES_TOOL = 'pages'
 
 /** The owner-session draft tool. */
 export const DRAFTS_TOOL = 'drafts'
+
+/** The delegation result tool: the only way an execution Session reports back. */
+export const DELEGATION_REPORT_TOOL = 'delegation_report'
 
 /** The bridge's row config (no tunables). */
 export interface Config {}
@@ -108,7 +129,7 @@ function createPagesTool(ctx: Context): ToolDefinition {
       action: { type: 'string', enum: ['read', 'open', 'act'], description: 'Read the current page (default), open a view/record, or apply a fixed page action.' },
       view: { type: 'string', description: 'The view key for open.' },
       record: { type: 'json', description: 'An optional { kind, id } record for open.' },
-      pageId: { type: 'string', description: 'The page id from read, for act.' },
+      pageId: { type: 'string', description: 'The page id from read, for act; when read also verifies it.' },
       snapshotId: { type: 'string', description: 'The snapshot id from read, for act.' },
       pageAction: { type: 'string', enum: ['navigate', 'set-filters', 'select'], description: 'The fixed action for act.' },
       input: { type: 'json', description: 'The fixed action input for act.' },
@@ -153,6 +174,14 @@ function createPagesTool(ctx: Context): ToolDefinition {
       if (developmentApp !== undefined && page.appId !== developmentApp) {
         throw new HarnessError('this development conversation is bound to another application', 'pages/unavailable')
       }
+      if (input.pageId !== undefined) {
+        if (typeof input.pageId !== 'string' || input.pageId === '') {
+          throw new HarnessError('the page id must be a non-empty string', 'pages/invalid-input')
+        }
+        if (page.pageId === undefined || page.pageId !== input.pageId) {
+          throw new HarnessError('the page id is no longer visible; read the current page again', 'pages/stale-snapshot')
+        }
+      }
       const record = (value: { kind: string; id: string } | undefined): JsonValue | undefined =>
         value === undefined ? undefined : { appId: page.appId, type: value.kind, id: value.id }
       return {
@@ -169,6 +198,64 @@ function createPagesTool(ctx: Context): ToolDefinition {
         ...(page.visibleRange === undefined ? {} : { visibleRange: page.visibleRange }),
         ...(page.hasUnsavedChanges === undefined ? {} : { hasUnsavedChanges: page.hasUnsavedChanges }),
       } as unknown as JsonValue
+    },
+  }
+}
+
+/**
+ * The delegation report tool. A session executing an application delegation
+ * reports its structured result through this ONE envelope; the platform's
+ * delegation store validates it and updates the record the owning application
+ * reads. The tool only ever answers for the delegation bound to the calling
+ * Session (the host resolves the binding from `exec.agent.session.id`; the
+ * model cannot name another delegation), it rejects a report in a session that
+ * is not executing one, and it is idempotent for an identical retry.
+ */
+function createDelegationReportTool(ctx: Context): ToolDefinition {
+  return {
+    name: DELEGATION_REPORT_TOOL,
+    description:
+      'Report the structured result of the application delegation this session is executing. Use exactly once when the work ends: outcome ' +
+      '"completed" (done; summary says what was produced), "blocked" (a human answer is required; summary says why and question is the ' +
+      'concrete question) or "failed" (cannot be completed; summary says why). Optional details carry application-shaped references or ' +
+      'links, never transcripts, secrets or credentials. Completed does NOT write business data or mark anything successful in the ' +
+      'application; only the application decides what to accept. A report outside a delegated session is rejected.',
+    parameters: parametersOf({
+      outcome: { type: 'string', enum: ['completed', 'blocked', 'failed'], required: true, description: 'How the delegated work ended.' },
+      summary: { type: 'string', required: true, description: 'Readable summary of what happened or was produced.' },
+      question: { type: 'string', description: 'The concrete question the human must answer; required for blocked.' },
+      details: { type: 'json', description: 'Optional application-shaped payload (references, links, bounded data).' },
+    }),
+    output: { schema: {}, render: (_args, value) => renderJson(value) },
+    async execute(raw, exec): Promise<JsonValue> {
+      const sessionId = exec.agent?.session.id
+      if (sessionId === undefined) throw new HarnessError('delegation reports require a Session', 'delegation/unavailable')
+      const service = ctx.get('appDelegations') as {
+        active?: (id: string) => Promise<{ readonly id: string } | undefined>
+        report?: (id: string, input: { outcome: unknown; summary: unknown; question?: unknown; details?: unknown }) => Promise<JsonValue>
+      } | undefined
+      if (service?.active === undefined || service.report === undefined) {
+        throw new HarnessError('this composition has no delegation store', 'delegation/unavailable')
+      }
+      if (await service.active(sessionId) === undefined) {
+        throw new HarnessError('this session is not executing a delegation (or the delegation already ended)', 'delegation/unavailable')
+      }
+      const input = raw as { outcome?: unknown; summary?: unknown; question?: unknown; details?: unknown }
+      if (input.outcome !== 'completed' && input.outcome !== 'blocked' && input.outcome !== 'failed') {
+        throw new HarnessError('the report outcome must be completed, blocked or failed', 'delegation/invalid-report')
+      }
+      if (typeof input.summary !== 'string' || input.summary.trim() === '') {
+        throw new HarnessError('the report needs a non-empty summary', 'delegation/invalid-report')
+      }
+      if (input.outcome === 'blocked' && (typeof input.question !== 'string' || input.question.trim() === '')) {
+        throw new HarnessError('a blocked report needs the concrete question the human must answer', 'delegation/invalid-report')
+      }
+      return await service.report(sessionId, {
+        outcome: input.outcome,
+        summary: input.summary,
+        ...(input.question === undefined ? {} : { question: input.question }),
+        ...(input.details === undefined ? {} : { details: input.details }),
+      })
     },
   }
 }
@@ -245,15 +332,14 @@ function createUnifiedTool(ctx: Context, runtime: ApplicationRuntime): ToolDefin
         const ids = developmentApp !== undefined
           ? [developmentApp]
           : appSession ? runtime.list().map(entry => entry.declaration.id) : scopedIds()
-        const applications = ids.flatMap((id) => {
+        const applications = ids.map((id) => {
           const entry = registered(id)
-          if (entry === undefined) return []
-          return [{
-            appId: id,
-            name: entry.declaration.name,
-            description: entry.declaration.description,
-            status: entry.status(),
-          }]
+          // A referenced application that is no longer registered stays in the
+          // answer as an explicit unavailable row; an omitted row reads as
+          // "nothing was referenced" and hides a real failure.
+          return entry === undefined
+            ? { appId: id, status: 'unavailable', reason: 'not-registered' }
+            : appRow(entry)
         })
         return { applications }
       }
@@ -284,13 +370,9 @@ function createUnifiedTool(ctx: Context, runtime: ApplicationRuntime): ToolDefin
             resultSchema: valueSchemaSpecToJsonSchema(declaration.result) as unknown as JsonValue,
           })
         }
-        return {
-          appId,
-          name: entry.declaration.name,
-          description: entry.declaration.description,
-          status: entry.status(),
-          ops,
-        }
+        const row = appRow(entry) as Record<string, JsonValue>
+        row.ops = ops
+        return row
       }
 
       if (input.action === 'call') {
@@ -336,19 +418,23 @@ export function apply(ctx: Context, _config: Config = {}): void {
     markDevelopment(sessionId: string, appId: string): void { marked.add(sessionId); development.set(sessionId, appId) },
     developmentApp: (sessionId: string): string | undefined => development.get(sessionId),
   })
-  try {
-    ctx.tools.register(createUnifiedTool(ctx, runtime))
-  } catch (error) {
-    ctx.logger.warn(`application-harness-tool-bridge: the "${APPLICATIONS_TOOL}" tool could not be registered: ${String(error)}`)
-  }
-  try {
-    ctx.tools.register(createPagesTool(ctx))
-  } catch (error) {
-    ctx.logger.warn(`application-harness-tool-bridge: the "${PAGES_TOOL}" tool could not be registered: ${String(error)}`)
-  }
-  try {
-    ctx.tools.register(createDraftsTool(ctx))
-  } catch (error) {
-    ctx.logger.warn(`application-harness-tool-bridge: the "${DRAFTS_TOOL}" tool could not be registered: ${String(error)}`)
-  }
+  ctx.tools.register(createUnifiedTool(ctx, runtime))
+  // The owner-session tools exist only where they can succeed: an ordinary
+  // conversation's step should not advertise a tool whose every call is
+  // refused. `when` filters the step's declarations; execute keeps its own
+  // check as defence in depth.
+  ctx.tools.register(createPagesTool(ctx), { when: ({ agent }) => marked.has(agent.session.id) })
+  ctx.tools.register(createDraftsTool(ctx), { when: ({ agent }) => marked.has(agent.session.id) })
+  ctx.tools.register(createDelegationReportTool(ctx), {
+    when: async ({ agent }) => {
+      const service = ctx.get('appDelegations') as { active?: (id: string) => Promise<unknown> } | undefined
+      if (service?.active === undefined) return false
+      try {
+        return await service.active(agent.session.id) !== undefined
+      } catch {
+        // A corrupt delegation table must not fail every step's preparation.
+        return false
+      }
+    },
+  })
 }

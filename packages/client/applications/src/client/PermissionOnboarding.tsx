@@ -13,11 +13,11 @@
  */
 
 import { useState, type ReactNode } from 'react'
-import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, Modal } from '@matrix1001/dsh-application-harness-client-chrome'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { AppInfo } from '@matrix1001/dsh-application-harness-host-bridge/client'
 import type { ApplicationView } from './contract.ts'
-import { capabilityNeeds, describeNeed, displayName, grantedTo } from './model.ts'
+import { capabilityNeeds, describeNeed, displayName, grantedTo, statusOf } from './model.ts'
 import type { ApplicationsState } from './shell.ts'
 import css from './ApplicationsArea.module.css'
 
@@ -52,7 +52,7 @@ export function PermissionOnboarding({ app, view, state, onAllow, onLater, onMan
 
   // The card is only meaningful once BOTH reads answered: "not yet known" is
   // never shown as "not granted" (and never as "already seen").
-  if (app.status !== 'available' || !state.grantsLoaded || !state.onboardingLoaded) return null
+  if (statusOf(app) !== 'available' || !state.grantsLoaded || !state.onboardingLoaded) return null
   const capabilities = capabilityNeeds(app)
   if (capabilities.length === 0) return null
   const caller = { kind: 'app', appId: app.id } as const
@@ -88,7 +88,7 @@ export function PermissionOnboarding({ app, view, state, onAllow, onLater, onMan
       footer={(
         <div className={css.onboardingActions}>
           <Button size="sm" variant="primary" disabled={pending} onClick={() => { void allow() }} data-onboarding-action="allow-all">
-            {busy === 'allow' ? t('onboarding.pending') : t('onboarding.allowAllCount', { count: missing.length })}
+            {busy === 'allow' ? t('onboarding.pending') : missing.length === 1 ? t('onboarding.allowOne') : t('onboarding.allowAllCount', { count: missing.length })}
           </Button>
           <Button size="sm" disabled={pending} onClick={() => { onManage(app.id) }} data-onboarding-action="adjust">
             {t('onboarding.adjust')}

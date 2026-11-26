@@ -14,7 +14,7 @@
 # (mounted = started). The bridge serves the `applications` Remote the browser
 # shell rides; the overlay supplies the runtime, the store, the tool bridge (the
 # web profile already mounts `dsh-tools`), the network seam, the context reader,
-# the browser shell, and the disk-space example row. The platform rows (typert
+# the browser shell, and the git-browser example row. The platform rows (typert
 # registry, jobs, settings, credentials, subprocess) are the web profile's own —
 # every dsh profile carries them, so the overlay carries application-side rows
 # only.
@@ -24,11 +24,10 @@
 # （`packages/bundle/app-harness/cordis.patch.yml` 即规范来源）生成，手工改动会被
 # 该脚本的 `--check` 判红（它在 release:check 里）。这个 overlay 曾把同一批行整段
 # 复制一份，于是"第二份拷贝"可以与真源静默分叉——`client-ui-disk-analysis` 就曾在这里
-# 挂着却没有宿主应用行，而所有门禁全绿（2026-09-23 收口，见
-# docs/history/2026-09-23-conformance-remediation.md）。
+# 挂着却没有宿主应用行，而所有门禁全绿（2026-09-23 收口）。
 #
 # 手写的只有两处：本文件头（说明与意图），以及 `--- example rows ---` 之下本示例
-# 自己的示例行——本 overlay 有意演示「web profile + 完整挽具机械行 + disk-space
+# 自己的示例行——本 overlay 有意演示「web profile + 完整挽具机械行 + git-browser
 # 示例行」的形态，不做精简，所以机械行按 `machinery-rowset: full` 全量生成。
 # 行集一致性另由 `scripts/verify-example-compositions.mjs` 门禁守护（按该声明比对
 # 组合内机械行的 id/name）；示例行与该包 `dsh.appRow` 声明比对（id+name，配置不比对），
@@ -46,12 +45,12 @@
     # to the applications themselves (the generated rows below).
     - id: application-runtime
       name: '@matrix1001/dsh-application-harness-runtime'
+      config: {}
 
     # The unified application data store (SQLite documents/collections; not part of the world).
     # It lives under the harness home (dshHomePath — cwd-independent) so every
-    # application's namespace survives restarts. The old JSON blob is a
-    # one-way import source for settings and filters; it is never rewritten.
-    # Absent a path, the store is in-memory only (not durable).
+    # application's namespace survives restarts. Absent a path, the store is
+    # in-memory only (not durable).
     - id: app-store
       name: '@matrix1001/dsh-application-harness-store'
       config:
@@ -96,12 +95,14 @@
         onboardingPath: !!js dshHomePath('application-harness/onboarding.json')
         historyPath: !!js dshHomePath('application-harness/history.jsonl')
         tasksPath: !!js dshHomePath('application-harness/tasks.jsonl')
-        secretsPath: !!js dshHomePath('application-harness/secrets.json')
-        dataPath: !!js dshHomePath('application-harness/app-data.sqlite')
+        delegationsPath: !!js dshHomePath('application-harness/delegations.json')
         conversationPath: !!js dshHomePath('application-harness/app-conversation.json')
 
     # The harness network capability (ctx.applicationHttp): applications make outbound
     # requests through it; an application declares no transport policy of its own.
+    # The row's one tunable, `proxy`, is the application network proxy: a volatile
+    # field the application area's management page edits (persisted in the user
+    # layer), routing application backends only — never model calls or DSH itself.
     - id: app-http
       name: '@matrix1001/dsh-application-harness-http'
 
@@ -114,12 +115,12 @@
     # package's `dsh.appRow` declaration — one bundle layer, deterministic order).
     - id: client-applications
       name: '@matrix1001/dsh-application-harness-client-applications'
-    # --- example rows (hand-written: this composition demonstrates the disk-space application) ---
-    # The demo uses its own database under the harness home, so it never touches
-    # the production disk-space history.
-    - id: disk-space
-      name: '@matrix1001/dsh-application-harness-disk-space'
+    # --- example rows (hand-written: this composition demonstrates the git-browser application) ---
+    # The demo runs read-only git commands in the host's working directory; the
+    # timeout keeps a slow repository from stalling the page.
+    - id: git-browser
+      name: '@matrix1001/dsh-application-harness-git-browser'
       config:
-        databasePath: !!js dshHomePath('application-harness/disk-space-demo/index.db')
-    - id: client-ui-disk-space
-      name: '@matrix1001/dsh-application-harness-disk-space-view'
+        timeoutMs: 10000
+    - id: client-ui-git-browser
+      name: '@matrix1001/dsh-application-harness-git-browser-view'

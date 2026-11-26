@@ -1,9 +1,12 @@
 import { chmodSync, mkdtempSync, rmSync, existsSync, readdirSync, writeFileSync, utimesSync, mkdirSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SqliteDataStore } from '@matrix1001/dsh-application-harness-store/sqlite-store'
 import type { AppDeclaration } from '@matrix1001/dsh-application-harness-runtime'
+import type AppStore from '@matrix1001/dsh-application-harness-store'
+import ApplicationBridge from '../src/index.ts'
+import type { AppDataImportResult } from '../src/types.ts'
 import { demoApp, host } from './harness.ts'
 
 const dirs: string[] = []
@@ -17,13 +20,18 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
+/** Preview then commit, the only public import path now. */
+async function importWithPlan(bridge: ApplicationBridge, appId: string, json: string, requestId = 'req-import'): Promise<AppDataImportResult> {
+  const preview = bridge.dataImportPreview(appId, json)
+  return await bridge.dataImport(appId, preview.planId, requestId)
+}
+
 describe('application data page', () => {
-  it('reports an absent database without creating it and exports an empty namespace', async () => {
+  it('reports an empty database and exports an empty namespace', async () => {
     const db = join(tempDir(), 'app-data.sqlite')
-    const { bridge, dispose } = await host([], {}, { dataPath: db })
+    const { bridge, dispose } = await host([demoApp('alpha'), demoApp('beta')], {}, { dataPath: db })
     try {
-      expect(bridge.dataInfo('alpha')).toMatchObject({ appId: 'alpha', path: db, byteSize: 0, schemaVersion: 0, documentCount: 0, collections: {} })
-      expect(existsSync(db)).toBe(false)
+      expect(bridge.dataInfo('alpha')).toMatchObject({ appId: 'alpha', path: db, schemaVersion: 0, documentCount: 0, collections: {} })
       const exported = JSON.parse(bridge.dataExport('alpha').json)
       expect(exported.apps).toEqual({})
     } finally {
@@ -38,7 +46,7 @@ describe('application data page', () => {
     writeFileSync(join(dir, 'disk/index.db'), 'index')
     const declaration = demoApp('disk-space', {
       generation: 2,
-      data: { kind: 'own-sqlite', path: 'disk/index.db', schemaVersion: 2, backup: 'exclude' },
+      data: { kind: 'own-sqlite', path: 'disk/index.db', schemaVersion: 2 },
     })
     const { bridge, dispose } = await host([declaration], {}, { dataPath: db })
     try {
@@ -52,22 +60,22 @@ describe('application data page', () => {
     }
   })
 
-  it('uses the declared unified namespace when it differs from the application id', async () => {
+  it('uses the application id as the unified namespace', async () => {
     const db = join(tempDir(), 'app-data.sqlite')
     const store = new SqliteDataStore({ dbPath: db })
-    store.putDocument('review', 'settings', { redact: true }, { schemaVersion: 1 })
-    store.putCollectionItem('review', 'sessions', 's1', { title: 'one' })
+    store.putDocument('workspace-review', 'settings', { redact: true }, { schemaVersion: 1 })
+    store.putCollectionItem('workspace-review', 'sessions', 's1', { title: 'one' })
     store.close()
     const declaration = demoApp('workspace-review', {
       generation: 2,
-      data: { kind: 'unified', namespace: 'review', schemaVersion: 1 },
+      data: { kind: 'unified', namespace: 'workspace-review', schemaVersion: 1 },
     })
     const { bridge, dispose } = await host([declaration], {}, { dataPath: db })
     try {
       expect(bridge.dataInfo('workspace-review')).toMatchObject({ appId: 'workspace-review', documentCount: 1, collections: { sessions: 1 } })
       const dumped = JSON.parse(bridge.dataExport('workspace-review').json)
-      expect(Object.keys(dumped.apps)).toEqual(['review'])
-      expect(dumped.apps.review.documents.settings.value).toEqual({ redact: true })
+      expect(Object.keys(dumped.apps)).toEqual(['workspace-review'])
+      expect(dumped.apps['workspace-review'].documents.settings.value).toEqual({ redact: true })
     } finally {
       await dispose()
     }
@@ -80,7 +88,7 @@ describe('application data page', () => {
     writeFileSync(join(dir, 'files/data.bin'), 'bytes')
     const declaration = demoApp('files-app', {
       generation: 2,
-      data: { kind: 'files', path: 'files', schemaVersion: 3, backup: 'exclude' },
+      data: { kind: 'files', path: 'files', schemaVersion: 3 },
     })
     const { bridge, dispose } = await host([declaration], {}, { dataPath: db })
     try {
@@ -101,16 +109,15 @@ describe('application data page', () => {
     store.putDocument('beta', 'settings', { theme: 'light' }, { schemaVersion: 9 })
     store.close()
 
-    const { bridge, dispose } = await host([], {}, { dataPath: db })
+    const { bridge, dispose } = await host([demoApp('alpha'), demoApp('beta')], {}, { dataPath: db })
     try {
       expect(bridge.dataInfo('alpha')).toMatchObject({ schemaVersion: 3, documentCount: 1, collections: { inbox: 2 } })
       expect(bridge.dataInfo('beta')).toMatchObject({ schemaVersion: 9, documentCount: 1, collections: {} })
-      expect(bridge.dataInfo('missing')).toMatchObject({ schemaVersion: 0, documentCount: 0, collections: {} })
+      expect(() => bridge.dataInfo('missing')).toThrow(/not registered/)
       const dumped = JSON.parse(bridge.dataExport('alpha').json)
       expect(Object.keys(dumped.apps)).toEqual(['alpha'])
       expect(dumped.apps.alpha.documents.settings.value).toEqual({ theme: 'dark' })
       expect(dumped.apps.alpha.collections.inbox).toHaveLength(2)
-      expect(JSON.parse(bridge.dataExport('missing').json).apps).toEqual({})
     } finally {
       await dispose()
     }
@@ -123,7 +130,7 @@ it('mounts with the row default data path when the deployment omits the config',
   const previous = process.env.DSH_HOME
   process.env.DSH_HOME = home
   try {
-    const { bridge, dispose } = await host([], {}, { dataPath: null })
+    const { bridge, dispose } = await host([demoApp('alpha')], {}, { dataPath: null })
     try {
       expect(bridge.dataInfo('alpha').path).toBe(join(home, 'application-harness/app-data.sqlite'))
     } finally {
@@ -145,7 +152,7 @@ describe('application data import', () => {
       writeFileSync(path, `backup-${String(index)}`)
       utimesSync(path, new Date(1_000 + index * 1_000), new Date(1_000 + index * 1_000))
     }
-    const { bridge, dispose } = await host([], {}, { dataPath: db })
+    const { bridge, dispose } = await host([demoApp('alpha'), demoApp('beta')], {}, { dataPath: db })
     try {
       const info = bridge.dataInfo('alpha')
       expect(info.backupCount).toBe(6)
@@ -166,7 +173,7 @@ describe('application data import', () => {
       writeFileSync(path, `backup-${String(index)}`)
       utimesSync(path, new Date(1_000 + index * 1_000), new Date(1_000 + index * 1_000))
     }
-    const { bridge, dispose } = await host([], {}, { dataPath: db })
+    const { bridge, dispose } = await host([demoApp('alpha'), demoApp('beta')], {}, { dataPath: db })
     try {
       expect(bridge.dataInfo('alpha').backupCount).toBe(7)
       await expect(bridge.dataPruneBackups(0)).rejects.toThrow(/positive integer/u)
@@ -188,7 +195,7 @@ describe('application data import', () => {
       writeFileSync(path, `backup-${String(index)}`)
       utimesSync(path, new Date(1_000 + index * 1_000), new Date(1_000 + index * 1_000))
     }
-    const { ctx, bridge, dispose } = await host([], {}, { dataPath: db })
+    const { ctx, bridge, dispose } = await host([demoApp('alpha'), demoApp('beta')], {}, { dataPath: db })
     const warned: string[] = []
     ctx.logger.warn = ((...args: unknown[]) => { warned.push(args.map(String).join(' ')) }) as typeof ctx.logger.warn
     chmodSync(dir, 0o500)
@@ -202,7 +209,7 @@ describe('application data import', () => {
   })
 
   it('treats in-memory, missing-directory, directory and broken-link snapshots as no snapshots', async () => {
-    const memory = await host([], {}, { dataPath: ':memory:' })
+    const memory = await host([demoApp('alpha')], {}, { dataPath: ':memory:' })
     try {
       expect(memory.bridge.dataInfo('alpha')).toMatchObject({ backups: [], backupCount: 0 })
     } finally {
@@ -210,7 +217,7 @@ describe('application data import', () => {
     }
 
     const missingDir = join(tempDir(), 'missing', 'app-data.sqlite')
-    const missing = await host([], {}, { dataPath: missingDir })
+    const missing = await host([demoApp('alpha')], {}, { dataPath: missingDir })
     try {
       expect(missing.bridge.dataInfo('alpha')).toMatchObject({ backups: [], backupCount: 0 })
     } finally {
@@ -220,7 +227,7 @@ describe('application data import', () => {
     const dir = tempDir()
     mkdirSync(join(dir, 'app-data.sqlite.before-import-dir'))
     symlinkSync(join(dir, 'missing-target'), join(dir, 'app-data.sqlite.before-import-broken'))
-    const odd = await host([], {}, { dataPath: join(dir, 'app-data.sqlite') })
+    const odd = await host([demoApp('alpha')], {}, { dataPath: join(dir, 'app-data.sqlite') })
     try {
       expect(odd.bridge.dataInfo('alpha')).toMatchObject({ backups: [], backupCount: 0 })
     } finally {
@@ -228,20 +235,27 @@ describe('application data import', () => {
     }
   })
 
-  it('reports the legacy migration markers this namespace recorded', async () => {
+  it('reports an empty namespace when the database exists for another application', async () => {
     const db = join(tempDir(), 'app-data.sqlite')
     const store = new SqliteDataStore({ dbPath: db })
-    store.namespace('alpha').meta.set('legacy-workbook-imported', '2026-10-20T00:00:00.000Z')
-    store.namespace('alpha').meta.set('legacy-settings-imported', '2026-10-19T00:00:00.000Z')
-    store.namespace('alpha').meta.set('unrelated', 'hidden')
+    store.namespace('other').documents.put('settings', { mode: 'x' })
     store.close()
-    const { bridge, dispose } = await host([], {}, { dataPath: db })
+    const { bridge, dispose } = await host([demoApp('empty')], {}, { dataPath: db })
     try {
-      expect(bridge.dataInfo('alpha').legacyImports).toEqual({
-        'legacy-settings-imported': '2026-10-19T00:00:00.000Z',
-        'legacy-workbook-imported': '2026-10-20T00:00:00.000Z',
+      expect(bridge.dataInfo('empty')).toMatchObject({
+        appId: 'empty', documentCount: 0, collections: {}, schemaVersion: 0,
       })
-      expect(bridge.dataInfo('beta').legacyImports).toEqual({})
+    } finally {
+      await dispose()
+    }
+  })
+
+  it('reports no store facts for an application that declares no data', async () => {
+    const { bridge, dispose } = await host([demoApp('bare', { data: { kind: 'none' } })])
+    try {
+      expect(bridge.dataInfo('bare')).toMatchObject({
+        appId: 'bare', path: '', byteSize: 0, schemaVersion: 0, documentCount: 0, collections: {}, backupCount: 0,
+      })
     } finally {
       await dispose()
     }
@@ -255,7 +269,7 @@ describe('application data import', () => {
     store.putCollectionItem('beta', 'inbox', 'other', { title: 'keep me' })
     store.close()
 
-    const { bridge, dispose } = await host([demoApp('alpha')], {}, { dataPath: db })
+    const { bridge, dispose } = await host([demoApp('alpha'), demoApp('beta')], {}, { dataPath: db })
     try {
       const json = bridge.dataExport('alpha').json
       const preview = bridge.dataImportPreview('alpha', json)
@@ -264,7 +278,7 @@ describe('application data import', () => {
         newDocuments: 0, overwrittenDocuments: 1, removedDocuments: 0,
         newCollectionItems: 0, overwrittenCollectionItems: 1, removedCollectionItems: 0,
       })
-      const result = await bridge.dataImport('alpha', json)
+      const result = await importWithPlan(bridge, 'alpha', json)
       expect(result).toMatchObject({ appId: 'alpha', apps: 1, documents: 1, collections: 1, overwrittenDocuments: 1, reload: 'ok' })
       expect(existsSync(result.backupPath)).toBe(true)
       // The import merged alpha and left beta alone.
@@ -281,7 +295,7 @@ describe('application data import', () => {
     store.putDocument('alpha', 'settings', { theme: 'dark' })
     store.putCollectionItem('alpha', 'inbox', 'one', { title: 'one' })
     store.close()
-    const { bridge, dispose } = await host([], {}, { dataPath: db })
+    const { bridge, dispose } = await host([demoApp('alpha'), demoApp('beta')], {}, { dataPath: db })
     try {
       const json = JSON.stringify({
         version: 1,
@@ -319,7 +333,7 @@ describe('application data import', () => {
 
   it('previews a missing database as all new', async () => {
     const db = join(tempDir(), 'missing.sqlite')
-    const { bridge, dispose } = await host([], {}, { dataPath: db })
+    const { bridge, dispose } = await host([demoApp('alpha'), demoApp('beta')], {}, { dataPath: db })
     try {
       const json = JSON.stringify({
         version: 1,
@@ -346,11 +360,11 @@ describe('application data import', () => {
   })
 
   it('refuses an empty export with a clear reason instead of crashing', async () => {
-    const { bridge, dispose } = await host([demoApp('alpha')])
+    const { bridge, dispose } = await host([demoApp('alpha'), demoApp('beta')])
     try {
       const empty = JSON.stringify({ version: 1, exportedAt: 1, apps: {} })
       expect(() => bridge.dataImportPreview('alpha', empty)).toThrow(/no data for alpha/u)
-      await expect(bridge.dataImport('alpha', empty)).rejects.toThrow(/no data for alpha/u)
+      await expect(importWithPlan(bridge, 'alpha', empty)).rejects.toThrow(/no data for alpha/u)
     } finally {
       await dispose()
     }
@@ -377,7 +391,7 @@ describe('application data import', () => {
     const { bridge, dispose } = await host([app], {}, { dataPath: db })
     try {
       const json = JSON.stringify({ version: 1, apps: { alpha: { documents: {}, collections: {}, meta: {} } } })
-      const result = await bridge.dataImport('alpha', json)
+      const result = await importWithPlan(bridge, 'alpha', json)
       expect(result.reload).toBe('ok')
       expect(reloads).toBe(1)
     } finally {
@@ -399,7 +413,7 @@ describe('application data import', () => {
     const { bridge, dispose } = await host([app], {}, { dataPath: db })
     try {
       const json = JSON.stringify({ version: 1, apps: { alpha: { documents: {}, collections: {}, meta: {} } } })
-      const result = await bridge.dataImport('alpha', json)
+      const result = await importWithPlan(bridge, 'alpha', json)
       expect(existsSync(result.backupPath)).toBe(true)
       expect(result).toMatchObject({ reload: 'failed', reloadError: 'reload refused' })
       // The committed import is not served through a stale cache: the app is
@@ -416,11 +430,11 @@ describe('application data import', () => {
 
   it('refuses an import for an application that is not registered', async () => {
     const db = join(tempDir(), 'app-data.sqlite')
-    const { bridge, dispose } = await host([], {}, { dataPath: db })
+    const { bridge, dispose } = await host([demoApp('alpha'), demoApp('beta')], {}, { dataPath: db })
     try {
       const json = JSON.stringify({ version: 1, apps: { ghost: { documents: {}, collections: {}, meta: {} } } })
-      await expect(bridge.dataImport('ghost', json)).rejects.toThrow(/not registered/)
-      expect(bridge.dataInfo('ghost').documentCount).toBe(0)
+      await expect(importWithPlan(bridge, 'ghost', json)).rejects.toThrow(/not registered/)
+      expect(() => bridge.dataInfo('ghost')).toThrow(/not registered/)
     } finally {
       await dispose()
     }
@@ -447,7 +461,7 @@ describe('application data import', () => {
     try {
       const json = JSON.stringify({ version: 1, apps: { alpha: { documents: {}, collections: {}, meta: {} } } })
       const inFlight = bridge.call('alpha', 'echo', { text: 'before' })
-      const importing = bridge.dataImport('alpha', json)
+      const importing = importWithPlan(bridge, 'alpha', json)
       for (let turn = 0; release === undefined && turn < 100; turn += 1) {
         await new Promise((resolve) => { setTimeout(resolve, 1) })
       }
@@ -462,11 +476,11 @@ describe('application data import', () => {
 
   it('imports a stopped application offline and reports the reload as skipped', async () => {
     const db = join(tempDir(), 'app-data.sqlite')
-    const { bridge, dispose } = await host([demoApp('alpha')], {}, { dataPath: db })
+    const { bridge, dispose } = await host([demoApp('alpha'), demoApp('beta')], {}, { dataPath: db })
     try {
       await bridge.stopApp('alpha')
       const json = JSON.stringify({ version: 1, apps: { alpha: { documents: {}, collections: {}, meta: {} } } })
-      const result = await bridge.dataImport('alpha', json)
+      const result = await importWithPlan(bridge, 'alpha', json)
       expect(result.reload).toBe('skipped')
     } finally {
       await dispose()
@@ -487,7 +501,7 @@ describe('application data import', () => {
         await new Promise((resolve) => { setTimeout(resolve, 1) })
       }
       const json = JSON.stringify({ version: 1, apps: { alpha: { documents: {}, collections: {}, meta: {} } } })
-      await expect(bridge.dataImport('alpha', json)).rejects.toThrow(/stopping/)
+      await expect(importWithPlan(bridge, 'alpha', json)).rejects.toThrow(/stopping/)
       release?.()
       await stopping
     } finally {
@@ -495,14 +509,15 @@ describe('application data import', () => {
     }
   })
 
-  it('releases the import hold when the store cannot be opened', async () => {
-    const dir = tempDir()
-    const db = join(dir, 'not-a-database')
-    mkdirSync(db)
-    const { bridge, dispose } = await host([demoApp('alpha')], {}, { dataPath: db })
+  it('releases the import hold when the backup fails', async () => {
+    const db = join(tempDir(), 'app-data.sqlite')
+    const { bridge, dispose } = await host([demoApp('alpha'), demoApp('beta')], {}, { dataPath: db })
     try {
       const json = JSON.stringify({ version: 1, apps: { alpha: { documents: {}, collections: {}, meta: {} } } })
-      await expect(bridge.dataImport('alpha', json)).rejects.toThrow()
+      const store = (bridge as unknown as { appStore: AppStore }).appStore
+      const spy = vi.spyOn(store, 'backupTo').mockImplementation(() => { throw new Error('backup down') })
+      await expect(importWithPlan(bridge, 'alpha', json)).rejects.toThrow('backup down')
+      spy.mockRestore()
       // The hold was released by the failure path: the app is callable again.
       expect(await bridge.call('alpha', 'echo', { text: 'after' })).toMatchObject({ status: 'success' })
     } finally {
@@ -510,22 +525,23 @@ describe('application data import', () => {
     }
   })
 
-  it('does not take a hold for a stopped application when the store fails', async () => {
-    const dir = tempDir()
-    const db = join(dir, 'not-a-database')
-    mkdirSync(db)
-    const { bridge, dispose } = await host([demoApp('alpha')], {}, { dataPath: db })
+  it('does not take a hold for a stopped application when the backup fails', async () => {
+    const db = join(tempDir(), 'app-data.sqlite')
+    const { bridge, dispose } = await host([demoApp('alpha'), demoApp('beta')], {}, { dataPath: db })
     try {
       await bridge.stopApp('alpha')
       const json = JSON.stringify({ version: 1, apps: { alpha: { documents: {}, collections: {}, meta: {} } } })
-      await expect(bridge.dataImport('alpha', json)).rejects.toThrow()
+      const store = (bridge as unknown as { appStore: AppStore }).appStore
+      const spy = vi.spyOn(store, 'backupTo').mockImplementation(() => { throw new Error('backup down') })
+      await expect(importWithPlan(bridge, 'alpha', json)).rejects.toThrow('backup down')
+      spy.mockRestore()
     } finally {
       await dispose()
     }
   })
 
   it('refuses a reload for an unknown application or one that is not held', async () => {
-    const { bridge, dispose } = await host([demoApp('alpha')], {}, { dataPath: join(tempDir(), 'app-data.sqlite') })
+    const { bridge, dispose } = await host([demoApp('alpha'), demoApp('beta')], {}, { dataPath: join(tempDir(), 'app-data.sqlite') })
     try {
       await expect(bridge.dataReload('ghost')).rejects.toThrow(/not registered/)
       await expect(bridge.dataReload('alpha')).rejects.toThrow(/not waiting for a reload/)
@@ -534,8 +550,37 @@ describe('application data import', () => {
     }
   })
 
+  it('exports an empty namespace when the database only holds another app', async () => {
+    const db = join(tempDir(), 'app-data.sqlite')
+    const store = new SqliteDataStore({ dbPath: db })
+    store.putDocument('beta', 'settings', { theme: 'light' })
+    store.close()
+    const { bridge, dispose } = await host([demoApp('alpha'), demoApp('beta')], {}, { dataPath: db })
+    try {
+      expect(JSON.parse(bridge.dataExport('alpha').json).apps).toEqual({})
+    } finally { await dispose() }
+  })
+
+  it('refuses an import with too many nodes', async () => {
+    const { bridge, dispose } = await host([demoApp('alpha')], {}, { dataPath: join(tempDir(), 'app-data.sqlite') })
+    try {
+      const huge = JSON.stringify({ version: 1, apps: { alpha: { documents: {}, collections: { many: Array.from({ length: 200001 }, () => null) }, meta: {} } } })
+      expect(() => bridge.dataImportPreview('alpha', huge)).toThrow(/nodes/u)
+    } finally { await dispose() }
+  })
+
+  it('refuses an oversized or too-deep import before parsing it into the store', async () => {
+    const { bridge, dispose } = await host([demoApp('alpha'), demoApp('beta')], {}, { dataPath: join(tempDir(), 'app-data.sqlite') })
+    try {
+      expect(() => bridge.dataImportPreview('alpha', 'x'.repeat(8 * 1024 * 1024 + 1))).toThrow(/exceeds/u)
+      let deep: unknown = {}
+      for (let index = 0; index < 45; index += 1) deep = { nested: deep }
+      expect(() => bridge.dataImportPreview('alpha', JSON.stringify({ version: 1, apps: { alpha: deep } }))).toThrow(/depth/u)
+    } finally { await dispose() }
+  })
+
   it('refuses invalid JSON, the wrong version, and a dump without this app', async () => {
-    const { bridge, dispose } = await host([], {}, { dataPath: join(tempDir(), 'app-data.sqlite') })
+    const { bridge, dispose } = await host([demoApp('alpha'), demoApp('beta')], {}, { dataPath: join(tempDir(), 'app-data.sqlite') })
     try {
       expect(() => bridge.dataImportPreview('alpha', 'not json')).toThrow(/valid JSON/)
       expect(() => bridge.dataImportPreview('alpha', '{"version":2,"apps":{}}')).toThrow(/version-1/)
@@ -547,42 +592,18 @@ describe('application data import', () => {
   })
 })
 
-describe('bridge secret port and own-data edge', () => {
-  it('moves declared secrets through the host store and reports a missing own database', async () => {
+describe('bridge own-data edge', () => {
+  it('reports a missing own database', async () => {
     const dir = tempDir()
     const db = join(dir, 'app-data.sqlite')
-    const declaration = demoApp('vault', {
-      generation: 2,
-      capabilities: ['storage'],
-      data: { kind: 'unified', namespace: 'vault', schemaVersion: 1, secretFields: ['token'] },
-      ops: {
-        probe: {
-          description: 'probe secrets',
-          params: {},
-          result: { type: 'json' },
-          execute: async (_args, ctx) => {
-            await ctx.secrets.set('token', 'value')
-            const value = await ctx.secrets.get('token')
-            const names = [...await ctx.secrets.names()]
-            const has = await ctx.secrets.has('token')
-            await ctx.secrets.delete('token')
-            return { names, has, value: value ?? null }
-          },
-        },
-      },
-    })
-    const { bridge, runtime, dispose } = await host([declaration], {}, { dataPath: db })
+    const { bridge, runtime, dispose } = await host([demoApp('alpha'), demoApp('beta')], {}, { dataPath: db })
     try {
-      await runtime.grant({ caller: { kind: 'app', appId: 'vault' }, capabilities: ['capability:storage'], grantedAt: '2026-01-01T00:00:00.000Z' })
-      expect(await runtime.call({ kind: 'human' }, 'vault', 'probe', {})).toMatchObject({ status: 'success', result: { names: ['token'], has: true, value: 'value' } })
-
       const missing = demoApp('missing-own', {
         generation: 2,
-        data: { kind: 'own-sqlite', path: 'missing/index.db', schemaVersion: 3, backup: 'exclude' },
+        data: { kind: 'own-sqlite', path: 'missing/index.db', schemaVersion: 3 },
       })
       await runtime.register(missing)
       expect(bridge.dataInfo('missing-own')).toMatchObject({ path: join(dir, 'missing/index.db'), schemaVersion: 3 })
-
     } finally {
       await dispose()
     }

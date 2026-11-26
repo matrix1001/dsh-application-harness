@@ -17,11 +17,12 @@
  * @module
  */
 
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { join, relative } from 'node:path'
+import { appHostDirs, packageDirs } from './package-areas.mjs'
 
 /** Where the host application packages live (each declaring its own `dsh.appRow`). */
-export const APP_PACKAGE_AREA = 'packages/examples'
+export const APP_PACKAGE_AREA = 'apps'
 
 /**
  * Parse the `id` + `name` rows out of a cordis patch, keeping the structural
@@ -88,7 +89,7 @@ export function patchTargetsOf(patchRows) {
 }
 
 /**
- * The workspace's REAL application roster: every `packages/examples/*` package
+ * The workspace's REAL application roster: every `apps/<app>/host` package
  * that declares a `dsh.appRow`. Deriving it (instead of listing the known
  * appids) is what makes a fifth application enter the descriptor comparison
  * the moment it is wired — a hardcoded list silently excludes it (AR2 ⑤).
@@ -98,21 +99,17 @@ export function patchTargetsOf(patchRows) {
  * @returns {Array<{ id: string, name: string, dir: string }>} the roster, sorted by id.
  */
 export function appPackagesOf(root) {
-  const base = join(root, APP_PACKAGE_AREA)
   const apps = []
-  if (!existsSync(base)) return apps
-  for (const entry of readdirSync(base)) {
-    const manifestPath = join(base, entry, 'package.json')
-    if (!existsSync(manifestPath)) continue
+  for (const dir of appHostDirs(root)) {
     let manifest
     try {
-      manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+      manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
     } catch {
       continue
     }
     const row = manifest.dsh?.appRow
     if (row === undefined || typeof row.id !== 'string' || typeof row.name !== 'string') continue
-    apps.push({ id: row.id, name: row.name, dir: `${APP_PACKAGE_AREA}/${entry}` })
+    apps.push({ id: row.id, name: row.name, dir: relative(root, dir) })
   }
   return apps.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
 }
@@ -128,23 +125,15 @@ export function appPackagesOf(root) {
  * @returns {string[]} the declaring packages' names, sorted.
  */
 export function appRowPackagesOf(root) {
-  const base = join(root, 'packages')
   const names = []
-  if (!existsSync(base)) return names
-  for (const area of readdirSync(base)) {
-    const areaDir = join(base, area)
-    if (!existsSync(areaDir)) continue
-    for (const entry of readdirSync(areaDir)) {
-      const manifestPath = join(areaDir, entry, 'package.json')
-      if (!existsSync(manifestPath)) continue
-      let manifest
-      try {
-        manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
-      } catch {
-        continue
-      }
-      if (typeof manifest.name === 'string' && manifest.dsh?.appRow !== undefined) names.push(manifest.name)
+  for (const dir of packageDirs(root)) {
+    let manifest
+    try {
+      manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
+    } catch {
+      continue
     }
+    if (typeof manifest.name === 'string' && manifest.dsh?.appRow !== undefined) names.push(manifest.name)
   }
   return names.sort()
 }

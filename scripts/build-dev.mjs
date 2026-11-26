@@ -1,10 +1,7 @@
 #!/usr/bin/env node
 /**
- * The development build: typecheck and emit against the checkout snapshot,
- * then bundle JavaScript with the normal tsconfig paths.
- *
- * tsdown resolves JavaScript, not declarations; the checkout `.d.ts` paths
- * are restored before it runs (platform-types --run does that around tsc).
+ * The development build: typecheck and emit against the installed platform
+ * line, then bundle JavaScript.
  * @module scripts/build-dev
  */
 import { spawnSync } from 'node:child_process'

@@ -19,20 +19,37 @@ import { useRovingGroup } from './roving.ts'
 
 export { finiteOr, isRecord, stringList, stringOr } from './narrow.ts'
 export { safeHrefForExternal } from './safe-href.ts'
-export { failureKindOf, hasAppCode, isPermissionKind, type FailureDetail, type FailureKind } from './failure.ts'
+export { failureKindOf, hasAppCode, isPermissionKind, outcomeFailure, outcomeMessage, outcomeValue, type FailureDetail, type FailureKind } from './failure.ts'
+export { Button, type ButtonProps } from './ui/Button.tsx'
+export { Switch, type SwitchProps } from './ui/Switch.tsx'
+export { Tooltip, type TooltipProps } from './ui/Tooltip.tsx'
+export { Modal, type ModalProps } from './ui/Modal.tsx'
+export { Menu, MenuItemButton, type MenuEntry, type MenuLabelEntry, type MenuItemEntry, type MenuSeparatorEntry } from './ui/Menu.tsx'
+export { FenceCodeBlock, type FenceCodeBlockProps } from './ui/FenceCodeBlock.tsx'
+export {
+  IconAppsAddOutlineRegular, IconBranchOutlineRegular, IconChecklistOutlineRegular, IconCheckOutlineRegular,
+  IconChevronDownOutlineRegular, IconChevronLeftOutlineRegular, IconChevronRightOutlineRegular, IconCodeOutlineRegular,
+  IconCordisPluginOutlineRegular, IconEllipsisOutlineRegular, IconGaugeOutlineRegular, IconGlobeOutlineRegular,
+  IconListPenOutlineRegular, IconNewChatOutlineRegular, IconPanelLeftOutlineRegular, IconPlusOutlineRegular,
+  IconPinFillRegular, IconPinOutlineRegular, IconQueueOutlineRegular, IconRightUpOutlineRegular,
+  IconSettingsOutlineRegular, IconWarningOutlineRegular, type IconProps,
+} from './ui/icons.tsx'
 export { renderMarkdown } from './markdown.tsx'
 export type { MarkdownClassNames, MarkdownOptions } from './markdown.tsx'
 export { focusablesOf, useModalFocus } from './modal-focus.ts'
 export { useConfirm, type ConfirmController, type ConfirmOptions } from './confirm.tsx'
 export { BusyBar, NoticeLayer, type NoticeAction, type NoticeItem } from './notices.tsx'
 export { EmptyState, type EmptyStateProps } from './empty-state.tsx'
+export { ReadFailure, type ReadFailureProps } from './read-failure.tsx'
+export { LocalFailure, type LocalFailureProps } from './local-failure.tsx'
 export { Field, type FieldProps } from './field.tsx'
 export { Toolbar, type ToolbarProps } from './toolbar.tsx'
 export {
   useRovingGroup,
   type RovingGroup, type RovingGroupOptions, type RovingItemProps, type RovingRole,
 } from './roving.ts'
-export { useUiChoice, useUiField, useUiState } from './view-state.ts'
+export { createSnapshotStore, type SnapshotSelectorHook, type SnapshotStore, type SnapshotStoreOptions } from './snapshot-store.ts'
+export { useUiChoice, useUiField, useUiState, type ApplicationUiPatch, type ApplicationUiState, type ApplicationUiStore } from './view-state.ts'
 export { useScrollMemory, type ScrollMemory, type ScrollMemoryOptions } from './scroll-memory.ts'
 export {
   SettingRow, SettingsGroup, SettingsLayout,

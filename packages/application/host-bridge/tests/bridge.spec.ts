@@ -9,14 +9,15 @@
  * production runtime.
  */
 
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import ApplicationBridge from '../src/index.ts'
+import { AppError, apply as applyRuntime } from '@matrix1001/dsh-application-harness-runtime'
 import type { JsonValue } from '@matrix1001/dsh-application-harness-host-bridge/client'
-import { brokenApp, demoApp, host, openDemoApp, settle, waitFor } from './harness.ts'
+import { brokenApp, demoApp, host, openDemoApp, secretApp, settle, waitFor } from './harness.ts'
 
 describe('the application rows', () => {
   it('lists every application with its ops, exposure, status and start failure', async () => {
@@ -29,10 +30,11 @@ describe('the application rows', () => {
       name: 'demo',
       description: 'demo application',
       version: '1.2.3',
-      status: 'available',
+      runtime: 'ready',
+      activation: 'enabled',
       health: 'ok',
     })
-    expect(demo.failure).toBeUndefined()
+    expect(demo.detail).toBeUndefined()
     expect(demo.ops.map((op) => op.name)).toEqual(['echo', 'touch', 'tick', 'slow', 'boom'])
     // The declared schema travels verbatim, and an omitted exposure is the
     // declared "closed to every class" — not an invented default.
@@ -44,7 +46,19 @@ describe('the application rows', () => {
     })
 
     // A start failure stays visible and carries its reason.
-    expect(rows[2]).toMatchObject({ status: 'failed', failure: 'no storage', health: 'degraded', reason: 'platform.start-failed' })
+    expect(rows[2]).toMatchObject({ runtime: 'stopped', activation: 'disabled', detail: 'no storage', reason: 'platform.start-failed' })
+    expect(rows[2]?.health).toBeUndefined()
+  })
+
+  it('lists declared process commands for review', async () => {
+    const { bridge } = await host([{
+      ...demoApp('runner'),
+      capabilities: ['process'],
+      process: [{ executable: 'git', commands: ['status', 'diff'], purpose: 'read a repository' }],
+    }])
+    expect(bridge.list()[0]?.process).toEqual([
+      { executable: 'git', commands: ['status', 'diff'], purpose: 'read a repository' },
+    ])
   })
 
   it('lists what each application declares it needs, in the vocabulary a grant records', async () => {
@@ -91,6 +105,12 @@ describe('the application rows', () => {
   it('refuses to mount without the runtime it views', () => {
     expect(() => new ApplicationBridge(new Context(), {})).toThrow(/application runtime/u)
   })
+
+  it('refuses to mount without the application store it manages', () => {
+    const ctx = new Context()
+    applyRuntime(ctx, {})
+    expect(() => new ApplicationBridge(ctx, {})).toThrow(/application store/u)
+  })
 })
 
 describe('the call path', () => {
@@ -133,6 +153,30 @@ describe('the call path', () => {
     const pending = bridge.call('demo', 'slow', {}, undefined, controller.signal)
     await settle()
     controller.abort()
+    await expect(pending).resolves.toMatchObject({ status: 'cancelled' })
+  })
+
+  it('records a cancellation when an operation throws the platform abort reason', async () => {
+    const app = demoApp()
+    const { bridge } = await host([{
+      ...app,
+      ops: {
+        ...app.ops,
+        cooperative: {
+          description: 'waits for cancellation and throws the platform reason',
+          params: {},
+          result: { type: 'json' },
+          execute: (_args, ctx) => new Promise((_resolve, reject) => {
+            const stop = (): void => { reject(ctx.signal.reason) }
+            if (ctx.signal.aborted) { stop(); return }
+            ctx.signal.addEventListener('abort', stop, { once: true })
+          }),
+        },
+      },
+    }])
+    const pending = bridge.call('demo', 'cooperative', {}, 'reason-1')
+    await settle()
+    expect(bridge.cancel('reason-1')).toBe(true)
     await expect(pending).resolves.toMatchObject({ status: 'cancelled' })
   })
 
@@ -212,22 +256,44 @@ describe('history and grants', () => {
     }
   })
 
+  it('records a capability grant for an application that is not deployed yet', async () => {
+    const { bridge } = await host()
+    await bridge.grant({ kind: 'app', appId: 'ghost' }, ['capability:model'])
+    expect(await bridge.grants()).toHaveLength(1)
+  })
+
+  it('rechecks a caller application health when its grant changes', async () => {
+    let granted = false
+    const app = {
+      ...demoApp('gated'),
+      capabilities: ['model'],
+      health: async () => granted ? { status: 'ok' as const } : { status: 'degraded' as const, reason: 'model grant is missing' },
+    }
+    const { bridge } = await host([app])
+    await waitFor(() => bridge.list()[0]?.runtime === 'ready')
+    expect(bridge.list()[0]).toMatchObject({ health: 'degraded', detail: 'model grant is missing' })
+    granted = true
+    await bridge.grant({ kind: 'app', appId: 'gated' }, ['capability:model'])
+    await waitFor(() => bridge.list()[0]?.health === 'ok')
+    expect(bridge.list()[0]?.health).toBe('ok')
+    expect(bridge.list()[0]?.detail).toBeUndefined()
+    granted = false
+    await bridge.revoke({ kind: 'app', appId: 'gated' }, 'capability:model')
+    await waitFor(() => bridge.list()[0]?.health === 'degraded')
+    expect(bridge.list()[0]).toMatchObject({ health: 'degraded', detail: 'model grant is missing' })
+  })
+
   it('grants and revokes capabilities, stamping the approval time on the host', async () => {
-    const { bridge } = await host([openDemoApp()])
+    const { bridge } = await host([{ ...openDemoApp(), capabilities: ['model'] }])
     expect(await bridge.grants()).toEqual([])
 
-    const grant = await bridge.grant({ kind: 'ai', sessionId: 'session-1' }, ['demo#echo'])
-    expect(grant.capabilities).toEqual(['demo#echo'])
+    const grant = await bridge.grant({ kind: 'app', appId: 'demo' }, ['capability:model'])
+    expect(grant.capabilities).toEqual(['capability:model'])
     expect(Number.isNaN(Date.parse(grant.grantedAt))).toBe(false)
-    expect(await bridge.grants()).toMatchObject([{ caller: { kind: 'ai', sessionId: 'session-1' }, capabilities: ['demo#echo'] }])
+    expect(await bridge.grants()).toMatchObject([{ caller: { kind: 'app', appId: 'demo' }, capabilities: ['capability:model'] }])
 
-    await bridge.grant({ kind: 'app', appId: 'demo' }, ['demo#echo', 'demo#tick'])
-    expect(await bridge.grants()).toHaveLength(2)
-    await bridge.revoke({ kind: 'app', appId: 'demo' }, 'demo#echo')
-    expect((await bridge.grants()).map((entry) => entry.capabilities)).toEqual([['demo#echo'], ['demo#tick']])
-
-    await bridge.revoke({ kind: 'ai', sessionId: 'session-1' })
-    expect((await bridge.grants()).map((entry) => entry.capabilities)).toEqual([['demo#tick']])
+    await bridge.revoke({ kind: 'app', appId: 'demo' }, 'capability:model')
+    expect(await bridge.grants()).toEqual([])
   })
 })
 
@@ -265,6 +331,62 @@ describe('application conversation linkage', () => {
     ctx.provide('appTools', { mark: (sessionId: string) => { marks.push(sessionId) } } as never)
     expect(await bridge.registerAppConversation('s-app')).toBe(true)
     expect(new Set(marks)).toEqual(new Set(['s-app']))
+    const previousProfile = process.env.DSH_PROFILE
+    try {
+      delete process.env.DSH_PROFILE
+      expect(await bridge.suggestedAppConversationPath()).toBe(join(homedir(), 'dsh-workspaces', 'app-conversation', 'application-harness'))
+      process.env.DSH_PROFILE = 'custom'
+      expect(await bridge.suggestedAppConversationPath()).toBe(join(homedir(), 'dsh-workspaces', 'app-conversation', 'custom'))
+    } finally {
+      if (previousProfile === undefined) delete process.env.DSH_PROFILE
+      else process.env.DSH_PROFILE = previousProfile
+    }
+
+    const parent = mkdtempSync(join(tmpdir(), 'dsh-app-conversation-'))
+    try {
+      const existing = join(parent, 'existing', 'workspace')
+      mkdirSync(existing, { recursive: true })
+      await expect(bridge.prepareAppConversationWorkspace(existing)).resolves.toBe(existing)
+      await expect(bridge.prepareAppConversationWorkspace(join(parent, 'missing', 'workspace'))).rejects.toThrow(/already exist/u)
+      const link = join(parent, 'link')
+      symlinkSync(existing, link)
+      await expect(bridge.prepareAppConversationWorkspace(link)).rejects.toThrow(/symlink|real directory/u)
+      await expect(bridge.prepareAppConversationWorkspace('relative/path')).rejects.toThrow(/absolute/u)
+      await expect(bridge.prepareAppConversationWorkspace('   ')).rejects.toThrow(/empty/u)
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
+
+    const previousHome = process.env.HOME
+    try {
+      process.env.HOME = parent
+      const suggested = await bridge.suggestedAppConversationPath()
+      await expect(bridge.prepareAppConversationWorkspace(suggested)).resolves.toBe(suggested)
+      expect(statSync(suggested).mode & 0o777).toBe(0o700)
+      // A second call sees the existing directory and keeps it private.
+      await expect(bridge.prepareAppConversationWorkspace(suggested)).resolves.toBe(suggested)
+      // A symlink at the suggested path is refused, not followed.
+      rmSync(suggested, { recursive: true, force: true })
+      const real = join(parent, 'real-workspace')
+      mkdirSync(real, { recursive: true })
+      symlinkSync(real, suggested)
+      await expect(bridge.prepareAppConversationWorkspace(suggested)).rejects.toThrow(/real directory/u)
+      rmSync(suggested, { force: true })
+      // A symlinked HOME makes the resolved path differ from the requested one.
+      const traverse = join(parent, 'traverse')
+      mkdirSync(traverse, { recursive: true })
+      const linkHome = join(parent, 'link-home')
+      symlinkSync(traverse, linkHome)
+      process.env.HOME = linkHome
+      await expect(bridge.prepareAppConversationWorkspace(await bridge.suggestedAppConversationPath())).rejects.toThrow(/must not traverse/u)
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME
+      else process.env.HOME = previousHome
+    }
+
+    // The launcher's profile context wins over the process environment.
+    ctx.provide('profileContext', { name: 'from-context' } as never)
+    expect(await bridge.suggestedAppConversationPath()).toBe(join(homedir(), 'dsh-workspaces', 'app-conversation', 'from-context'))
 
     const pages: Array<{ sessionId: string; page: unknown }> = []
     ctx.provide('appConversationContext', {
@@ -283,15 +405,23 @@ describe('application conversation linkage', () => {
       sessionId: 's-app',
       page: { appId: 'disk-analysis', label: '扫描结果', pageId: expect.stringMatching(/^page-/u), snapshotId: expect.stringMatching(/^snapshot-/u) },
     })
+    for (const bad of [{ appId: 'a', label: 'x', draftId: '' }, { appId: 'a', label: 'x', filters: [] }, { appId: 'a', label: 'x', filters: { status: {} } }, { appId: 'a', label: 'x', visibleRange: [] }, { appId: 'a', label: 'x', visibleRange: { from: 1 } }, { appId: 'a', label: 'x', visibleRange: { to: 1 } }]) {
+      expect(await bridge.setAppConversationContext('s-app', bad as never)).toBe(false)
+    }
+    expect(await bridge.setAppConversationContext('s-app', { appId: 'a', label: 'x', visibleRange: {} })).toBe(true)
     expect(await bridge.setAppConversationContext('s-app', {
-      appId: 'workbook', label: '笔记 n1', record: { kind: 'note', id: 'n1' },
-      selection: [{ kind: 'note', id: 'n1' }], view: 'list', hasUnsavedChanges: true,
+      appId: 'workbook', label: '笔记 n1', record: { appId: 'workbook', kind: 'note', id: 'n1' },
+      selection: [{ appId: 'workbook', kind: 'note', id: 'n1' }], view: 'list', draftId: 'd1',
+      filters: { status: 'open', pinned: true }, visibleRange: { from: '2026-01-01', to: '2026-01-31' },
+      hasUnsavedChanges: true,
     })).toBe(true)
     expect(pages.at(-1)).toMatchObject({
       sessionId: 's-app',
       page: {
-        appId: 'workbook', label: '笔记 n1', view: 'list', record: { kind: 'note', id: 'n1' },
-        selection: [{ kind: 'note', id: 'n1' }], hasUnsavedChanges: true,
+        appId: 'workbook', label: '笔记 n1', view: 'list', record: { appId: 'workbook', kind: 'note', id: 'n1' },
+        draftId: 'd1', selection: [{ appId: 'workbook', kind: 'note', id: 'n1' }],
+        filters: { status: 'open', pinned: true }, visibleRange: { from: '2026-01-01', to: '2026-01-31' },
+        hasUnsavedChanges: true,
       },
     })
     const pageId = (pages.at(-1)!.page as { pageId: string }).pageId
@@ -324,12 +454,13 @@ describe('the durable application conversation identity', () => {
     try {
       const stuck = await host([], {}, { conversationPath: path })
       expect(await stuck.bridge.clearAppConversation()).toBe(false)
-      // A write to a path occupied by a directory warns but does not take the
-      // bridge down; the current process still marks the Session.
+      // A write to a path occupied by a directory fails closed: the in-memory
+      // mark is rolled back and the caller must not report a saved Session.
       const marks: string[] = []
-      stuck.ctx.provide('appTools', { mark: (sessionId: string) => { marks.push(sessionId) }, unmark: vi.fn() } as never)
-      await expect(stuck.bridge.registerAppConversation('session-1')).resolves.toBe(true)
-      expect(marks).toContain('session-1')
+      const unmark = vi.fn((sessionId: string) => { const index = marks.indexOf(sessionId); if (index >= 0) marks.splice(index, 1) })
+      stuck.ctx.provide('appTools', { mark: (sessionId: string) => { marks.push(sessionId) }, unmark } as never)
+      await expect(stuck.bridge.registerAppConversation('session-1')).resolves.toBe(false)
+      expect(unmark).toHaveBeenCalledWith('session-1')
       await stuck.dispose()
     } finally {
       rmSync(dir, { recursive: true, force: true })
@@ -371,14 +502,17 @@ describe('the durable application conversation identity', () => {
       expect(existsSync(conversationPath)).toBe(true)
       expect(marks).toEqual(['session-1'])
       await first.bridge.registerAppConversation('session-2')
-      expect(unmarks).toEqual(['session-1'])
+      expect(unmarks).toEqual([])
       expect(marks).toEqual(['session-1', 'session-2'])
+      expect(await first.bridge.appConversations()).toEqual(['session-1', 'session-2'])
       await first.dispose()
 
       const second = await host([], {}, { conversationPath })
       const restored: string[] = []
       second.ctx.provide('appTools', { mark: (sessionId: string) => { restored.push(sessionId) }, unmark: vi.fn() } as never)
       await expect.poll(() => restored).toContain('session-2')
+      expect(restored).toEqual(expect.arrayContaining(['session-1', 'session-2']))
+      expect(await second.bridge.appConversations()).toEqual(['session-1', 'session-2'])
       expect(await second.bridge.clearAppConversation()).toBe(true)
       expect(existsSync(conversationPath)).toBe(false)
       await second.dispose()
@@ -483,7 +617,27 @@ describe('object references', () => {
       },
     }])
     await expect(bridge.resolveObject({ appId: 'objects', type: 'task', id: '1' }))
-      .resolves.toEqual({ ref: { appId: 'objects', type: 'task', id: '1' }, title: 'Task 1' })
+      .resolves.toEqual({ ok: true, value: { ref: { appId: 'objects', type: 'task', id: '1' }, title: 'Task 1' } })
+  })
+
+  it('answers a failure as a value so the reason survives the wire', async () => {
+    const app = demoApp('objects')
+    const { bridge } = await host([{
+      ...app,
+      objectTypes: { task: { description: 'a task', resolveOperation: 'resolve' } },
+      ops: {
+        ...app.ops,
+        resolve: {
+          description: 'resolve a task', params: { id: { type: 'string', required: true } }, result: { type: 'json' },
+          effect: 'read',
+          execute: () => { throw new AppError('not-found', 'the task is gone') },
+        },
+      },
+    }])
+    // A thrown AppError would cross the transport as `gateway/internal`; the
+    // bridge hands it back as the operation's own code instead.
+    await expect(bridge.resolveObject({ appId: 'objects', type: 'task', id: '1' }))
+      .resolves.toEqual({ ok: false, error: { code: 'app.not-found', message: 'the task is gone' } })
   })
 })
 
@@ -493,21 +647,21 @@ describe('activation', () => {
     const activationPath = join(home, 'activation.json')
     try {
       const first = await host([demoApp('demo')], {}, { activationPath })
-      expect(first.bridge.list()[0]).toMatchObject({ activation: 'enabled', status: 'available' })
+      expect(first.bridge.list()[0]).toMatchObject({ activation: 'enabled', runtime: 'ready' })
       await first.bridge.setActivation('demo', 'disabled')
-      expect(first.bridge.list()[0]).toMatchObject({ activation: 'disabled', status: 'stopped' })
+      expect(first.bridge.list()[0]).toMatchObject({ activation: 'disabled', runtime: 'stopped' })
       expect(JSON.parse(readFileSync(activationPath, 'utf8')).disabled).toEqual(['demo'])
       expect((await first.bridge.call('demo', 'echo', { text: 'x' })).status).toBe('rejected')
       await first.dispose()
 
       // Re-mount over the same table with a disabled record: the row is applied
       // once the application appears, and the application stays stopped.
-      const second = await host([demoApp('demo')], {}, { activationPath })
+      const second = await host([demoApp('demo')], {}, { activationPath, preActivation: true })
       await waitFor(() => second.bridge.list()[0]?.activation === 'disabled')
-      expect(second.bridge.list()[0]).toMatchObject({ activation: 'disabled', status: 'stopped' })
+      expect(second.bridge.list()[0]).toMatchObject({ activation: 'disabled', runtime: 'stopped' })
       expect((await second.bridge.call('demo', 'echo', { text: 'x' })).status).toBe('rejected')
       await second.bridge.setActivation('demo', 'enabled')
-      expect(second.bridge.list()[0]).toMatchObject({ activation: 'enabled', status: 'available' })
+      expect(second.bridge.list()[0]).toMatchObject({ activation: 'enabled', runtime: 'ready' })
       expect(JSON.parse(readFileSync(activationPath, 'utf8')).disabled).toEqual([])
       await second.dispose()
     } finally { rmSync(home, { recursive: true, force: true }) }
@@ -532,10 +686,16 @@ describe('development sessions', () => {
       expect(await mounted.bridge.registerDevelopmentSession('s', 'missing')).toBe(false)
       expect(await mounted.bridge.registerDevelopmentSession('s-dev', 'demo')).toBe(true)
       expect(marks).toContain('s-dev:demo')
-      expect(JSON.parse(readFileSync(developmentPath, 'utf8'))).toMatchObject({ sessionId: 's-dev', appId: 'demo' })
+      expect(await mounted.bridge.developmentBindings()).toEqual([{ sessionId: 's-dev', appId: 'demo' }])
+      expect(JSON.parse(readFileSync(developmentPath, 'utf8'))).toMatchObject({ sessions: [{ sessionId: 's-dev', appId: 'demo' }] })
       expect(await mounted.bridge.registerDevelopmentSession('s-dev-2', 'demo')).toBe(true)
-      expect(unmarks).toContain('s-dev')
+      expect(unmarks).not.toContain('s-dev')
+      expect(await mounted.bridge.developmentBindings()).toEqual([
+        { sessionId: 's-dev', appId: 'demo' },
+        { sessionId: 's-dev-2', appId: 'demo' },
+      ])
       expect(await mounted.bridge.clearDevelopmentSession()).toBe(true)
+      expect(await mounted.bridge.developmentBindings()).toEqual([])
       expect(await mounted.bridge.clearDevelopmentSession()).toBe(true)
       await mounted.dispose()
 
@@ -548,7 +708,7 @@ describe('development sessions', () => {
         mark: () => {},
         markDevelopment: (sessionId: string, appId: string) => { restored.push(`${sessionId}:${appId}`) },
       } as never)
-      await settle()
+      await waitFor(() => restored.includes('saved:demo'))
       expect(restored).toContain('saved:demo')
       await second.dispose()
     } finally { rmSync(home, { recursive: true, force: true }) }
@@ -580,7 +740,7 @@ describe('development session failures', () => {
       chmodSync(homeDir, 0o500)
       expect(await blocked.bridge.registerDevelopmentSession('new-dev', 'demo')).toBe(false)
       chmodSync(homeDir, 0o700)
-      expect(JSON.parse(readFileSync(path, 'utf8'))).toMatchObject({ sessionId: 'old-dev', appId: 'demo' })
+      expect(JSON.parse(readFileSync(path, 'utf8'))).toMatchObject({ sessions: [{ sessionId: 'old-dev', appId: 'demo' }] })
       await blocked.dispose()
 
       // A directory at the record path cannot be unlinked as a file.
@@ -593,17 +753,6 @@ describe('development session failures', () => {
       try { chmodSync(homeDir, 0o700) } catch { /* already restored */ }
       rmSync(homeDir, { recursive: true, force: true })
     }
-  })
-})
-
-describe('process declarations', () => {
-  it('shows the declared commands without exposing an execution face', async () => {
-    const { bridge } = await host([{
-      ...demoApp('proc'),
-      capabilities: ['process'],
-      process: { commands: [{ name: 'status', description: 'show status', argv: ['git', 'status'] }] },
-    }])
-    expect(bridge.list()[0]!.process).toEqual([{ name: 'status', description: 'show status', argv: ['git', 'status'] }])
   })
 })
 
@@ -849,58 +998,6 @@ describe('page actions', () => {
   })
 })
 
-describe('page declarations', () => {
-  it('exposes views and enforces view/action declarations', async () => {
-    const declared = {
-      ...demoApp('declared'),
-      pages: { list: { description: 'list', actions: ['navigate'] as const }, detail: { description: 'detail' } },
-    }
-    const { ctx, bridge } = await host([declared])
-    expect(bridge.list()[0]!.pages).toEqual([
-      { view: 'list', description: 'list', actions: ['navigate'] },
-      { view: 'detail', description: 'detail', actions: ['navigate', 'set-filters', 'select'] },
-    ])
-    let page: { appId: string; label: string; pageId: string; snapshotId: string; view?: string } = { appId: 'declared', label: 'Declared', pageId: 'p', snapshotId: 's', view: 'list' }
-    ctx.provide('appTools', { mark: () => {} } as never)
-    ctx.provide('appConversationContext', { get: () => page, set: () => {} } as never)
-    await bridge.registerAppConversation('s-app')
-    const service = ctx.get('appPages') as {
-      open(id: string, input: { view?: string }): Promise<{ status: string; error?: { code: string } }>
-      act(id: string, input: { pageId: string; snapshotId: string; action: 'navigate' | 'set-filters' | 'select'; input?: unknown }): Promise<{ status: string; error?: { code: string } }>
-    }
-    expect(await service.open('s-app', { view: 'missing' })).toMatchObject({ error: { code: 'platform.action-not-allowed' } })
-
-    const abort = new AbortController()
-    const stream = bridge.watch(abort.signal)[Symbol.asyncIterator]()
-    await stream.next()
-    const open = service.open('s-app', { view: 'list' })
-    const openFrame = await stream.next()
-    expect(openFrame.value).toMatchObject({ kind: 'page-command', command: { view: 'list' } })
-    bridge.completePageCommand((openFrame.value as { command: { commandId: string } }).command.commandId, true)
-    expect(await open).toMatchObject({ status: 'success' })
-
-    expect(await service.act('s-app', { pageId: 'p', snapshotId: 's', action: 'set-filters', input: { filters: {} } }))
-      .toMatchObject({ error: { code: 'platform.action-not-allowed' } })
-    const nav = service.act('s-app', { pageId: 'p', snapshotId: 's', action: 'navigate', input: { view: 'detail' } })
-    const navFrame = await stream.next()
-    bridge.completePageCommand((navFrame.value as { command: { commandId: string } }).command.commandId, true)
-    expect(await nav).toMatchObject({ status: 'success' })
-
-    page = { ...page, view: 'detail' }
-    const detailAct = service.act('s-app', { pageId: 'p', snapshotId: 's', action: 'set-filters', input: { filters: {} } })
-    const detailFrame = await stream.next()
-    bridge.completePageCommand((detailFrame.value as { command: { commandId: string } }).command.commandId, true)
-    expect(await detailAct).toMatchObject({ status: 'success' })
-    expect(await service.act('s-app', { pageId: 'p', snapshotId: 's', action: 'navigate', input: { view: 'missing' } }))
-      .toMatchObject({ error: { code: 'platform.action-not-allowed' } })
-
-    page = { ...page, view: 'unknown' }
-    expect(await service.act('s-app', { pageId: 'p', snapshotId: 's', action: 'navigate', input: {} }))
-      .toMatchObject({ error: { code: 'platform.action-not-allowed' } })
-    abort.abort()
-  })
-})
-
 describe('shared drafts', () => {
   it('stores only metadata and reads values through the page controller', async () => {
     const { ctx, bridge } = await host([demoApp('demo')])
@@ -930,17 +1027,23 @@ describe('shared drafts', () => {
 
     expect(await service.read('s-app', { pageId, draftId: 'missing' })).toMatchObject({ error: { code: 'platform.draft-not-shared' } })
     expect(await service.read('s-app', { pageId, draftId: 'd1', fields: ['/body'] })).toMatchObject({ error: { code: 'platform.draft-scope' } })
+    expect(await service.read('s-app', { pageId, draftId: 'd1' })).toMatchObject({ error: { code: 'platform.draft-scope' } })
 
-    const refused = service.read('s-app', { pageId, draftId: 'd1' })
+    const filtered = service.read('s-app', { pageId, draftId: 'd1', fields: ['/title'] })
+    const filteredFrame = await stream.next()
+    bridge.completePageCommand((filteredFrame.value as { command: { commandId: string } }).command.commandId, true, undefined, { revision: 'r1', values: { '/title': 'hello', '/body': 'secret' } })
+    expect(await filtered).toMatchObject({ status: 'success', result: { values: { '/title': 'hello' } } })
+
+    const refused = service.read('s-app', { pageId, draftId: 'd1', fields: ['/title'] })
     const refusedFrame = await stream.next()
     bridge.completePageCommand((refusedFrame.value as { command: { commandId: string } }).command.commandId, false)
     expect(await refused).toMatchObject({ status: 'rejected' })
-    const errored = service.read('s-app', { pageId, draftId: 'd1' })
+    const errored = service.read('s-app', { pageId, draftId: 'd1', fields: ['/title'] })
     const erroredFrame = await stream.next()
     bridge.completePageCommand((erroredFrame.value as { command: { commandId: string } }).command.commandId, false, 'client broke')
     expect(await errored).toMatchObject({ status: 'rejected', error: { message: 'client broke' } })
 
-    const invalid = service.read('s-app', { pageId, draftId: 'd1' })
+    const invalid = service.read('s-app', { pageId, draftId: 'd1', fields: ['/title'] })
     const invalidFrame = await stream.next()
     bridge.completePageCommand((invalidFrame.value as { command: { commandId: string } }).command.commandId, true, undefined, { revision: 'r1' })
     expect(await invalid).toMatchObject({ error: { code: 'platform.draft-invalid' } })
@@ -975,8 +1078,13 @@ describe('shared draft validation', () => {
     const abort = new AbortController()
     const stream = bridge.watch(abort.signal)[Symbol.asyncIterator]()
     await stream.next()
+    // A full share returns the whole values object, not a filtered copy.
+    const full = service.read('s-app', { pageId, draftId: 'd1' })
+    const fullFrame = await stream.next()
+    bridge.completePageCommand((fullFrame.value as { command: { commandId: string } }).command.commandId, true, undefined, { revision: 'r', values: { '/title': 'hello', '/body': 'secret' } })
+    expect(await full).toMatchObject({ status: 'success', result: { values: { '/title': 'hello', '/body': 'secret' } } })
     for (const result of [null, [], { revision: '', values: {} }, { revision: 'r' }]) {
-      const pending = service.read('s-app', { pageId, draftId: 'd1' })
+      const pending = service.read('s-app', { pageId, draftId: 'd1', fields: ['/title'] })
       const frame = await stream.next()
       bridge.completePageCommand((frame.value as { command: { commandId: string } }).command.commandId, true, undefined, result as never)
       expect(await pending).toMatchObject({ error: { code: 'platform.draft-invalid' } })
@@ -984,7 +1092,7 @@ describe('shared draft validation', () => {
 
     vi.useFakeTimers()
     try {
-      const timed = service.read('s-app', { pageId, draftId: 'd1' })
+      const timed = service.read('s-app', { pageId, draftId: 'd1', fields: ['/title'] })
       await vi.advanceTimersByTimeAsync(5_000)
       expect(await timed).toMatchObject({ status: 'rejected' })
     } finally { vi.useRealTimers() }
@@ -1123,38 +1231,6 @@ describe('per-application model selection', () => {
   })
 })
 
-describe('application credentials', () => {
-  it('projects declared names and never returns values', async () => {
-    const app = {
-      ...demoApp('vault'),
-      data: { kind: 'unified' as const, namespace: 'vault', schemaVersion: 1, secretFields: ['token'] },
-    }
-    const { bridge } = await host([app])
-    expect(await bridge.credentials('vault')).toEqual([{ name: 'token', set: false }])
-    expect(await bridge.credentials('missing')).toEqual([])
-    expect(await bridge.setCredential('vault', 'undeclared', 'x')).toBe(false)
-    expect(await bridge.setCredential('vault', 'token', '')).toBe(false)
-    expect(await bridge.setCredential('vault', 'token', 'secret-value')).toBe(true)
-    expect(await bridge.credentials('vault')).toEqual([{ name: 'token', set: true }])
-    expect(await bridge.deleteCredential('vault', 'undeclared')).toBe(false)
-    expect(await bridge.deleteCredential('vault', 'token')).toBe(true)
-    expect(await bridge.deleteCredential('vault', 'token')).toBe(false)
-    expect(JSON.stringify(await bridge.credentials('vault'))).not.toContain('secret-value')
-
-    const dir = mkdtempSync(join(tmpdir(), 'dsh-credentials-'))
-    const secretsPath = join(dir, 'secrets.json')
-    const blocked = await host([app], {}, { secretsPath })
-    expect(await blocked.bridge.setCredential('vault', 'token', 'one')).toBe(true)
-    chmodSync(dir, 0o555)
-    try {
-      expect(await blocked.bridge.setCredential('vault', 'token', 'two')).toBe(false)
-      expect(await blocked.bridge.deleteCredential('vault', 'token')).toBe(false)
-    } finally { chmodSync(dir, 0o755) }
-    await blocked.dispose()
-    rmSync(dir, { recursive: true, force: true })
-  })
-})
-
 describe('page command invalidation', () => {
   it('fails a pending command when the page instance changes', async () => {
     const { ctx, bridge } = await host([demoApp('demo')])
@@ -1205,5 +1281,44 @@ describe('page command invalidation across owners', () => {
     expect(await second).toMatchObject({ status: 'success' })
     expect(bridge.completePageCommand((firstFrame.value as { command: { commandId: string } }).command.commandId, true)).toBe(false)
     abort.abort()
+  })
+})
+
+describe('the turn application scope', () => {
+  it('reads the current scope and revokes it', async () => {
+    const { ctx, bridge, runtime } = await host([secretApp()])
+    const pending = runtime.call({ kind: 'ai', sessionId: 's-1' }, 'secret-app', 'secret', {})
+    await waitFor(() => bridge.pendingConfirmations().length === 1)
+    const revoked: string[] = []
+    ctx.provide('appReadScope', {
+      list: (sessionId: string) => (sessionId === 's-1' ? ['demo', 'notes'] : []),
+      revoke: (sessionId: string) => { revoked.push(sessionId) },
+    } as never)
+    expect(await bridge.appScope('s-1')).toEqual({ apps: ['demo', 'notes'] })
+    expect(await bridge.appScope('s-2')).toEqual({ apps: [] })
+    // A non-matching Session revokes only its own scope; the parked question stays.
+    expect(await bridge.cancelAppScope('s-none')).toBe(true)
+    expect(await bridge.cancelAppScope('s-1')).toBe(true)
+    // Revoking the turn scope does not retract a confirmation the human can
+    // already see; the human still decides it.
+    expect(bridge.pendingConfirmations()).toHaveLength(1)
+    const question = bridge.pendingConfirmations()[0]!
+    expect(bridge.answerConfirmation(question.id, 'denied')).toBe(true)
+    await expect(pending).resolves.toMatchObject({ status: 'rejected', error: { code: 'platform.denied' } })
+    expect(revoked).toEqual(['s-none', 's-1'])
+  })
+})
+
+describe('the turn scope service edge cases', () => {
+  it('keeps a parked confirmation after the scope is revoked and answers empty without a scope service', async () => {
+    const { ctx, bridge, runtime } = await host([secretApp()])
+    const pending = runtime.call({ kind: 'ai', sessionId: 's-1' }, 'secret-app', 'secret', {})
+    await waitFor(() => bridge.pendingConfirmations().length === 1)
+    ctx.provide('appReadScope', { list: () => ['secret-app'], revoke: () => {} } as never)
+    expect(await bridge.cancelAppScope('s-1')).toBe(true)
+    expect(bridge.pendingConfirmations()).toHaveLength(1)
+    const question = bridge.pendingConfirmations()[0]!
+    expect(bridge.answerConfirmation(question.id, 'denied')).toBe(true)
+    await expect(pending).resolves.toMatchObject({ status: 'rejected' })
   })
 })

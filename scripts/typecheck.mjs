@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
- * The development typecheck: host and client sources resolve the platform
- * types from the checkout snapshot, so an API the checkout provides can be
- * used before the same line is published to npm.
+ * The workspace typecheck: host, Typert faces, client and test files, all
+ * against the published platform line installed in `node_modules`.
  *
- * The release typecheck (`pnpm run typecheck:release`) keeps the npm line.
- * The two are deliberately separate: dev is the execution line, release is
- * the published contract.
+ * There is one type plane. The repo depends on published `@deepseek-ai/dsh*`
+ * packages only, so the types a release is built with and the types this
+ * command reads are the same ones — CI, `release:check` and the daily loop
+ * cannot disagree about an API.
  *
  * @module scripts/typecheck
  */
@@ -25,9 +25,7 @@ function run(label, command, args) {
   if (result.status !== 0) process.exit(result.status ?? 1)
 }
 
-const platformTypes = join(ROOT, 'scripts', 'platform-types.mjs')
-run('prepare checkout types', process.execPath, [platformTypes, '--prepare'])
-run('host', process.execPath, [platformTypes, '--run', process.execPath, TSC, '-b', '--force', 'tsconfig.host.json'])
+run('host', process.execPath, [TSC, '-b', '--force', 'tsconfig.host.json'])
 run('typert', process.execPath, [join(ROOT, 'scripts', 'generate-typert.mjs')])
-run('client', process.execPath, [platformTypes, '--run', process.execPath, TSC, '-b', '--force', 'tsconfig.client.json'])
+run('client', process.execPath, [TSC, '-b', '--force', 'tsconfig.client.json'])
 run('tests', process.execPath, [join(ROOT, 'scripts', 'typecheck-tests.mjs')])

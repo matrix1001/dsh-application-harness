@@ -66,14 +66,14 @@ test('--purge-data is the only way to reach the business data', () => {
 test('artifact collection finds package build outputs and their suffixes only', () => {
   const fixture = mkdtempSync(join(tmpdir(), 'clean-'))
   try {
-    mkdirSync(join(fixture, 'packages', 'examples', 'demo', 'lib'), { recursive: true })
-    mkdirSync(join(fixture, 'packages', 'examples', 'demo', 'node_modules'), { recursive: true })
-    mkdirSync(join(fixture, 'packages', 'examples', 'demo', '.dsh-applications'), { recursive: true })
-    writeFileSync(join(fixture, 'packages', 'examples', 'demo', 'tsconfig.tsbuildinfo'), '{}')
+    mkdirSync(join(fixture, 'apps', 'demo', 'host', 'lib'), { recursive: true })
+    mkdirSync(join(fixture, 'apps', 'demo', 'host', 'node_modules'), { recursive: true })
+    mkdirSync(join(fixture, 'apps', 'demo', 'host', '.dsh-applications'), { recursive: true })
+    writeFileSync(join(fixture, 'apps', 'demo', 'host', 'tsconfig.tsbuildinfo'), '{}')
     const found = collectArtifacts(fixture)
     assert.deepEqual(found, [
-      'packages/examples/demo/lib',
-      `packages/examples/demo/tsconfig${ARTIFACT_SUFFIXES[0]}`,
+      'apps/demo/host/lib',
+      `apps/demo/host/tsconfig${ARTIFACT_SUFFIXES[0]}`,
     ])
   } finally {
     rmSync(fixture, { recursive: true, force: true })

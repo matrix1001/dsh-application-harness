@@ -1,0 +1,41 @@
+.failure {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--app-space-inline, 6px);
+  padding: var(--app-space-tight, 4px) 0;
+  color: var(--dsw-alias-state-error-primary);
+  font-size: var(--app-font-meta, 12px);
+  line-height: var(--app-line-normal, 1.5);
+}
+
+.title {
+  font-weight: 600;
+}
+
+.action {
+  display: inline-flex;
+  align-items: center;
+}
+
+.diagnostic {
+  flex: 1 1 100%;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--app-font-caption, 11px);
+}
+
+.diagnostic summary {
+  cursor: pointer;
+}
+
+.diagnostic code {
+  display: block;
+  margin-top: var(--app-space-tight, 4px);
+  overflow-wrap: anywhere;
+}
+
+.diagnostic span {
+  display: block;
+  margin-top: var(--app-space-tight, 4px);
+  overflow-wrap: anywhere;
+}

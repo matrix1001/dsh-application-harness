@@ -6,7 +6,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it } from 'vitest'
 import { ApplicationRuntime, assertDeclarable, declaredCallOps } from '../src/runtime.ts'
-import type { AppDeclaration, Caller, OperationContext } from '../src/types.ts'
+import type { AppDeclaration, Caller } from '../src/types.ts'
 
 function app(id: string, over: Partial<AppDeclaration> = {}): AppDeclaration {
   return {
@@ -19,6 +19,7 @@ function app(id: string, over: Partial<AppDeclaration> = {}): AppDeclaration {
         description: 'echo',
         params: { text: { type: 'string', required: true } },
         result: { type: 'string' },
+        effect: 'read',
         exposure: { peers: 'open' },
         execute: (args) => (args as { text: string }).text,
       },
@@ -28,18 +29,26 @@ function app(id: string, over: Partial<AppDeclaration> = {}): AppDeclaration {
 }
 
 const asApp = (appId: string): Caller => ({ kind: 'app', appId })
-const at = '2026-01-01T00:00:00.000Z'
+
+describe('operation declarations', () => {
+  it('requires generation 2 operations to declare effect and leaves generation 1 on the write default', () => {
+    const { effect: _effect, ...withoutEffect } = app('no-effect').ops.echo!
+    const ops = { echo: withoutEffect }
+    expect(() => assertDeclarable(app('no-effect', { generation: 2, data: { kind: 'none' }, ops }))).toThrow(/must declare effect/u)
+    expect(() => assertDeclarable(app('legacy', { ops }))).not.toThrow()
+  })
+})
 
 describe('data declarations', () => {
   it('accepts the four data forms', () => {
     expect(() => assertDeclarable(app('none', { generation: 2, data: { kind: 'none' } }))).not.toThrow()
     expect(() => assertDeclarable(app('unified', {
       generation: 2,
-      data: { kind: 'unified', namespace: 'unified', schemaVersion: 1, exportOp: 'echo', importOp: 'echo', secretFields: ['token'] },
+      data: { kind: 'unified', namespace: 'unified', schemaVersion: 1 },
     }))).not.toThrow()
     expect(() => assertDeclarable(app('own', {
       generation: 2,
-      data: { kind: 'own-sqlite', path: 'own/index.db', schemaVersion: 2, backup: 'exclude' },
+      data: { kind: 'own-sqlite', path: 'own/index.db', schemaVersion: 2 },
     }))).not.toThrow()
     expect(() => assertDeclarable(app('files', {
       generation: 2,
@@ -57,11 +66,8 @@ describe('data declarations', () => {
     expect(() => assertDeclarable(app('none-fields', { generation: 2, data: { kind: 'none', namespace: 'x' } }))).toThrow(/cannot carry storage fields/u)
     expect(() => assertDeclarable(app('schema', { generation: 2, data: { kind: 'unified', namespace: 'schema' } }))).toThrow(/schemaVersion/u)
     expect(() => assertDeclarable(app('schema-zero', { generation: 2, data: { kind: 'own-sqlite', path: 'x', schemaVersion: 0 } }))).toThrow(/schemaVersion/u)
-    expect(() => assertDeclarable(app('export', { generation: 2, data: { kind: 'unified', namespace: 'export', schemaVersion: 1, exportOp: 'nope' } }))).toThrow(/exportOp/u)
-    expect(() => assertDeclarable(app('import', { generation: 2, data: { kind: 'unified', namespace: 'import', schemaVersion: 1, importOp: 'nope' } }))).toThrow(/importOp/u)
-    expect(() => assertDeclarable(app('secret', { generation: 2, data: { kind: 'unified', namespace: 'secret', schemaVersion: 1, secretFields: [''] } }))).toThrow(/secretFields/u)
-    expect(() => assertDeclarable(app('secret-dup', { generation: 2, data: { kind: 'unified', namespace: 'secret-dup', schemaVersion: 1, secretFields: ['a', 'a'] } }))).toThrow(/secretFields/u)
     expect(() => assertDeclarable(app('namespace', { generation: 2, data: { kind: 'unified', namespace: 'Bad Namespace', schemaVersion: 1 } }))).toThrow(/namespace/u)
+    expect(() => assertDeclarable(app('other-id', { generation: 2, data: { kind: 'unified', namespace: 'different', schemaVersion: 1 } }))).toThrow(/must equal/u)
   })
 
   it('refuses a unified description with a path and an own description without one', () => {
@@ -80,8 +86,6 @@ describe('data declarations', () => {
   it('refuses two applications sharing a data location', async () => {
     const runtime = new ApplicationRuntime()
     await runtime.register(app('none', { generation: 2, data: { kind: 'none' } }))
-    await runtime.register(app('first', { generation: 2, data: { kind: 'unified', namespace: 'shared', schemaVersion: 1 } }))
-    await expect(runtime.register(app('second', { generation: 2, data: { kind: 'unified', namespace: 'shared', schemaVersion: 1 } }))).rejects.toThrow(/collides/u)
     await runtime.register(app('own-first', { generation: 2, data: { kind: 'own-sqlite', path: 'x', schemaVersion: 1 } }))
     await expect(runtime.register(app('own-second', { generation: 2, data: { kind: 'files', path: 'x', schemaVersion: 1 } }))).rejects.toThrow(/collides/u)
   })
@@ -98,13 +102,11 @@ describe('operation-level calls', () => {
     const runtime = new ApplicationRuntime()
     await runtime.register(app('target'))
     await runtime.register(app('caller', { calls: [{ app: 'target', ops: ['echo'] }] }))
-    await runtime.grant({ caller: asApp('caller'), capabilities: ['target#echo'], grantedAt: at })
     expect(await runtime.call(asApp('caller'), 'target', 'echo', { text: 'ok' })).toMatchObject({ status: 'success', result: 'ok' })
 
     await runtime.register(app('other', {
       calls: [{ app: 'target', ops: ['other'] }],
     }))
-    await runtime.grant({ caller: asApp('other'), capabilities: ['target#echo'], grantedAt: at })
     expect(await runtime.call(asApp('other'), 'target', 'echo', { text: 'no' })).toMatchObject({ status: 'rejected', error: { code: 'platform.not-open-to-caller' } })
   })
 
@@ -142,53 +144,48 @@ describe('peer call safety', () => {
     const b = peerApp('beta', [{ app: 'alpha', ops: ['relay'] }], async ctx => await ctx.call('alpha', 'relay', {}))
     await runtime.register(a)
     await runtime.register(b)
-    await runtime.grant({ caller: asApp('alpha'), capabilities: ['beta#relay'], grantedAt: at })
-    await runtime.grant({ caller: asApp('beta'), capabilities: ['alpha#relay'], grantedAt: at })
     const outcome = await runtime.call({ kind: 'human' }, 'alpha', 'relay', {})
     expect(outcome).toMatchObject({ status: 'success', result: { status: 'success', result: { status: 'rejected', error: { code: 'platform.call-cycle' } } } })
   })
 
-  it('gates reads and writes to declared fields and refuses undeclared names', async () => {
-    const values = new Map<string, string>()
-    const runtime = new ApplicationRuntime({
-      secrets: {
-        names: async () => [...values.keys()],
-        has: async (_appId, name) => values.has(name),
-        get: async (_appId, name) => values.get(name),
-        set: async (_appId, name, value) => { values.set(name, value) },
-        delete: async (_appId, name) => values.delete(name),
-      },
-    })
-    await runtime.register(app('keeper', {
-      generation: 2,
-      capabilities: ['storage'],
-      data: { kind: 'unified', namespace: 'keeper', schemaVersion: 1, secretFields: ['token'] },
+})
+
+  it('carries the source call chain into a background task', async () => {
+    const runtime = new ApplicationRuntime()
+    const alpha: AppDeclaration = {
+      id: 'alpha', name: 'alpha', description: 'alpha app', version: '1.0.0',
+      calls: [{ app: 'beta', ops: ['relay'] }],
       ops: {
-        probe: {
-          description: 'probe',
-          params: {},
-          result: { type: 'json' },
-          exposure: {},
+        relay: {
+          description: 'relay', params: {}, result: { type: 'json' }, exposure: { peers: 'open' },
+          execute: async (_args, ctx) => ({ status: (await ctx.call('beta', 'relay', {})).status }),
+        },
+      },
+    }
+    const beta: AppDeclaration = {
+      id: 'beta', name: 'beta', description: 'beta app', version: '1.0.0',
+      calls: [{ app: 'alpha', ops: ['relay'] }],
+      ops: {
+        relay: {
+          description: 'relay', params: {}, result: { type: 'json' }, exposure: { peers: 'open' },
           execute: async (_args, ctx) => {
-            await ctx.secrets.set('token', 'value')
-            const value = await ctx.secrets.get('token')
-            return { has: await ctx.secrets.has('token'), ...(value === undefined ? {} : { value }), names: [...await ctx.secrets.names()] }
+            const handle = ctx.startTask({ kind: 'trace', title: 'trace' }, async task => {
+              const outcome = await task.call('alpha', 'relay', {})
+              return { code: outcome.status === 'rejected' ? outcome.error?.code ?? '' : outcome.status }
+            })
+            await handle.done
+            return { done: true }
           },
         },
-        bad: {
-          description: 'bad',
-          params: {},
-          result: { type: 'json' },
-          exposure: {},
-          execute: (async (_args: unknown, ctx: OperationContext) => await ctx.secrets.get('other')) as never,
-        },
       },
-    }))
-    await runtime.grant({ caller: asApp('keeper'), capabilities: ['capability:storage'], grantedAt: at })
-    expect(await runtime.call({ kind: 'human' }, 'keeper', 'probe', {})).toMatchObject({ status: 'success', result: { has: true, value: 'value', names: ['token'] } })
-    expect(await runtime.call({ kind: 'human' }, 'keeper', 'bad', {})).toMatchObject({ status: 'failed', error: { code: 'app.secret-undeclared' } })
+    }
+    await runtime.register(alpha)
+    await runtime.register(beta)
+    expect(await runtime.call({ kind: 'human' }, 'alpha', 'relay', {})).toMatchObject({ status: 'success' })
+    expect(runtime.tasks('beta')).toMatchObject([
+      { state: 'succeeded', resultSummary: { code: 'platform.call-cycle' } },
+    ])
   })
-})
 
 describe('peer call depth', () => {
   it('refuses a chain at the configured nesting limit', async () => {
@@ -200,36 +197,7 @@ describe('peer call depth', () => {
   })
 })
 
-describe('application secrets without a host store', () => {
-  it('reads unset defaults and refuses writes', async () => {
-    const runtime = new ApplicationRuntime()
-    await runtime.register(app('keeper', {
-      generation: 2,
-      capabilities: ['storage'],
-      data: { kind: 'unified', namespace: 'keeper', schemaVersion: 1, secretFields: ['token'] },
-      ops: {
-        probe: {
-          description: 'probe',
-          params: {},
-          result: { type: 'json' },
-          exposure: {},
-          execute: async (_args, ctx) => ({
-            names: [...await ctx.secrets.names()],
-            has: await ctx.secrets.has('token'),
-            value: await ctx.secrets.get('token') ?? null,
-            deleted: await ctx.secrets.delete('token'),
-            set: await ctx.secrets.set('token', 'x').then(() => 'ok', (error: Error) => error.message),
-          }),
-        },
-      },
-    }))
-    await runtime.grant({ caller: asApp('keeper'), capabilities: ['capability:storage'], grantedAt: at })
-    expect(await runtime.call({ kind: 'human' }, 'keeper', 'probe', {})).toMatchObject({
-      status: 'success',
-      result: { names: [], has: false, value: null, deleted: false, set: expect.stringContaining('no secret store') },
-    })
-  })
-
+describe('calls without a contract', () => {
   it('walks a caller with no calls to its target without a contract', async () => {
     const runtime = new ApplicationRuntime()
     await runtime.register(app('target'))

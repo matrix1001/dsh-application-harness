@@ -10,6 +10,8 @@ import { basename, dirname, join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SqliteDataStore } from '@matrix1001/dsh-application-harness-store/sqlite-store'
 import type { AppDeclaration } from '@matrix1001/dsh-application-harness-runtime'
+import ApplicationBridge from '../src/index.ts'
+import type { AppDataRestoreResult } from '../src/types.ts'
 import { host } from './harness.ts'
 
 const dirs: string[] = []
@@ -72,6 +74,12 @@ function digest(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex')
 }
 
+/** Preview then commit, the only public restore path now. */
+async function restoreWithPlan(bridge: ApplicationBridge, appId: string, backup: string, requestId = 'req-restore'): Promise<AppDataRestoreResult> {
+  const preview = bridge.dataRestorePreview(appId, backup)
+  return await bridge.dataRestore(appId, preview.planId, requestId)
+}
+
 describe('application data restore', () => {
   it('previews without writing, restores ONE app exactly, and leaves a pre-restore backup', async () => {
     const db = join(tempDir(), 'app-data.sqlite')
@@ -95,7 +103,7 @@ describe('application data restore', () => {
       // The preview itself did not change the current data.
       expect(dump(db).apps.alpha!.documents.extra).toBeDefined()
 
-      const result = await bridge.dataRestore('alpha', backup, preview.previewFingerprint)
+      const result = await bridge.dataRestore('alpha', preview.planId, 'req-restore')
       expect(result).toMatchObject({
         appId: 'alpha', restoredFrom: backup, documents: 3, collections: 4, reload: 'ok',
       })
@@ -131,7 +139,7 @@ describe('application data restore', () => {
       const store = new SqliteDataStore({ dbPath: db })
       store.putDocument('alpha', 'settings', { theme: 'newer' })
       store.close()
-      await expect(bridge.dataRestore('alpha', backup, preview.previewFingerprint)).rejects.toThrow(/changed since the restore preview/u)
+      await expect(bridge.dataRestore('alpha', preview.planId, 'req-restore')).rejects.toThrow(/changed since the restore preview/u)
       expect(dump(db).apps.alpha!.documents.settings?.value).toEqual({ theme: 'newer' })
     } finally {
       await dispose()
@@ -158,7 +166,7 @@ describe('application data restore', () => {
       const noAlpha = empty.backupTo(join(dir, 'app-data.sqlite.before-import-empty'))
       empty.close()
       expect(() => bridge.dataRestorePreview('alpha', noAlpha)).toThrow(/no data for alpha/u)
-      await expect(bridge.dataRestore('ghost', backup)).rejects.toThrow(/not registered/u)
+      await expect(restoreWithPlan(bridge, 'ghost', backup)).rejects.toThrow(/not registered/u)
     } finally {
       await dispose()
     }
@@ -176,7 +184,7 @@ describe('application restore failure paths', () => {
       const preview = bridge.dataRestorePreview('alpha', backup)
       expect(preview.documents).toMatchObject({ backupOnly: 3, currentOnly: 0, modified: 0, unchanged: 0 })
       expect(preview.collections).toMatchObject({ backupOnly: 4, currentOnly: 0, modified: 0, unchanged: 0 })
-      const result = await bridge.dataRestore('alpha', backup, preview.previewFingerprint)
+      const result = await bridge.dataRestore('alpha', preview.planId, 'req-restore')
       expect(result).toMatchObject({ documents: 3, collections: 4, reload: 'ok' })
       expect(dump(db).apps.alpha!.documents.settings?.value).toEqual({ theme: 'dark' })
     } finally {
@@ -191,7 +199,7 @@ describe('application restore failure paths', () => {
     const { bridge, runtime, dispose } = await host([alpha(() => { throw new Error('should not reload') })], {}, { dataPath: db })
     try {
       await runtime.stop('alpha')
-      const result = await bridge.dataRestore('alpha', backup)
+      const result = await restoreWithPlan(bridge, 'alpha', backup)
       expect(result).toMatchObject({ appId: 'alpha', reload: 'skipped', documents: 3, collections: 4 })
       expect(dump(db).apps.alpha!.documents.extra).toBeUndefined()
     } finally {
@@ -205,7 +213,7 @@ describe('application restore failure paths', () => {
     mutate(db)
     const { bridge, dispose } = await host([alpha(() => { throw new Error('reload failed') })], {}, { dataPath: db })
     try {
-      const result = await bridge.dataRestore('alpha', backup)
+      const result = await restoreWithPlan(bridge, 'alpha', backup)
       expect(result).toMatchObject({ reload: 'failed', reloadError: 'reload failed' })
       expect(dump(db).apps.alpha!.documents.extra).toBeUndefined()
     } finally {
@@ -235,7 +243,11 @@ describe('application restore failure paths', () => {
       const directory = join(dir, `${basename(db)}.before-import-directory`)
       mkdirSync(directory)
       expect(() => bridge.dataRestorePreview('alpha', directory)).toThrow(/regular file/u)
-      await expect(bridge.dataRestore('alpha', backup, 'stale')).rejects.toThrow(/changed since the restore preview/u)
+      const stalePlan = bridge.dataRestorePreview('alpha', backup)
+      const changing = new SqliteDataStore({ dbPath: db })
+      changing.putDocument('alpha', 'settings', { theme: 'changed-after-preview' })
+      changing.close()
+      await expect(bridge.dataRestore('alpha', stalePlan.planId, 'req-restore')).rejects.toThrow(/changed since the restore preview/u)
     } finally {
       await dispose()
     }
@@ -248,7 +260,7 @@ describe('application restore failure paths', () => {
     const { bridge, dispose } = await host([alpha(() => {})], {}, { dataPath: db })
     try {
       const stopping = bridge.stopApp('alpha')
-      await expect(bridge.dataRestore('alpha', backup)).rejects.toThrow(/stopping/u)
+      await expect(restoreWithPlan(bridge, 'alpha', backup)).rejects.toThrow(/stopping/u)
       await stopping
     } finally {
       await dispose()
@@ -262,7 +274,7 @@ describe('application restore failure paths', () => {
     mutate(db)
     const { bridge, dispose } = await host([alpha(() => { throw 'reload string' })], {}, { dataPath: db })
     try {
-      const result = await bridge.dataRestore('alpha', backup)
+      const result = await restoreWithPlan(bridge, 'alpha', backup)
       expect(result).toMatchObject({ reload: 'failed', reloadError: 'reload string' })
       expect(dump(db).apps.alpha!.documents.extra).toBeUndefined()
     } finally {
@@ -278,7 +290,7 @@ describe('application restore failure paths', () => {
     const spy = vi.spyOn(SqliteDataStore.prototype, 'backupTo').mockImplementationOnce(() => { throw new Error('offline backup down') })
     try {
       await runtime.stop('alpha')
-      await expect(bridge.dataRestore('alpha', backup)).rejects.toThrow(/offline backup down/u)
+      await expect(restoreWithPlan(bridge, 'alpha', backup)).rejects.toThrow(/offline backup down/u)
     } finally {
       spy.mockRestore()
       await dispose()
@@ -292,7 +304,7 @@ describe('application restore failure paths', () => {
     const { bridge, dispose } = await host([alpha(() => {})], {}, { dataPath: db })
     const spy = vi.spyOn(SqliteDataStore.prototype, 'backupTo').mockImplementationOnce(() => { throw new Error('backup down') })
     try {
-      await expect(bridge.dataRestore('alpha', backup)).rejects.toThrow(/backup down/u)
+      await expect(restoreWithPlan(bridge, 'alpha', backup)).rejects.toThrow(/backup down/u)
       spy.mockRestore()
       // The failed restore released the hold: the app is callable again.
       expect((await bridge.call('alpha', 'echo', { text: 'ok' })).status).toBe('success')

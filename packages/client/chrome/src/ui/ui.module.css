@@ -1,0 +1,142 @@
+/* The application chrome's own control surface: no platform UI package is
+ * imported. Colors use the platform theme aliases; spacing/type use the
+ * application scale. */
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--app-space-tight);
+  box-sizing: border-box;
+  height: var(--app-control-height);
+  padding: 0 var(--app-space-block);
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius-control);
+  background: var(--app-panel);
+  color: var(--app-text);
+  font: inherit;
+  font-size: var(--app-font-body);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.button:hover:not(:disabled) { background: var(--app-hover); }
+.button:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary); outline-offset: 1px; }
+.button:disabled { cursor: default; opacity: .55; }
+.buttonSm { height: var(--app-control-sm); padding: 0 var(--app-space-group); font-size: var(--app-font-meta); }
+.buttonPrimary { border-color: var(--app-accent); background: var(--app-accent); color: var(--app-panel); }
+.buttonPrimary:hover:not(:disabled) { filter: brightness(.94); }
+.buttonGhost { border-color: transparent; background: transparent; color: var(--app-text-2); }
+.buttonGhost:hover:not(:disabled) { background: var(--app-hover); color: var(--app-text); }
+.buttonOutline { background: transparent; }
+
+.switch {
+  position: relative;
+  flex: none;
+  width: 34px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  background: var(--app-bg);
+  cursor: pointer;
+}
+.switch:disabled { cursor: default; opacity: .55; }
+.switch:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary); outline-offset: 2px; }
+.switchThumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--app-text-2);
+  transition: transform .14s ease;
+}
+.switch[aria-checked='true'] { border-color: var(--app-accent); background: var(--app-accent); }
+.switch[aria-checked='true'] .switchThumb { background: var(--app-panel); transform: translateX(14px); }
+@media (prefers-reduced-motion: reduce) { .switchThumb { transition: none; } }
+
+.tooltipWrap { position: relative; display: inline-flex; min-width: 0; }
+.tooltip {
+  position: absolute;
+  z-index: 80;
+  max-width: 260px;
+  padding: 4px 8px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius-sm);
+  background: var(--app-panel);
+  color: var(--app-text);
+  box-shadow: var(--dsw-elevation-prominent, 0 4px 14px rgb(0 0 0 / 15%));
+  font-size: var(--app-font-meta);
+  line-height: 1.4;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.tooltipTop { bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%); }
+.tooltipBottom { top: calc(100% + 6px); left: 50%; transform: translateX(-50%); }
+
+.modalRoot {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+}
+.modalMask {
+  position: absolute;
+  inset: 0;
+  background: var(--dsw-alias-bg-mask-1, rgb(15 18 24 / 22%));
+}
+.modal {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  width: min(420px, 100%);
+  max-height: min(86dvh, 760px);
+  overflow: hidden;
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius-lg);
+  outline: none;
+  background: var(--app-panel);
+  color: var(--app-text);
+  box-shadow: var(--dsw-elevation-prominent, 0 12px 40px rgb(0 0 0 / 18%));
+}
+.modalHead { display: flex; align-items: center; gap: var(--app-space-group); flex: none; padding: 14px var(--app-space-section); border-bottom: 1px solid var(--app-border-soft); }
+.modalTitle { min-width: 0; flex: auto; margin: 0; font-size: var(--app-font-subtitle); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.modalClose { flex: none; width: 26px; height: 26px; padding: 0; border: 0; border-radius: var(--app-radius-sm); background: transparent; color: var(--app-text-2); font-size: var(--app-font-heading); line-height: 1; cursor: pointer; }
+.modalClose:hover { background: var(--app-hover); color: var(--app-text); }
+.modalContent { min-height: 0; overflow: auto; padding: var(--app-space-section); }
+.modalDescription { margin: 0 0 var(--app-space-block); color: var(--app-text-2); }
+.modalFooter { display: flex; justify-content: flex-end; gap: var(--app-space-group); flex: none; padding: 12px var(--app-space-section); border-top: 1px solid var(--app-border-soft); }
+
+.menuAnchor { display: inline-flex; min-width: 0; }
+.menu {
+  position: fixed;
+  z-index: 1300;
+  min-width: 180px;
+  max-width: min(320px, calc(100vw - 16px));
+  max-height: min(60vh, 420px);
+  overflow: auto;
+  padding: 4px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius-md);
+  background: var(--app-panel);
+  box-shadow: var(--dsw-elevation-prominent, 0 8px 28px rgb(0 0 0 / 16%));
+}
+.menuItem { display: flex; align-items: center; gap: var(--app-space-group); width: 100%; min-height: 30px; padding: 0 8px; border: 0; border-radius: var(--app-radius-sm); background: transparent; color: var(--app-text); font: inherit; font-size: var(--app-font-body); text-align: left; cursor: pointer; }
+.menuItem:hover:not(:disabled), .menuItem:focus-visible { background: var(--app-hover); outline: none; }
+.menuItem:disabled { opacity: .5; cursor: default; }
+.menuItemDanger { color: var(--app-danger); }
+.menuItemDanger:hover:not(:disabled) { background: var(--app-danger-soft); }
+.menuItemCurrent { color: var(--app-accent); }
+.menuItemIcon { flex: none; display: inline-flex; }
+.menuItemLabel { min-width: 0; flex: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menuSeparator { height: 1px; margin: 4px 2px; background: var(--app-border-soft); }
+.menuLabel { padding: 4px 8px; color: var(--app-text-2); font-size: var(--app-font-caption); }
+
+.fence { position: relative; margin: 8px 0; }
+.fence pre { margin: 0; padding: 12px; overflow: auto; border: 1px solid var(--app-border-soft); border-radius: var(--app-radius); background: var(--app-bg); }
+.fence code { font-family: var(--app-font-mono); font-size: var(--app-font-meta); }
+.fenceCopy { position: absolute; top: 6px; right: 6px; height: 24px; padding: 0 7px; border: 1px solid var(--app-border); border-radius: var(--app-radius-sm); background: var(--app-panel); color: var(--app-text-2); font: inherit; font-size: var(--app-font-caption); cursor: pointer; }
+.fenceCopy:hover { background: var(--app-hover); color: var(--app-text); }

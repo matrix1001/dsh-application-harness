@@ -22,7 +22,6 @@ const app: AppInfo = {
   name: '信息中心',
   description: 'the reading surface',
   version: '1.0.0',
-  status: 'available',
   health: 'ok', activation: 'enabled', runtime: 'ready',
   needs: ['capability:storage', 'capability:network', 'workbook#createTask'],
   ops: [],
@@ -32,12 +31,10 @@ function state(over: Partial<ApplicationsState> = {}): ApplicationsState {
   return {
     apps: [app],
     activeAppId: app.id,
-    running: new Map(),
     runningCalls: [],
     outcomes: new Map(),
     refusals: new Map(),
     progress: [],
-    claims: new Map(),
     history: [],
     historyLoaded: true,
     historyReading: false,
@@ -154,7 +151,7 @@ describe('the first-run permission card', () => {
   })
 
   it('does not appear for an unavailable app or one with no platform capability', () => {
-    for (const candidate of [{ ...app, status: 'stopped' as const }, { ...app, needs: ['workbook#createTask'] }]) {
+    for (const candidate of [{ ...app, runtime: 'stopped' as const }, { ...app, needs: ['workbook#createTask'] }]) {
       const view = render(
         <PermissionOnboarding app={candidate} state={state()} onAllow={async () => true} onLater={async () => true} onManage={() => {}} t={t} />,
       )

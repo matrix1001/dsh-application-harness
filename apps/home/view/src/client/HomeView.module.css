@@ -1,0 +1,367 @@
+/* The home dashboard: one activity strip over a two-column card grid. */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-section, 16px);
+  /* The shell already supplies the page frame (--app-page-*). A second inset
+     here made Home's content narrower than every other application. */
+  container-type: inline-size;
+}
+
+.head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--app-space-inline, 8px);
+}
+
+.headMain {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--app-space-inline, 8px);
+}
+
+/* The page's tool row: the read time and the manual refresh, kept on the
+   header's own line so the first data row does not move down. */
+.tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--app-space-group, 8px);
+}
+
+.refreshButton {
+  min-height: 32px;
+  padding: 0 var(--app-space-block, 12px);
+  border: 1px solid var(--app-border, #e5e6eb);
+  border-radius: var(--app-radius-md, 8px);
+  background: var(--app-panel, #fff);
+  color: var(--app-text-2, #4e5969);
+  font: inherit;
+  font-size: var(--app-font-meta, 12px);
+  cursor: pointer;
+}
+
+.refreshButton:disabled {
+  color: var(--app-text-muted, #86909c);
+  cursor: default;
+}
+
+@media (hover: hover) {
+  .refreshButton:not(:disabled):hover {
+    background: var(--app-hover, #f2f3f5);
+  }
+}
+
+.title {
+  margin: 0;
+  color: var(--app-text, #1d2129);
+  font-size: var(--app-font-title, 18px);
+  font-weight: 600;
+}
+
+.meta {
+  color: var(--app-text-muted, #86909c);
+  font-size: var(--app-font-meta, 12px);
+  white-space: nowrap;
+}
+
+
+
+.activity {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-inline, 8px);
+  padding: var(--app-space-section, 16px);
+  border: 1px solid var(--app-border, #e5e6eb);
+  border-radius: var(--app-radius-lg, 12px);
+  background: var(--app-panel, #fff);
+}
+
+.activityHead {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-group, 8px);
+  margin: 0;
+  color: var(--app-text-2, #4e5969);
+  font-size: var(--app-font-meta, 12px);
+  font-weight: 600;
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--app-accent, #4d6bfe);
+}
+
+.activityRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--app-space-inline, 8px);
+  padding: var(--app-space-group, 8px) var(--app-space-block, 12px);
+  border: 1px solid var(--app-border-soft, #f2f3f5);
+  border-radius: var(--app-radius-md, 8px);
+  background: var(--app-panel-soft, #f7f8fa);
+  color: var(--app-text, #1d2129);
+  font-size: var(--app-font-body, 13px);
+  text-align: left;
+  cursor: pointer;
+}
+
+@media (hover: hover) {
+.activityRow:hover {
+  background: var(--app-hover, #f2f3f5);
+}
+}
+
+
+.activityText {
+  overflow-wrap: anywhere;
+}
+
+.muted {
+  margin: 0;
+  color: var(--app-text-muted, #86909c);
+  font-size: var(--app-font-meta, 12px);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--app-space-section, 16px);
+}
+
+@container (max-width: 1040px) {
+  .grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@container not (width <= 1040px) {
+  .grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.activity[data-empty='true'] {
+  padding-block: var(--app-space-tight);
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-tight, 4px);
+  padding: var(--app-space-section, 16px);
+  border: 1px solid var(--app-border, #e5e6eb);
+  border-radius: var(--app-radius-lg, 12px);
+  background: var(--app-panel, #fff);
+  color: var(--app-text, #1d2129);
+  text-align: left;
+}
+
+.cardHeading {
+  margin: 0;
+  font: inherit;
+}
+
+.cardHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--app-space-inline, 8px);
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+@media (hover: hover) {
+  .cardHead:hover {
+    color: var(--app-text, #1d2129);
+    background: var(--app-hover, #f2f3f5);
+  }
+
+  .item:hover {
+    background: var(--app-hover, #f2f3f5);
+  }
+
+  .cardOpen:hover {
+    background: var(--app-hover, #f2f3f5);
+  }
+}
+
+
+.cardTitle {
+  color: var(--app-text-2, #4e5969);
+  font-size: var(--app-font-body, 13px);
+  font-weight: 600;
+}
+
+.chevron {
+  color: var(--app-text-muted, #86909c);
+  font-size: var(--app-font-title, 18px);
+  line-height: 1;
+}
+
+.counts {
+  color: var(--app-text, #1d2129);
+  font-size: var(--app-font-title, 18px);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* The overdue count rides in the primary count line: it is the card's most
+   urgent fact and must not be a low-contrast footnote. */
+.overdue {
+  color: var(--app-danger, #cb2634);
+  font-weight: 600;
+}
+
+.cardFailure {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--app-space-inline, 6px);
+  color: var(--app-text-2, #4e5969);
+  font-size: var(--app-font-meta, 12px);
+}
+
+.cardFailureReason {
+  overflow-wrap: anywhere;
+}
+
+.secondary {
+  color: var(--app-text-muted, #86909c);
+  font-size: var(--app-font-caption, 11px);
+}
+
+.items {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-tight, 4px);
+  margin-top: var(--app-space-tight, 4px);
+}
+
+/* The card-wide entry: the 20px header alone was not a usable target, so a
+   foot button opens the application and the preview rows stay their own
+   targets above it. */
+.cardFoot {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: auto;
+  padding-top: var(--app-space-group, 8px);
+  border-top: 1px solid var(--app-border-soft, #f2f3f5);
+}
+
+.cardOpen {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 var(--app-space-inline, 8px);
+  border: 0;
+  border-radius: var(--app-radius-sm, 6px);
+  background: transparent;
+  color: var(--dsw-alias-link, #3b82f6);
+  font: inherit;
+  font-size: var(--app-font-meta, 12px);
+  cursor: pointer;
+}
+
+.item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--app-space-inline, 8px);
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--app-text-2, #4e5969);
+  font: inherit;
+  font-size: var(--app-font-meta, 12px);
+  text-align: left;
+  cursor: pointer;
+}
+
+.itemTitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.itemMeta {
+  flex: 0 0 auto;
+  color: var(--app-text-muted, #86909c);
+  font-size: var(--app-font-caption, 11px);
+}
+
+@container (max-width: 720px) {
+  .item { min-height: var(--app-row-touch, 44px); padding: var(--app-space-inline, 6px) 0; }
+  .cardOpen { min-height: var(--app-row-touch, 44px); }
+  .refreshButton { min-height: var(--app-row-touch, 44px); }
+}
+
+.activityState {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-tight, 4px);
+  color: var(--app-text-2, #4e5969);
+  font-size: var(--app-font-meta, 12px);
+}
+
+.retry {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--dsw-alias-link, #3b82f6);
+  font: inherit;
+  cursor: pointer;
+}
+
+.diagnostic {
+  color: var(--app-text-muted, #86909c);
+  font-size: var(--app-font-caption, 11px);
+}
+
+.diagnostic summary {
+  cursor: pointer;
+}
+
+.diagnostic code {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.diagnostic p {
+  margin: var(--app-space-tight, 4px) 0 0;
+  overflow-wrap: anywhere;
+}
+
+
+/* One visible keyboard ring for the page's native controls (the platform
+   primitives carry their own). */
+.page :is(button, a, input, select, textarea, [role='button']):focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 1px;
+}
+
+
+.overviewFailure {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--app-space-inline, 6px);
+  padding: var(--app-space-tight) 0;
+  color: var(--dsw-alias-state-error-primary);
+  font-size: var(--app-font-meta, 12px);
+}

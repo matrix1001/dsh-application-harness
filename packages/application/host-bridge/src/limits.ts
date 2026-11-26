@@ -4,13 +4,12 @@
  * unified model entrance; they are not budgets, queues or retries.
  * @module @matrix1001/dsh-application-harness-host-bridge/limits
  */
-import { existsSync } from 'node:fs'
-import { readVersionedJson, writeVersionedJson } from './platform-files.ts'
+import { AppTableStore } from './app-table.ts'
 import type { ModelLimits } from './types.ts'
 
 /** The stable error the model port surfaces when a limit refuses a call. */
 export class ModelLimitError extends Error {
-  readonly code = 'model-limit-exceeded' as const
+  readonly code = 'platform.model-limit-exceeded' as const
   constructor(message: string) {
     super(message)
     this.name = 'ModelLimitError'
@@ -34,40 +33,21 @@ function limitsOf(value: unknown): ModelLimits {
 
 /** Persist one application's limits. */
 export class ModelLimitStore {
-  private readonly entries = new Map<string, ModelLimits>()
-  private queue: Promise<void> = Promise.resolve()
-  private readonly path: string
-  constructor(path: string) { this.path = path }
+  private readonly table: AppTableStore<ModelLimits>
 
-  async load(): Promise<void> {
-    if (!existsSync(this.path)) return
-    const record = await readVersionedJson(this.path, 1, 'model-limit table', (document) => {
-      const apps = document.apps
-      if (typeof apps !== 'object' || apps === null || Array.isArray(apps)) throw new Error('the model-limit table needs an apps object')
-      const parsed: Record<string, ModelLimits> = {}
-      for (const [appId, value] of Object.entries(apps)) parsed[appId] = limitsOf(value)
-      return parsed
-    })
-    /* v8 ignore next -- a disappearing file is treated as empty */
-    for (const [appId, limits] of Object.entries(record ?? {})) this.entries.set(appId, limits)
+  constructor(path: string) {
+    this.table = new AppTableStore(path, 'model-limit table', limitsOf)
   }
 
-  get(appId: string): ModelLimits { return this.entries.get(appId) ?? defaultLimits() }
+  async load(): Promise<void> {
+    await this.table.load()
+  }
+
+  get(appId: string): ModelLimits { return this.table.get(appId) ?? defaultLimits() }
 
   async set(appId: string, limits: ModelLimits): Promise<void> {
     const next = limitsOf(limits)
-    this.queue = this.queue.then(async () => {
-      const previous = this.entries.get(appId)
-      this.entries.set(appId, next)
-      try {
-        await writeVersionedJson(this.path, 1, { apps: Object.fromEntries(this.entries) })
-      } catch (error) {
-        if (previous === undefined) this.entries.delete(appId)
-        else this.entries.set(appId, previous)
-        throw error
-      }
-    })
-    await this.queue
+    await this.table.update(appId, () => next)
   }
 }
 

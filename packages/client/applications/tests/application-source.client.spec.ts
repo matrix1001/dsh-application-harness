@@ -6,22 +6,26 @@
 import { describe, expect, it } from 'vitest'
 import type { InputTriggerCandidate, InputTriggerSource } from '@deepseek-ai/dsh-client-ui-input-trigger/client'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
-import type { AppInfo } from '@matrix1001/dsh-application-harness-host-bridge/client'
+import type { AppInfo, AppStatus } from '@matrix1001/dsh-application-harness-host-bridge/client'
 import { createApplicationSource, APPLICATION_SOURCE_NAME } from '../src/client/application-source.ts'
 import type { ApplicationsState } from '../src/client/shell.ts'
 import type { PageContext, PageContextService } from '../src/client/contract.ts'
+import type { PageSourceSessions } from '../src/client/page-source.ts'
 
 const t = ((key: string) => key) as TranslateNS<'applications'>
 
-function app(id: string, status: AppInfo['status'] = 'available'): AppInfo {
+function app(id: string, status: AppStatus = 'available'): AppInfo {
   return {
     id,
     name: id,
     description: `${id} description`,
     version: '1',
-    status,
+    health: 'ok',
+    activation: 'enabled',
+    runtime: status === 'available' ? 'ready' : status === 'starting' ? 'starting' : status === 'stopping' ? 'stopping' : 'stopped',
+    needs: [],
     ops: [],
-  } as unknown as AppInfo
+  }
 }
 
 function state(apps: readonly AppInfo[] | undefined): { getSnapshot(): ApplicationsState } {
@@ -32,11 +36,16 @@ function pageContext(page: PageContext | undefined): PageContextService {
   return { current: () => page, report: () => () => {}, subscribe: () => () => {} }
 }
 
-function source(apps: readonly AppInfo[] | undefined, page?: PageContext): InputTriggerSource {
+function sessions(isOwner = true, boundApp?: string): PageSourceSessions {
+  return { isOwner: () => isOwner, boundApp: () => boundApp }
+}
+
+function source(apps: readonly AppInfo[] | undefined, page?: PageContext, ownership = sessions()): InputTriggerSource {
   return createApplicationSource(
     state(apps),
     { views: () => new Map(), register: () => () => {}, state: () => ({}) } as never,
     pageContext(page),
+    ownership,
     t,
   )
 }
@@ -52,16 +61,35 @@ describe('the application reference source', () => {
     expect(await rows(source(undefined))).toEqual([])
   })
 
-  it('offers every available application and omits the represented one', async () => {
+  it('offers every registered application with its status and omits the represented one', async () => {
     const page = { appId: 'workbook', label: 'Workbook' } as const
     const offered = await rows(source([app('workbook'), app('info-hub'), app('disk-analysis', 'stopped')], page))
-    expect(offered).toEqual([{
-      name: 'info-hub',
-      label: 'info-hub',
-      description: 'info-hub description',
-      value: '@app:info-hub',
-      section: 'reference.applications',
-    }])
+    expect(offered).toEqual([
+      {
+        name: 'info-hub',
+        label: 'info-hub',
+        description: 'info-hub description',
+        value: '@app:info-hub',
+        section: 'reference.applications',
+      },
+      {
+        name: 'disk-analysis',
+        label: 'disk-analysis',
+        description: 'disk-analysis description',
+        value: '@app:disk-analysis',
+        section: 'reference.applications',
+        hint: 'status.stopped',
+      },
+    ])
+  })
+
+  it('keeps the current application when the Session cannot attach page context', async () => {
+    const page = { appId: 'workbook', label: 'Workbook' } as const
+    const offered = await rows(source([app('workbook'), app('info-hub')], page, sessions(false)))
+    expect(offered.map(row => row.value)).toEqual(['@app:workbook', '@app:info-hub'])
+    // A development Session bound to another application also gets no page row.
+    const otherBound = await rows(source([app('workbook'), app('info-hub')], page, sessions(true, 'other')))
+    expect(otherBound.map(row => row.value)).toEqual(['@app:workbook', '@app:info-hub'])
   })
 
   it('picks the application as an application chip and serializes its token', async () => {

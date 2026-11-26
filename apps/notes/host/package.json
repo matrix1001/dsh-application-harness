@@ -1,0 +1,59 @@
+{
+  "name": "@matrix1001/dsh-application-harness-notes",
+  "version": "0.1.1",
+  "description": "The notes example application",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/types/**/*.d.ts"
+  ],
+  "license": "MIT",
+  "engines": {
+    "dsh": "0.2.3-alpha.2"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-home-paths": "0.2.3-alpha.2",
+    "@deepseek-ai/schemastery": "3.20.0-alpha.1",
+    "@matrix1001/dsh-application-harness-host-bridge": "workspace:*",
+    "@deepseek-ai/dsh-util-text-search": "0.2.3-alpha.2"
+  },
+  "peerDependencies": {
+    "@matrix1001/dsh-application-harness-runtime": "workspace:*",
+    "@matrix1001/dsh-application-harness-store": "workspace:*",
+    "@deepseek-ai/cordis": "4.2.0-alpha.1",
+    "@matrix1001/dsh-application-harness-host-bridge": "workspace:*"
+  },
+  "devDependencies": {
+    "@matrix1001/dsh-application-harness-runtime": "workspace:*",
+    "@matrix1001/dsh-application-harness-store": "workspace:*",
+    "@deepseek-ai/cordis": "4.2.0-alpha.1",
+    "@matrix1001/dsh-application-harness-host-bridge": "workspace:*"
+  },
+  "dsh": {
+    "appRow": {
+      "id": "notes",
+      "name": "@matrix1001/dsh-application-harness-notes",
+      "config": {
+        "attachmentsPath": "!!js dshHomePath('application-harness/notes/attachments')"
+      }
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/matrix1001/dsh-application-harness.git",
+    "directory": "apps/notes/host"
+  },
+  "author": "matrix1001",
+  "publishConfig": {
+    "access": "public"
+  }
+}

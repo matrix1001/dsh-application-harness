@@ -20,10 +20,11 @@
  *   node scripts/generate-bundle-patch.mjs           # 重写两处生成段
  *   node scripts/generate-bundle-patch.mjs --check   # 只校验（任一漂移 → exit 1）
  */
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { load as parseYaml } from 'js-yaml'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { appHostDirs, appViewDirs } from './package-areas.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const PATCH_PATH = join(ROOT, 'packages', 'bundle', 'app-harness', 'cordis.patch.yml')
@@ -32,7 +33,7 @@ const OVERLAY_PATH = join(ROOT, 'examples', 'web-application', 'cordis.yml')
 const MARKER = '    # --- generated application rows (do not edit below; node scripts/generate-bundle-patch.mjs) ---'
 /** The web overlay's generated machinery region: everything between these two lines is rewritten from the bundle patch. */
 const OVERLAY_MACHINERY_START = '    # --- machinery rows (generated from packages/bundle/app-harness/cordis.patch.yml; node scripts/generate-bundle-patch.mjs) ---'
-const OVERLAY_EXAMPLE_START = '    # --- example rows (hand-written: this composition demonstrates the disk-space application) ---'
+const OVERLAY_EXAMPLE_START = '    # --- example rows (hand-written: this composition demonstrates the git-browser application) ---'
 
 /**
  * The bundle patch's machinery region: the rows of its `insert:` list above its
@@ -80,23 +81,21 @@ function deployedRosters() {
 function collectRows() {
   const rows = []
   const deployed = deployedRosters()
-  for (const group of ['examples', 'client']) {
-    for (const sub of readdirSync(join(ROOT, 'packages', group)).sort()) {
-      const pkgFile = join(ROOT, 'packages', group, sub, 'package.json')
-      if (!existsSync(pkgFile)) continue
-      let pkg
-      try {
-        pkg = JSON.parse(readFileSync(pkgFile, 'utf8'))
-      } catch {
-        continue
-      }
-      const row = pkg === null || typeof pkg !== 'object' ? undefined : pkg.dsh?.appRow
-      if (row === undefined) continue
-      if (group === 'examples' && !deployed.applications.has(pkg.name)) continue
-      if (group === 'client' && !deployed.clients.has(pkg.name)) continue
-      rows.push(row)
+  const readRow = (dir, allowed) => {
+    const pkgFile = join(dir, 'package.json')
+    if (!existsSync(pkgFile)) return
+    let pkg
+    try {
+      pkg = JSON.parse(readFileSync(pkgFile, 'utf8'))
+    } catch {
+      return
     }
+    const row = pkg === null || typeof pkg !== 'object' ? undefined : pkg.dsh?.appRow
+    if (row === undefined || !allowed.has(pkg.name)) return
+    rows.push(row)
   }
+  for (const dir of appHostDirs(ROOT)) readRow(dir, deployed.applications)
+  for (const dir of appViewDirs(ROOT)) readRow(dir, deployed.clients)
   return rows
 }
 

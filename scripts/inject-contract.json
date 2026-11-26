@@ -4,16 +4,14 @@
       "@deepseek-ai/dsh-client-ui-renderer",
       "@deepseek-ai/dsh-client-locale",
       "@deepseek-ai/dsh-client-ui-layout",
-      "@deepseek-ai/dsh-client-ui-input-trigger"
+      "@deepseek-ai/dsh-client-ui-input-trigger",
+      "@deepseek-ai/dsh-client-ui-session-status"
     ],
-    "@matrix1001/dsh-application-harness-notes-view": [],
-    "@matrix1001/dsh-application-harness-tasks-view": [],
-    "@matrix1001/dsh-application-harness-calendar-view": [],
-    "@matrix1001/dsh-application-harness-inbox-view": [],
-    "@matrix1001/dsh-application-harness-usage-view": [],
-    "@matrix1001/dsh-application-harness-disk-space-view": [],
     "@matrix1001/dsh-application-harness-git-browser-view": [],
-    "@matrix1001/dsh-application-harness-workspace-review-view": []
+    "@matrix1001/dsh-application-harness-home-view": [],
+    "@matrix1001/dsh-application-harness-inbox-view": [],
+    "@matrix1001/dsh-application-harness-notes-view": [],
+    "@matrix1001/dsh-application-harness-todo-view": []
   },
   "external": {}
 }

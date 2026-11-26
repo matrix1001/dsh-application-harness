@@ -13,7 +13,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { AppError, apply as applyRuntime, mountApplication } from '@matrix1001/dsh-application-harness-runtime'
 import type { ApplicationRuntime, AppDeclaration } from '@matrix1001/dsh-application-harness-runtime'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
-import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type { ToolDefinition, ToolRegistrationOptions, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import * as ToolBridge from '../src/index.ts'
 import { APPLICATIONS_TOOL } from '../src/index.ts'
 
@@ -21,20 +21,27 @@ import { APPLICATIONS_TOOL } from '../src/index.ts'
 export class StubTools {
   /** Every currently registered definition, by name. */
   readonly definitions = new Map<string, ToolDefinition>()
+  /** The registration options each definition was installed with, by name. */
+  readonly options = new Map<string, ToolRegistrationOptions | undefined>()
   /** Names another package already owns; a registration for one fails like the real registry. */
   readonly occupied = new Set<string>()
 
   /**
    * Register one definition.
    * @param definition - the tool definition.
+   * @param options - the registration options (the step-time visibility condition).
    * @returns the exact disposer that unregisters it.
    */
-  register(definition: ToolDefinition): () => void {
+  register(definition: ToolDefinition, options?: ToolRegistrationOptions): () => void {
     if (this.definitions.has(definition.name) || this.occupied.has(definition.name)) {
       throw new Error(`tool "${definition.name}" is already registered`)
     }
     this.definitions.set(definition.name, definition)
-    return () => { this.definitions.delete(definition.name) }
+    this.options.set(definition.name, options)
+    return () => {
+      this.definitions.delete(definition.name)
+      this.options.delete(definition.name)
+    }
   }
 
   /** One registered definition, by name. */

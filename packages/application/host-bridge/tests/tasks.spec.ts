@@ -41,7 +41,7 @@ function taskApp(): AppDeclaration {
           { kind: 'scan', title: 'Scan', externalId: 'scan-1', requestId: 'req-1' },
           async (task) => {
             await new Promise<void>((_resolve, reject) => {
-              task.signal.addEventListener('abort', () => { reject(new DOMException('aborted', 'AbortError')) }, { once: true })
+              task.signal.addEventListener('abort', () => { reject(task.signal.reason) }, { once: true })
             })
             return 'done'
           },

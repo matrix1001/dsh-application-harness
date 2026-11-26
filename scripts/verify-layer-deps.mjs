@@ -39,8 +39,11 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const LAYERS = new Map()
 for (const name of ['runtime']) LAYERS.set(`packages/application/${name}`, 'core')
 for (const name of ['host-bridge', 'tool-bridge', 'context', 'http', 'store']) LAYERS.set(`packages/application/${name}`, 'linkage')
-for (const name of ['applications', 'chrome', 'object-reference', 'notes-view', 'tasks-view', 'calendar-view', 'inbox-view', 'usage-view', 'disk-space-view', 'git-browser-view', 'workspace-review-view']) LAYERS.set(`packages/client/${name}`, 'client')
-for (const name of ['notes', 'tasks', 'calendar', 'inbox', 'usage', 'disk-space', 'git-browser', 'workspace-review']) LAYERS.set(`packages/examples/${name}`, 'app')
+for (const name of ['applications', 'chrome', 'object-reference']) LAYERS.set(`packages/client/${name}`, 'client')
+for (const app of ['home', 'notes', 'todo', 'inbox', 'git-browser']) {
+  LAYERS.set(`apps/${app}/host`, 'app')
+  LAYERS.set(`apps/${app}/view`, 'client')
+}
 LAYERS.set('packages/bundle/app-harness', 'app')
 
 /**
@@ -58,7 +61,10 @@ const OUTSIDE_LAYERS = new Map([
 // The roster must be TOTAL: every workspace package is either layered above or
 // exempted above, so a new package cannot enter the tree unclassified (and thus
 // unchecked as both an importer and a target).
-const unclassified = globSync('packages/*/*/package.json', { cwd: ROOT })
+const unclassified = [
+  ...globSync('packages/*/*/package.json', { cwd: ROOT }),
+  ...globSync('apps/*/*/package.json', { cwd: ROOT }),
+]
   .map((manifest) => dirname(manifest))
   .filter((dir) => !LAYERS.has(dir) && !OUTSIDE_LAYERS.has(dir))
 if (unclassified.length > 0) {
@@ -93,7 +99,6 @@ const ALLOWED = new Set([
   'client->client',
   'app->core',
   'app->linkage',
-  'app->app',
   // The client face names the wire vocabulary (`/client`, `/types`) of the
   // linkage layer; the purity gate is what keeps that from becoming an
   // implementation edge.
@@ -111,6 +116,14 @@ for (const file of files) {
   for (const [, typeOnly, specifier] of importers) {
     const target = layerOfSpecifier(specifier)
     if (target === undefined || target === layer) continue
+    if (layer === 'client' && target === 'linkage') {
+      // The client face names only the browser-safe wire vocabulary of the
+      // linkage layer, never an implementation entry.
+      if (!/\/(?:client|types|remote)$/u.test(specifier)) {
+        problems.push(`${relative(ROOT, join(ROOT, file))}: client imports linkage implementation (${specifier}) — only /client, /types or /remote subpaths are allowed`)
+      }
+      continue
+    }
     if (ALLOWED.has(`${layer}->${target}`)) continue
     // A client package may *name* a core type: the wire vocabulary is erased
     // at runtime.

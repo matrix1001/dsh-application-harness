@@ -32,11 +32,63 @@
  * @module @matrix1001/dsh-application-harness-host-bridge/types
  */
 
-import type { Activation, AppHealth, AppReason, AppStatus, Caller, OpExposure, ProcessCommandDeclaration, RuntimeState } from '@matrix1001/dsh-application-harness-runtime/types'
+import type { Activation, AppHealth, AppReason, Caller, OpExposure, ProcessDeclaration, RuntimeState, ObjectResolution } from '@matrix1001/dsh-application-harness-runtime/types'
 
 export type {
   Activation, RuntimeState, AppHealth, AppReason, AppStatus, Caller, CapabilityGrant, Exposure, FailureCode, ObjectRef, ObjectResolution, ObjectTypeDeclaration, OpExposure, OperationPolicy, OperationPolicyEntry, RejectionCode,
+  AppDelegation, AppDelegationAccess, DelegationCreateInput, ProcessDeclaration, ProcessDescriptor, ProcessAccess,
 } from '@matrix1001/dsh-application-harness-runtime/types'
+
+/**
+ * One delegation's state, in wire form. Declared here (not aliased from the
+ * runtime) because a Remote boundary type and every recursive type under it
+ * must be owned by this face; the runtime's application-facing vocabulary is
+ * the same fact, and the bridge's tests pin the two together.
+ */
+export type DelegationStatus = 'pending' | 'active' | 'needs-person' | 'ended'
+
+/** Why a delegation ended, in wire form. */
+export type DelegationOutcome = 'completed' | 'failed' | 'cancelled' | 'interrupted' | 'unavailable'
+
+/** The execution Session's structured report, in wire form. */
+export interface DelegationReport {
+  /** What the Session reports. */
+  readonly outcome: 'completed' | 'blocked' | 'failed'
+  /** Readable summary of what happened. */
+  readonly summary: string
+  /** The concrete question a `blocked` report asks. */
+  readonly question?: string
+  /** Application-shaped payload; never conversation text. */
+  readonly details?: JsonValue
+}
+
+/**
+ * One delegation as the browser's management surface reads it. This is the
+ * HUMAN-facing record: it carries the bound `sessionId` so the platform's
+ * `openDelegation` action can show the execution, while the application-facing
+ * port deliberately omits it. `instructions` is what the human reviews before
+ * sending; the execution Session's transcript is never part of this record.
+ */
+export interface DelegationInfo {
+  /** Platform-assigned identity. */
+  readonly id: string
+  /** The application that prepared and owns the delegation. */
+  readonly appId: string
+  /** Short display title the application prepared. */
+  readonly title: string
+  /** The application's instructions, snapshotted at creation. */
+  readonly instructions: string
+  /** Delegation state (not an application status). */
+  readonly status: DelegationStatus
+  /** Why it ended; present exactly when `status` is `ended`. */
+  readonly outcome?: DelegationOutcome
+  /** The application-area Session the delegation was sent to, after a human sends it. */
+  readonly sessionId?: string
+  /** The newest report the execution Session wrote. */
+  readonly latestReport?: DelegationReport
+  readonly createdAt: string
+  readonly updatedAt: string
+}
 
 /**
  * One progress notification, bound to the call that reported it — the runtime's
@@ -258,10 +310,6 @@ export interface AppDataDescription {
   readonly namespace?: string
   readonly path?: string
   readonly schemaVersion?: number
-  readonly backup?: 'include' | 'exclude'
-  readonly exportOp?: string
-  readonly importOp?: string
-  readonly secretFields?: readonly string[]
 }
 
 /** One application the host runs, as the browser sees it. */
@@ -276,47 +324,39 @@ export interface AppInfo {
   readonly version: string
   /** The user's fixed model route; absent means follow the platform default. */
   readonly model?: { readonly provider: string; readonly model: string }
-  /** The lifecycle state right now (legacy detailed state). */
-  readonly status: AppStatus
   /** The four public runtime states. */
   readonly runtime: RuntimeState
   /** User activation: disabled applications stay visible and stopped. */
   readonly activation: Activation
-  /** Why start failed; present exactly when `status` is `failed`. */
-  readonly failure?: string
-  /** Health beside the lifecycle state. */
-  readonly health: AppHealth
+  /** True when the durable activation table could not be read; all applications stay disabled until it is repaired. */
+  readonly activationUnavailable?: boolean
+  /** Health beside the runtime state; present only while the application is ready. */
+  readonly health?: AppHealth
   /** Stable reason for a degraded/blocked state, when one applies. */
   readonly reason?: AppReason
+  /** Readable diagnostic detail: start failure, health reason, maintenance. */
+  readonly detail?: string
   /**
    * Everything this application's declaration says it needs, each named the way
    * a grant records it: `capability:<name>` for a declared platform capability,
-   * `<appId>#<op>` for an operation of a declared peer it may call that is
-   * actually open to peers. It is a statement of need, NOT a grant — the panel
-   * offers each one for approval, and the runtime refuses a use the declaration
-   * (or the effective grants) does not cover.
+   * `event:<appId>#<type>` for a declared subscription to an event that is
+   * actually open. It is a statement of need, NOT a grant — the panel offers
+   * each one for approval, and the runtime refuses a use the declaration (or
+   * the effective grants) does not cover.
    */
   readonly needs: readonly string[]
   /** The application's operations, in declaration order. */
   readonly ops: readonly AppOp[]
+  /** Executables and commands this application declared for review. */
+  readonly process?: readonly ProcessDeclaration[]
   /** Events this application publishes, when it declares any. */
   readonly events?: readonly AppEventInfo[]
-  /** Process commands the application declares, for display/review only. */
-  readonly process?: readonly ProcessCommandDeclaration[]
   /** Object types the application exposes for cross-application references. */
   readonly objectTypes?: readonly AppObjectTypeInfo[]
-  /** Pages the application exposes to the owner-session page service. */
-  readonly pages?: readonly AppPageInfo[]
   /** Declared cross-application calls and event subscriptions. */
   readonly connections?: readonly AppConnectionInfo[]
   /** Durable-data description, when the application declared one. */
   readonly data?: AppDataDescription
-}
-
-/** One declared application credential and whether it is set. */
-export interface AppCredentialStatus {
-  readonly name: string
-  readonly set: boolean
 }
 
 /** One declared cross-application connection. */
@@ -370,13 +410,6 @@ export interface ModelCatalog {
   }[]
 }
 
-/** One page declaration, as the management UI shows it. */
-export interface AppPageInfo {
-  readonly view: string
-  readonly description: string
-  readonly actions: readonly import('@matrix1001/dsh-application-harness-runtime/types').PageActionName[]
-}
-
 /** One resolvable object type, as the management UI shows it. */
 export interface AppObjectTypeInfo {
   readonly type: string
@@ -397,6 +430,17 @@ export interface OutcomeError {
   readonly message: string
   readonly details?: JsonValue
 }
+
+/**
+ * One reference resolution's outcome on the wire: the display facts, or the
+ * owning operation's own stable reason. Declared here (not aliased from the
+ * runtime) because a Remote boundary type must be owned by this face; the
+ * bridge method returns the runtime's result, so a structural drift between the
+ * two fails to compile instead of reaching the wire.
+ */
+export type ObjectResolutionResult =
+  | { readonly ok: true; readonly value: ObjectResolution }
+  | { readonly ok: false; readonly error: OutcomeError }
 
 /**
  * One call's outcome on the wire: the runtime's own five-way result, carried
@@ -447,6 +491,8 @@ export interface HistoryRecord {
   readonly code?: string
   /** Failure/rejection message (never full arguments or results). */
   readonly message?: string
+  /** The command label of one process use; absent for operation calls. */
+  readonly command?: string
 }
 
 /**
@@ -479,6 +525,10 @@ export interface PendingConfirmation {
   readonly capability: string
   /** What the user is being asked to allow, in words. */
   readonly reason: string
+  /** The call's bounded, redacted arguments and effect, when the runtime supplied them. */
+  readonly preview?: { readonly effect: 'read' | 'write'; readonly args: string }
+  /** The Session that owns the question, when the caller has one. */
+  readonly sessionId?: string
   /** Host stamp (ISO-8601) of when the question was asked. */
   readonly at: string
 }
@@ -524,8 +574,12 @@ export interface AppDataInfo {
   readonly appId: string
   /** The database path, or `:memory:` when this deployment has no durable store. */
   readonly path: string
-  /** Current database file size, when it has a file. */
+  /** Current database file size (the main file only), when it has a file. */
   readonly byteSize?: number
+  /** Current SQLite WAL size, when a WAL file exists. */
+  readonly walByteSize?: number
+  /** Main file + WAL; the size a human should compare against disk. */
+  readonly totalByteSize?: number
   /** The highest document schema version this application currently holds (0 when empty). */
   readonly schemaVersion: number
   /** The number of named document scopes. */
@@ -536,8 +590,6 @@ export interface AppDataInfo {
   readonly backups: readonly AppDataBackup[]
   /** Every pre-import snapshot beside this database (including those beyond the recent five). */
   readonly backupCount: number
-  /** One-way legacy JSON imports this namespace recorded (`legacy-*` meta keys). */
-  readonly legacyImports: Readonly<Record<string, string>>
 }
 
 /** One pre-import database snapshot discovered beside the unified store. */
@@ -572,13 +624,13 @@ export interface AppDataImportPreview {
   readonly overwrittenCollectionItems: number
   readonly removedCollectionItems: number
   /** Short-lived plan token; the import commit must present it. */
-  readonly planId?: string
+  readonly planId: string
   /** Epoch ms after which the plan is refused. */
-  readonly expiresAt?: number
+  readonly expiresAt: number
 }
 
 /** The committed import's answer, including the pre-import backup. */
-export interface AppDataImportResult extends AppDataImportPreview {
+export interface AppDataImportResult extends Omit<AppDataImportPreview, 'planId' | 'expiresAt'> {
   /** The consistent database snapshot taken before the write. */
   readonly backupPath: string
   /**
@@ -631,9 +683,9 @@ export interface AppDataRestorePreview {
   /** One-shot optimistic guard: the restore rejects if this no longer matches. */
   readonly previewFingerprint: string
   /** Short-lived plan token; the restore commit must present it. */
-  readonly planId?: string
+  readonly planId: string
   /** Epoch ms after which the plan is refused. */
-  readonly expiresAt?: number
+  readonly expiresAt: number
 }
 
 /** The committed restore's answer. */
@@ -689,6 +741,13 @@ export interface WatchPageCommand {
   readonly command: PageCommand
 }
 
+/** The visible page instance went away; the owner client drops page-scoped state. */
+export interface WatchPageClosed {
+  readonly kind: 'page-closed'
+  readonly sessionId: string
+  readonly pageId: string
+}
+
 /** One watch stream overflowed; the client re-reads all derived state and continues. */
 export interface WatchReset {
   readonly kind: 'reset'
@@ -704,5 +763,6 @@ export type WatchEvent =
   | WatchProgress
   | WatchTask
   | WatchPageCommand
+  | WatchPageClosed
   | WatchConfirmationAsked
   | WatchConfirmationSettled

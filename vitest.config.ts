@@ -52,7 +52,7 @@ const pathsPlugin = (): ReturnType<typeof tsconfigPaths> =>
 export default defineConfig({
   plugins: [standardDecoratorPlugin(), pathsPlugin()],
   test: {
-    include: ['packages/*/*/tests/**/*.spec.ts', 'packages/*/*/tests/**/*.spec.tsx'],
+    include: ['packages/*/*/tests/**/*.spec.ts', 'packages/*/*/tests/**/*.spec.tsx', 'apps/*/*/tests/**/*.spec.ts', 'apps/*/*/tests/**/*.spec.tsx'],
     exclude: ['node_modules/**'],
     server: {
       deps: {
@@ -65,37 +65,18 @@ export default defineConfig({
     },
     coverage: {
       provider: 'v8',
-      include: ['packages/*/*/src/**'],
+      include: ['packages/*/*/src/**', 'apps/*/*/src/**'],
       // packages/typert/protocol is the typert generator's build-only
-      // registration shell (Task 1 deviation): its src/ is a vendored snapshot
-      // that follows the platform checkout, never loaded by tests, so it can
-      // never be executed and would hold the per-file 100% gate red forever.
+      // registration shell: its src/ mirrors the installed protocol package,
+      // is never loaded by tests, and a per-file rule could never be satisfied.
       exclude: ['packages/typert/protocol/**'],
-      // Tiered coverage (2026-09-07 拍板, 批 A1; the consolidated plan that
-      // ruled it now lives only in git history). The policy — which files land
-      // in which tier, and why — lives in THIS object, the numeric source of
-      // truth AGENTS.md 修改与验证 defers to. One trap that must stay
-      // beside it, because it silently defeats the object below: vitest builds
-      // one threshold set per glob key and checks every matching file against
-      // EVERY set (AND semantics, no cross-set skip — verified in vitest 4.1.8
-      // resolveThresholds/checkThresholds), so a `**` catch-all would re-apply
-      // 100% branches to every client .tsx and kill the display tier. The two
-      // keys below are a complementary partition; keep them that way.
-      thresholds: {
-        perFile: true,
-        'packages/client/**/*.tsx': {
-          lines: 100,
-          statements: 100,
-          functions: 100,
-          branches: 80,
-        },
-        '**/*.ts': {
-          lines: 100,
-          statements: 100,
-          functions: 100,
-          branches: 100,
-        },
-      },
+      // The coverage policy lives in scripts/check-coverage-policy.mjs:
+      // per-file 100% for the packages/application contracts, an aggregate
+      // floor elsewhere, and the exemption list. Vitest only reports here —
+      // its per-file thresholds cannot express two tiers, and a threshold
+      // failure names the file but not the missing lines. Run
+      // `node scripts/uncovered-locations.mjs` for exact locations.
+      reporter: ['text', 'json'],
     },
   },
 })

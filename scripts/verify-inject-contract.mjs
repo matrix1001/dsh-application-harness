@@ -15,6 +15,7 @@
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
+import { packageDirs } from './package-areas.mjs'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -23,17 +24,11 @@ const CONTRACT_PATH = join(ROOT, 'scripts', 'inject-contract.json')
 /** Collect `{ packageName -> edges[] }` for every workspace package declaring the given `dsh.client` key. */
 function collect(root, key) {
   const declared = new Map()
-  for (const group of ['application', 'client', 'examples', 'bundle']) {
-    const groupDir = join(root, 'packages', group)
-    if (!existsSync(groupDir)) continue
-    for (const dir of readdirSync(groupDir)) {
-      const pkgPath = join(groupDir, dir, 'package.json')
-      if (!existsSync(pkgPath)) continue
-      const manifest = JSON.parse(readFileSync(pkgPath, 'utf8'))
-      const edges = manifest.dsh?.client?.[key]
-      if (edges === undefined) continue
-      declared.set(manifest.name, edges)
-    }
+  for (const dir of packageDirs(root)) {
+    const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
+    const edges = manifest.dsh?.client?.[key]
+    if (edges === undefined) continue
+    declared.set(manifest.name, edges)
   }
   return declared
 }

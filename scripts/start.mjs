@@ -6,8 +6,8 @@
  * links many workspace packages into a profile and serves built host/client
  * artifacts. `pnpm start` therefore owns the one thing a user should remember:
  * ensure the profile exists (first run), optionally rebuild, then hand off to
- * the checkout launcher (`scripts/launch-apps.mjs`), which runs the artifact /
- * workspace preflight and starts the checkout's own dsh.
+ * the launch wrapper (`scripts/launch-apps.mjs`), which runs the artifact /
+ * workspace preflight and starts the installed npm platform line's dsh.
  *
  * It deliberately does NOT run `setup` when the profile already exists: setup
  * refreshes the profile and installs its dependencies, which is not a daily
@@ -57,10 +57,10 @@ function usage() {
     + `  --build       run \`pnpm run build:dev\` before starting\n`
     + `  --no-setup    fail if the profile is missing instead of bootstrapping it\n`
     + `  --profile <n> profile name (forwarded to launch-apps; default: ${PROFILE_DEFAULT})\n`
-    + `  --checkout <path> platform checkout (forwarded to launch-apps)\n`
     + `  --no-open     open no browser (forwarded to dsh)\n`
-    + `\nThe daily launcher is scripts/launch-apps.mjs: it checks the checkout, the\n`
-    + `profile links and the built artifacts before starting dsh in the workspace.\n`)
+    + `\nThe daily launcher is scripts/launch-apps.mjs: it checks the installed\n`
+    + `platform line, the profile links and the built artifacts before starting\n`
+    + `dsh in the workspace.\n`)
 }
 
 /** Find the profile name in the forwarded launcher arguments. */
@@ -92,6 +92,11 @@ function main() {
   const parsed = parseStartArgs(process.argv.slice(2))
   if (parsed.help) {
     usage()
+    return
+  }
+  if (parsed.forward.some(arg => arg === '--checkout' || arg.startsWith('--checkout='))) {
+    process.stderr.write('[start] --checkout is no longer supported; pnpm start always uses the installed npm platform line\n')
+    process.exitCode = 1
     return
   }
   const profile = profileOf(parsed.forward)

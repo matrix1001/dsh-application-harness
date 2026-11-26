@@ -1,56 +1,86 @@
 #!/usr/bin/env node
 /**
  * The tests typecheck gate (`pnpm run typecheck:tests`): run
- * `tsc -p tsconfig.tests.json` over every package's test files, then filter
- * the report through a fail-closed decision.
+ * `tsc -p tsconfig.tests.json` over every package's test files and decide the
+ * verdict fail-closed.
  *
- * Platform packages resolve through node_modules (published lib), except the
- * vendored client sources under `.platform-src/` (see its README). Those
- * vendored files are platform code checked under the platform's own tsconfig
- * upstream, so this program's strict settings flag them wholesale; the
- * decision filters those diagnostics and exits nonzero only when OUR files
- * (anything outside `.platform-src/`) fail. The tests program itself is the
- * gate: our test files must typecheck clean, and any error in them fails the
- * run.
+ * Platform packages resolve through `node_modules` except the client suites'
+ * source fixture under `.platform-src/` (generated from the installed line by
+ * `scripts/sync-platform-fixture.mjs`). Those files are platform code, checked
+ * by the platform against its own tsconfig, so this program's strict settings
+ * flag them wholesale; the decision keeps those diagnostics out and fails on
+ * anything else. Every remaining diagnostic is ours or a config problem.
  *
- * Fail-closed (audit C-I2): a nonzero tsc exit is green ONLY when every error
- * line in the raw output belongs to `.platform-src/` — and the process was
- * not killed by a signal and the output carries no crash marker (OOM,
- * segfault, internal error). Any other nonzero exit — a crash, an OOM, a
- * config error (diagnostics without a file location header), or any kept
- * non-vendored error line — exits 1. A crash silently truncates the
+ * The fixture diagnostics are not ignored silently: their count and TS-code
+ * histogram are recorded in `scripts/platform-fixture-diagnostics.json` and
+ * must match on every run. A platform line whose fixture noise changes fails
+ * the gate with the difference, and `--update-fixture-baseline` records the
+ * new baseline as a deliberate part of that port.
+ *
+ * Fail-closed (audit C-I2): a nonzero tsc exit fails UNLESS it is provably a
+ * clean diagnostic report — the process was not killed by a signal, the
+ * output carries no crash marker (OOM, segfault, internal error), and at
+ * least one `error TS` line exists. A crash silently truncates the
  * diagnostic list, so a header-less report after a nonzero exit can never be
- * mistaken for "only vendored noise".
+ * mistaken for "nothing to report".
  *
  * The gate self-checks: every run first asserts the fail-closed decision
  * logic against canned outputs (including a child-process crash simulation)
  * and aborts with exit 1 if the wrapper itself regresses.
  *
- * Usage: node scripts/typecheck-tests.mjs [--self-test]
- *   --self-test  run the self-test alone (no tsc run) and exit by its result.
+ * Usage: node scripts/typecheck-tests.mjs [--self-test] [--update-fixture-baseline]
+ *   --self-test                  run the self-test alone (no tsc run) and exit by its result.
+ *   --update-fixture-baseline    record the current fixture diagnostics after a deliberate platform port.
  */
 import { spawnSync } from 'node:child_process'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 const repoRoot = resolve(new URL('..', import.meta.url).pathname)
 const thisScript = resolve(new URL(import.meta.url).pathname)
 const tsc = resolve(repoRoot, 'node_modules/typescript/bin/tsc')
+const BASELINE = resolve(repoRoot, 'scripts/platform-fixture-diagnostics.json')
 
 /**
  * Crash markers that make any nonzero exit a hard failure: a partial run's
- * .platform-only report cannot be trusted after an OOM or a signal.
+ * report cannot be trusted after an OOM or a signal.
  * (Ordinary tsc diagnostics never contain these phrases.)
  */
 const CRASH_MARKERS = /(fatal error|heap out of memory|allocation failed|out of memory|segmentation fault|internal error)/i
+
+/** The fixture-diagnostic fingerprint: total count plus a TS-code histogram. */
+function fingerprint(lines) {
+  const codes = {}
+  for (const line of lines) {
+    const match = /error (TS\d+)/u.exec(line)
+    if (match === null) continue
+    codes[match[1]] = (codes[match[1]] ?? 0) + 1
+  }
+  return { count: lines.length, codes: Object.fromEntries(Object.entries(codes).sort(([a], [b]) => a.localeCompare(b))) }
+}
+
+/** Whether two fingerprints describe the same fixture noise. */
+function sameFingerprint(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
+/** Read the recorded fixture-diagnostic baseline, or undefined. */
+function readBaseline() {
+  try {
+    return JSON.parse(readFileSync(BASELINE, 'utf8'))
+  } catch {
+    return undefined
+  }
+}
 
 /**
  * Decide the gate's verdict from a raw tsc run result.
  * @param result - a spawnSync-shaped result: { error?, status, signal, stdout, stderr }.
  * @returns { green: boolean, ours: number, message: string } — `ours` is the
- *   number of kept non-`.platform` error lines, or -1 when the run cannot be
- *   attributed to diagnostics at all (crash/OOM/config error).
+ *   number of `error TS` lines, or -1 when the run cannot be attributed to
+ *   diagnostics at all (crash/OOM/config error).
  */
-function decide(result) {
+function decide(result, baseline) {
   const raw = `${result.stdout ?? ''}${result.stderr ?? ''}`
   if (result.error) {
     return { green: false, ours: -1, message: `typecheck-tests: failed to run tsc: ${result.error.message}` }
@@ -61,41 +91,36 @@ function decide(result) {
   if (result.status === 0) {
     return { green: true, ours: 0, message: 'typecheck-tests: OK — no errors.' }
   }
-  // status !== 0: fail closed unless every error line is .platform noise.
   if (CRASH_MARKERS.test(raw)) {
     return { green: false, ours: -1, message: 'typecheck-tests: tsc output carries a crash marker (OOM/segfault/internal error) — failing closed.' }
   }
   const errorLines = raw.split('\n').filter((line) => /error TS/.test(line))
-  // Kept errors: not a file-located `.platform` diagnostic header (includes
-  // our packages' files and unlocated/config diagnostics alike).
-  const nonPlatform = errorLines.filter((line) => {
-    const header = line.match(/^(.*?)\(\d+,\d+\): error TS/)
-    return header === null || !header[1].startsWith('.platform')
-  })
-  if (errorLines.length > 0 && nonPlatform.length === 0) {
-    return { green: true, ours: 0, message: "typecheck-tests: only .platform mirror noise (vendored src, checked under its own tsconfig) — filtered." }
-  }
   if (errorLines.length === 0) {
     return { green: false, ours: -1, message: `typecheck-tests: tsc exited ${result.status} without diagnostic headers (crash, OOM, or config error) — failing closed.` }
   }
-  return { green: false, ours: nonPlatform.length, message: `typecheck-tests: ${nonPlatform.length} error(s) outside .platform (our packages' files or unlocated/config diagnostics) — failing.` }
-}
-
-/**
- * Build the report: drop .platform diagnostic headers and their detail lines.
- * @param result - a spawnSync-shaped result.
- * @returns the kept (non-`.platform`) output, trimmed.
- */
-function filteredReport(result) {
-  const lines = `${result.stdout ?? ''}${result.stderr ?? ''}`.split('\n')
-  const kept = []
-  let dropping = false
-  for (const line of lines) {
-    const header = line.match(/^(.*?)\(\d+,\d+\): error TS/)
-    if (header) dropping = header[1].startsWith('.platform')
-    if (!dropping) kept.push(line)
+  const fixture = []
+  const ours = []
+  for (const line of errorLines) {
+    const header = /^(.*?)\(\d+,\d+\): error TS/.exec(line)
+    if (header !== null && header[1].startsWith('.platform-src')) fixture.push(line)
+    else ours.push(line)
   }
-  return kept.join('\n').trim()
+  if (ours.length > 0) {
+    return { green: false, ours: ours.length, message: `typecheck-tests: ${ours.length} type error(s) outside the platform fixture — failing.` }
+  }
+  if (fixture.length === 0) {
+    return { green: true, ours: 0, fixture: { count: 0, codes: {} }, message: 'typecheck-tests: OK — no errors.' }
+  }
+  const print = fingerprint(fixture)
+  if (baseline !== undefined && sameFingerprint(print, baseline)) {
+    return { green: true, ours: 0, fixture: print, message: `typecheck-tests: ${fixture.length} platform-fixture diagnostic(s) match the recorded baseline.` }
+  }
+  return {
+    green: false,
+    ours: 0,
+    fixture: print,
+    message: `typecheck-tests: platform-fixture diagnostics changed (recorded ${baseline === undefined ? 'none' : JSON.stringify(baseline)}, now ${JSON.stringify(print)}) — review and run with --update-fixture-baseline as part of the platform port.`,
+  }
 }
 
 // ── Self-test ────────────────────────────────────────────────────────────────
@@ -113,15 +138,30 @@ if (process.argv.includes('--self-test-child-crash')) {
   process.exit(verdict.green ? 0 : 1)
 }
 
+if (process.argv.includes('--update-fixture-baseline')) {
+  const env = { ...process.env }
+  delete env.npm_command
+  const result = spawnSync(process.execPath, [tsc, '-p', 'tsconfig.tests.json'], { cwd: repoRoot, env, encoding: 'utf8' })
+  const raw = `${result.stdout ?? ''}${result.stderr ?? ''}`
+  const fixture = raw.split('\n').filter((line) => {
+    const header = /^(.*?)\(\d+,\d+\): error TS/.exec(line)
+    return header !== null && header[1].startsWith('.platform-src')
+  })
+  const next = fingerprint(fixture)
+  writeFileSync(BASELINE, `${JSON.stringify(next, undefined, 2)}\n`)
+  console.log(`typecheck-tests: recorded ${next.count} platform-fixture diagnostic(s) in ${BASELINE}`)
+  process.exit(0)
+}
+
 if (process.argv.includes('--self-test')) {
   const cases = [
     ['crash output (no error TS)', decide({ status: 1, signal: null, stdout: '', stderr: 'FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory' }), false],
     ['silent nonzero exit (no diagnostics)', decide({ status: 1, signal: null, stdout: '', stderr: '' }), false],
     ['killed by signal', decide({ status: null, signal: 'SIGSEGV', stdout: '', stderr: '' }), false],
     ['config error (no file location header)', decide({ status: 1, signal: null, stdout: "error TS5023: Unknown compiler option 'nope'.\n", stderr: '' }), false],
-    ['all .platform noise', decide({ status: 1, signal: null, stdout: '.platform/dsh-foo/src/index.ts(1,2): error TS1234: nope\n  detail line\n', stderr: '' }), true],
     ['our own error', decide({ status: 1, signal: null, stdout: 'packages/client/chrome/tests/x.spec.ts(3,4): error TS2322: bad\n', stderr: '' }), false],
-    ['mixed .platform + our error', decide({ status: 1, signal: null, stdout: '.platform/dsh-foo/src/index.ts(1,2): error TS1234: nope\npackages/client/chrome/tests/x.spec.ts(3,4): error TS2322: bad\n', stderr: '' }), false],
+    ['only recorded platform-fixture noise', decide({ status: 1, signal: null, stdout: '.platform-src/dsh-x/src/a.ts(1,2): error TS1234: nope\n', stderr: '' }, { count: 1, codes: { TS1234: 1 } }), true],
+    ['changed platform-fixture noise', decide({ status: 1, signal: null, stdout: '.platform-src/dsh-x/src/a.ts(1,2): error TS9999: nope\n', stderr: '' }, { count: 1, codes: { TS1234: 1 } }), false],
     ['clean success', decide({ status: 0, signal: null, stdout: '', stderr: '' }), true],
   ]
   let failed = 0
@@ -149,7 +189,6 @@ if (process.argv.includes('--self-test')) {
     [decide({ status: 1, signal: null, stdout: '', stderr: '' }), false],
     [decide({ status: null, signal: 'SIGSEGV', stdout: '', stderr: '' }), false],
     [decide({ status: 1, signal: null, stdout: "error TS5023: Unknown compiler option 'nope'.\n", stderr: '' }), false],
-    [decide({ status: 1, signal: null, stdout: '.platform/dsh-foo/src/index.ts(1,2): error TS1234: nope\n', stderr: '' }), true],
     [decide({ status: 1, signal: null, stdout: 'packages/client/chrome/tests/x.spec.ts(3,4): error TS2322: bad\n', stderr: '' }), false],
     [decide({ status: 0, signal: null, stdout: '', stderr: '' }), true],
   ]
@@ -175,12 +214,18 @@ const result = spawnSync(process.execPath, [tsc, '-p', 'tsconfig.tests.json'], {
   encoding: 'utf8',
 })
 
-const report = filteredReport(result)
-if (report) console.log(report)
-
-const verdict = decide(result)
-console.log(verdict.message)
-if (verdict.green && result.status !== 0) {
-  console.log('typecheck-tests: OK — no errors in our packages\' test files.')
+const raw = `${result.stdout ?? ''}${result.stderr ?? ''}`.trim()
+if (raw) {
+  const kept = []
+  let dropping = false
+  for (const line of raw.split('\n')) {
+    const header = /^(.*?)\(\d+,\d+\): error TS/.exec(line)
+    if (header) dropping = header[1].startsWith('.platform-src')
+    if (!dropping) kept.push(line)
+  }
+  if (kept.length > 0) console.log(kept.join('\n'))
 }
+
+const verdict = decide(result, readBaseline())
+console.log(verdict.message)
 process.exit(verdict.green ? 0 : 1)

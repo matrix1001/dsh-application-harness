@@ -14,7 +14,7 @@
  *      refresh the browser, no dsh restart).
  *   2. verify every deployed application-harness package entry points back at this
  *      workspace (a missing entry means the profile was never set up or was
- *      rebuilt without this checkout).
+ *      rebuilt without this repository).
  *   3. remind you that a host-side change needs a rebuild (and a restart unless
  *      a recomposition replaces the linked package first).
  *
@@ -87,4 +87,4 @@ if (missing.length > 0) {
 console.log(`\n[dev-apps] profile: ${PROFILE} @ ${DEPLOYMENT}`)
 console.log('\n[dev-apps] reminder: host-side / application changes are NOT hot-reloaded by default — restart dsh to pick them up.')
 console.log('[dev-apps]   (the platform `dsh-hmr` row can watch this repo through a patch overlay; probe-verified 2026-09-18 — see the build section of AGENTS.md)')
-console.log('[dev-apps] preflight for the checkout launch lane: node scripts/launch-apps.mjs --check-only')
+console.log('[dev-apps] preflight for the launch lane: node scripts/launch-apps.mjs --check-only')

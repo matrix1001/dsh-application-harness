@@ -59,6 +59,62 @@ describe('reload after an external data write', () => {
   })
 })
 
+describe('stop re-entry and late health', () => {
+  it('does not run the stop hook twice while the first hook is still in flight', async () => {
+    const runtime = new ApplicationRuntime({ stopBudgetMs: 10 })
+    let hooks = 0
+    let release: (() => void) | undefined
+    await runtime.register(app('slow-stop', {
+      stop: async () => { hooks += 1; await new Promise<void>((resolve) => { release = resolve }) },
+    }))
+    const first = await runtime.stop('slow-stop')
+    expect(first).toBe('stop-incomplete')
+    const second = await runtime.stop('slow-stop')
+    expect(second).toBe('stop-incomplete')
+    expect(hooks).toBe(1)
+    release?.()
+    await until(() => runtime.list()[0]?.status() === 'stopped')
+    expect(runtime.list()[0]?.status()).toBe('stopped')
+  })
+
+  it('uses a readable fallback when an unhealthy report carries no reason', async () => {
+    const runtime = new ApplicationRuntime()
+    const registration = await runtime.register(app('health-no-reason', { health: async () => ({ status: 'unhealthy' }) }))
+    expect(registration.status()).toBe('stopped')
+    expect(registration.reason()).toBe('platform.health-failed')
+    expect(registration.detail()).toBe('the application reported unhealthy')
+  })
+
+  it('keeps the health-failed diagnosis when the stop finishes late', async () => {
+    const runtime = new ApplicationRuntime({ stopBudgetMs: 10 })
+    let release: (() => void) | undefined
+    let healthy = true
+    const registration = await runtime.register(app('health-late', {
+      health: async () => healthy ? { status: 'ok' } : { status: 'unhealthy', reason: 'db gone' },
+      ops: {
+        echo: {
+          description: 'waits',
+          params: { text: { type: 'string', required: true } },
+          result: { type: 'string' },
+          execute: async () => { await new Promise<void>((resolve) => { release = resolve }); return 'ok' },
+        },
+      },
+    }))
+    const call = runtime.call(asUser, 'health-late', 'echo', { text: 'x' })
+    await new Promise((resolve) => { setTimeout(resolve, 5) })
+    healthy = false
+    await runtime.checkHealth('health-late')
+    expect(registration.status()).toBe('stop-incomplete')
+    release?.()
+    await call
+    await until(() => registration.status() === 'stopped')
+    expect(registration.status()).toBe('stopped')
+    expect(registration.health()).toBe('degraded')
+    expect(registration.reason()).toBe('platform.health-failed')
+    expect(registration.detail()).toBe('db gone')
+  })
+})
+
 describe('service face', () => {
   it('provides ctx.applications, honouring the row config', async () => {
     const ctx = new Context()
@@ -70,13 +126,13 @@ describe('service face', () => {
     await runtime!.register(app('one'))
     expect(runtime!.list().map((entry) => entry.declaration.id)).toEqual(['one'])
     expect(runtime!.list()[0]?.status()).toBe('available')
-    expect(runtime!.list()[0]?.failure()).toBeUndefined()
+    expect(runtime!.list()[0]?.detail()).toBeUndefined()
 
     const broken = new Context()
     apply(broken, {})
     await broken.applications!.register(app('broken', { start: () => { throw new Error('no storage') } }))
     expect(broken.applications!.list()[0]?.status()).toBe('failed')
-    expect(broken.applications!.list()[0]?.failure()).toBe('no storage')
+    expect(broken.applications!.list()[0]?.detail()).toBe('no storage')
 
     // The row mounts the bounded in-memory history window (the D5 defect: the
     // runtime alone keeps none, and nothing else installed one, so every read
@@ -87,6 +143,15 @@ describe('service face', () => {
     const configured = new Context()
     apply(configured, { stopBudgetMs: 1 })
     expect(configured.applications).toBeInstanceOf(ApplicationRuntime)
+
+    // The row's health timeout is the runtime's own: a hook that outlives it is
+    // a bounded diagnostic, not an endless start.
+    const healthConfigured = new Context()
+    apply(healthConfigured, { healthTimeoutMs: 5 })
+    const slowHealth = await healthConfigured.applications!.register(app('slow-health', {
+      health: () => new Promise(() => {}),
+    }))
+    expect(slowHealth.detail()).toBe('health check timed out after 5ms')
   })
 
   it('routes runtime problems to the context logger', async () => {
@@ -103,6 +168,25 @@ describe('service face', () => {
     runtime.useHistory({ write: () => { throw new Error('again') } })
     await runtime.call(asUser, 'one', 'echo', { text: 'x' })
     expect(warned.join(' ')).toContain('again')
+  })
+
+  it('accepts the declared unified namespace and refuses another one', async () => {
+    const ctx = new Context()
+    apply(ctx, {})
+    ctx.provide('applicationStore', { openForMount: () => ({ attach: () => {} }) } as never)
+    const declaration = (store: (namespace: string) => unknown): AppDeclaration => {
+      store('one')
+      return app('one', { data: { kind: 'unified', namespace: 'one', schemaVersion: 1 } })
+    }
+    await expect(mountApplication(ctx, declaration)).resolves.toBeDefined()
+    await expect(mountApplication(ctx, (store: (namespace: string) => unknown) => {
+      store('one')
+      return app('two', { data: { kind: 'unified', namespace: 'two', schemaVersion: 1 } })
+    })).rejects.toThrow(/only its own declared unified namespace/u)
+    await expect(mountApplication(ctx, (store: (namespace: string) => unknown) => {
+      store('plain')
+      return app('plain')
+    })).rejects.toThrow(/only its own declared unified namespace/u)
   })
 
   it('mounts an application as a row and allows loading it again after the row unloads', async () => {
@@ -429,11 +513,12 @@ describe('stops, unsubscribes and grants', () => {
     expect(seen).toEqual(['one'])
   })
 
-  it('revokes without consulting grants for a human caller (grants are for peers)', async () => {
+  it('revokes a platform capability by exact name', async () => {
     const runtime = new ApplicationRuntime()
-    await runtime.grant({ caller: asUser, capabilities: ['target#echo'], grantedAt: '2026-01-01T00:00:00.000Z' })
+    const caller: Caller = { kind: 'app', appId: 'owner' }
+    await runtime.grant({ caller, capabilities: ['capability:model'], grantedAt: '2026-01-01T00:00:00.000Z' })
     expect(await runtime.grantsOf()).toHaveLength(1)
-    await runtime.revoke(asUser, 'target')
+    await runtime.revoke(caller, 'capability:model')
     expect(await runtime.grantsOf()).toEqual([])
   })
 
@@ -483,12 +568,12 @@ describe('stops, unsubscribes and grants', () => {
     const runtime = new ApplicationRuntime()
     runtime.useGrantStore(store)
     const caller: Caller = { kind: 'app', appId: 'owner' }
-    await runtime.grant({ caller, capabilities: ['target#echo', 'target#other'], grantedAt: '2026-01-01T00:00:00.000Z' })
-    await runtime.revoke(caller, 'target#echo')
-    expect(await runtime.grantsOf()).toMatchObject([{ capabilities: ['target#other'] }])
-    await runtime.revoke(caller, 'target')
+    await runtime.grant({ caller, capabilities: ['capability:model', 'capability:network'], grantedAt: '2026-01-01T00:00:00.000Z' })
+    await runtime.revoke(caller, 'capability:model')
+    expect(await runtime.grantsOf()).toMatchObject([{ capabilities: ['capability:network'] }])
+    await runtime.revoke(caller, 'capability:network')
     expect(await runtime.grantsOf()).toEqual([])
-    expect(saved).toEqual([['target#echo', 'target#other'], ['target#other'], []])
+    expect(saved).toEqual([['capability:model', 'capability:network'], ['capability:network'], []])
   })
 })
 
@@ -530,7 +615,7 @@ describe('best-effort paths report without changing the outcome', () => {
     // visible through the registration.
     const broken = runtime.list().find((entry) => entry.declaration.id === 'broken')
     expect(broken?.status()).toBe('failed')
-    expect(broken?.failure()).toBe('start string')
+    expect(broken?.detail()).toBe('start string')
 
     const asyncHistory = new ApplicationRuntime({ onProblem: (problem) => { problems.push(problem) } })
     asyncHistory.useHistory({ write: () => Promise.reject('async plain failure') })
@@ -541,7 +626,7 @@ describe('best-effort paths report without changing the outcome', () => {
 
     const storeRuntime = new ApplicationRuntime()
     storeRuntime.useGrantStore({ list: () => Promise.resolve([]), save: () => Promise.reject('save string') })
-    await expect(storeRuntime.grant({ caller: asUser, capabilities: ['t#echo'], grantedAt: '' })).rejects.toBe('save string')
+    await expect(storeRuntime.grant({ caller: { kind: 'app', appId: 'owner' }, capabilities: ['capability:model'], grantedAt: '' })).rejects.toBe('save string')
   })
 
   it('stays silent when a history write fails and no reporter is installed', async () => {
@@ -603,10 +688,11 @@ describe('best-effort paths report without changing the outcome', () => {
 
   it('leaves a grant for another target alone when revoking', async () => {
     const runtime = new ApplicationRuntime()
-    await runtime.grant({ caller: asUser, capabilities: ['one#echo'], grantedAt: '' })
-    await runtime.grant({ caller: asUser, capabilities: ['two#echo'], grantedAt: '' })
-    await runtime.revoke(asUser, 'one')
-    expect(await runtime.grantsOf()).toMatchObject([{ capabilities: ['two#echo'] }])
+    const caller: Caller = { kind: 'app', appId: 'owner' }
+    await runtime.grant({ caller, capabilities: ['capability:model'], grantedAt: '' })
+    await runtime.grant({ caller, capabilities: ['capability:network'], grantedAt: '' })
+    await runtime.revoke(caller, 'capability:model')
+    expect(await runtime.grantsOf()).toMatchObject([{ capabilities: ['capability:network'] }])
   })
 })
 
@@ -642,10 +728,10 @@ describe('platform capability entry', () => {
     const runtime = new ApplicationRuntime()
     const owner: Caller = { kind: 'app', appId: 'owner' }
     const other: Caller = { kind: 'app', appId: 'other' }
-    await runtime.grant({ caller: owner, capabilities: ['target#echo', platformCapability('model')], grantedAt: '' })
-    await runtime.grant({ caller: other, capabilities: ['target#echo'], grantedAt: '' })
+    await runtime.grant({ caller: owner, capabilities: [platformCapability('model')], grantedAt: '' })
+    await runtime.grant({ caller: other, capabilities: [platformCapability('model')], grantedAt: '' })
     await runtime.revoke(owner)
-    expect(await runtime.grantsOf()).toMatchObject([{ caller: other, capabilities: ['target#echo'] }])
+    expect(await runtime.grantsOf()).toMatchObject([{ caller: other, capabilities: [platformCapability('model')] }])
   })
 })
 
@@ -708,8 +794,7 @@ describe('capability use (the entry-side check)', () => {
     expect(await runtime.call(asUser, 'undeclared', 'use', {})).toMatchObject({ status: 'failed', error: { code: 'app.capability-undeclared' } })
     expect(used).toBe(0)
     expect(asked).toEqual([])
-    // No grant can turn an undeclared capability into a usable one.
-    await runtime.grant({ caller: { kind: 'app', appId: 'undeclared' }, capabilities: [platformCapability('model')], grantedAt: '' })
+    // No grant exists for an undeclared capability, and the use still refuses.
     expect(await runtime.call(asUser, 'undeclared', 'use', {})).toMatchObject({ status: 'failed', error: { code: 'app.capability-undeclared' } })
     expect(used).toBe(0)
   })
@@ -733,6 +818,7 @@ describe('capability use (the entry-side check)', () => {
     }))
     await runtime.register({
       ...app('caller', { calls: ['peer'] }),
+      capabilities: ['model'],
       ops: {
         relay: {
           description: 'calls the peer as this application',

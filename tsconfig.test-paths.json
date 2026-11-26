@@ -35,17 +35,15 @@
       "@matrix1001/dsh-application-harness-http": [
         "./packages/application/http/src/index.ts"
       ],
+      // Platform client entries ship as module-table bundles; the suites that
+      // exercise them import the source copy generated from the installed line
+      // by scripts/sync-platform-fixture.mjs (gitignored, --check in the gate).
       "@deepseek-ai/dsh-api-gateway/client": [
         "./.platform-src/dsh-api-gateway/src/client/index.ts"
       ],
       "@deepseek-ai/dsh-api-session-controller/client": [
         "./.platform-src/dsh-api-session-controller/src/client/index.ts"
       ],
-      // The vendored trees import each other in the platform's own source style
-      // (`.../src/client/scope.ts`), which no published `exports` map answers —
-      // the wildcard keeps such a cross-tree import inside the vendored plane
-      // instead of escaping to node_modules (0.1.6-alpha.2's test-runtime gained
-      // exactly one of these; same shape as the ui-renderer entry below).
       "@deepseek-ai/dsh-api-session-controller/src/*": [
         "./.platform-src/dsh-api-session-controller/src/*"
       ],
@@ -54,6 +52,9 @@
       ],
       "@deepseek-ai/dsh-client-locale/client": [
         "./.platform-src/dsh-client-locale/src/client/index.ts"
+      ],
+      "@deepseek-ai/dsh-client-modules/client": [
+        "./.platform-src/dsh-client-modules/src/client/index.ts"
       ],
       "@deepseek-ai/dsh-client-store": [
         "./.platform-src/dsh-client-store/src/index.ts"
@@ -78,6 +79,9 @@
       ],
       "@deepseek-ai/dsh-client-ui-session/client": [
         "./.platform-src/dsh-client-ui-session/src/client/index.ts"
+      ],
+      "@deepseek-ai/dsh-client-ui-session-status/client": [
+        "./.platform-src/dsh-client-ui-session-status/src/client/index.ts"
       ],
       "@deepseek-ai/dsh-client-ui-renderer/src/*": [
         "./.platform-src/dsh-client-ui-renderer/src/*"

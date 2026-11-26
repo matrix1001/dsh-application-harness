@@ -1,9 +1,9 @@
 /**
  * The area's pure derivations, as plain data: how a lifecycle status is
- * captioned, which half of a declared need belongs to whom, which grants reach
- * ONE application (and which records target it), and who a caller is — the
- * identity rules the permission lists are built on. No React and no wire: every
- * function here is the production one, exercised without a component.
+ * captioned, which half of a declared need belongs to whom, which records
+ * target one application, and who a caller is — the identity rules the
+ * permission lists are built on. No React and no wire: every function here is
+ * the production one, exercised without a component.
  */
 import { describe, expect, it } from 'vitest'
 import type {
@@ -11,11 +11,12 @@ import type {
 } from '@matrix1001/dsh-application-harness-host-bridge/client'
 import {
   STATUS_KEYS, callerLabel, callerText, capabilityNeeds, confirmationSentence, covers, describeNeed, displayDescription, displayName,
-  grantedTo, grantsInto, hasPage, hasSettings, historyInto, isCapabilityNeed, moveApplicationBy, moveIdBefore,
-  onboardingPending, orderApplications, sameCaller,
+  dropIndexAt, grantedTo, hasPage, hasSettings, historyInto, isCapabilityNeed, moveApplicationBy, moveIdBefore,
+  composerPlaceholder, dockNeedsAnswer, dockStatusOf, onboardingPending, sameCaller, splitPinnedTabs, statusOf, statusView,
 } from '../src/client/model.ts'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ApplicationsState } from '../src/client/shell.ts'
+import { reasonLabel } from '../src/client/reason.ts'
 
 /** The dictionary key, as the panel's own `t` seat would resolve it. */
 const t = ((key: string) => key) as TranslateNS<'applications'>
@@ -23,7 +24,7 @@ const t = ((key: string) => key) as TranslateNS<'applications'>
 /** One application row with the fields the derivations read. */
 function app(id: string, needs: readonly string[] = [], ops: Array<{ name: string; description: string }> = []): AppInfo {
   return {
-    id, name: `${id} title`, description: '', version: '1.0.0', status: 'available', health: 'ok', activation: 'enabled', runtime: 'ready', needs,
+    id, name: `${id} title`, description: '', version: '1.0.0', health: 'ok', activation: 'enabled', runtime: 'ready', needs,
     ops: ops.map(entry => ({ ...entry, params: {}, exposure: {} })),
   }
 }
@@ -90,6 +91,71 @@ describe('lifecycle captions', () => {
     expect(STATUS_KEYS.failed).toBe('status.failed')
     expect(STATUS_KEYS['stop-incomplete']).toBe('status.stop-incomplete')
   })
+
+  it('derives the legacy caption from the public reason before the activation/runtime axes', () => {
+    expect(statusOf({ runtime: 'stopping', activation: 'enabled', health: 'degraded', reason: 'platform.stop-incomplete' })).toBe('stop-incomplete')
+    expect(statusOf({ runtime: 'stopped', activation: 'enabled', health: 'degraded', reason: 'platform.start-failed' })).toBe('failed')
+    expect(statusOf({ runtime: 'stopped', activation: 'enabled', health: 'degraded', reason: 'platform.health-failed' })).toBe('failed')
+    expect(statusOf({ runtime: 'ready', activation: 'disabled', health: 'ok' })).toBe('stopped')
+    expect(statusOf({ runtime: 'ready', activation: 'enabled', health: 'ok' })).toBe('available')
+    expect(statusOf({ runtime: 'starting', activation: 'enabled', health: 'ok' })).toBe('starting')
+    expect(statusOf({ runtime: 'stopping', activation: 'enabled', health: 'ok' })).toBe('stopping')
+    expect(statusOf({ runtime: 'stopped', activation: 'enabled', health: 'ok' })).toBe('stopped')
+  })
+})
+
+describe('application-area session attention', () => {
+  it('detects a dock conversation waiting for an answer', () => {
+    const targets = [{ sessionId: 's1' }, { sessionId: 's2' }]
+    expect(dockNeedsAnswer(targets, new Map([['s1', { pendingInteraction: {} }]]))).toBe(true)
+    expect(dockNeedsAnswer(targets, new Map([['s1', {}]]))).toBe(false)
+    expect(dockNeedsAnswer(targets, new Map([['other', { pendingInteraction: {} }]]))).toBe(false)
+    expect(dockNeedsAnswer([], new Map([['s1', { pendingInteraction: {} }]]))).toBe(false)
+  })
+})
+
+describe('dock status precedence', () => {
+  it('reports nothing for an absent or idle Session', () => {
+    expect(dockStatusOf(undefined)).toBeUndefined()
+    expect(dockStatusOf({})).toBeUndefined()
+    expect(dockStatusOf({ running: false, completionUnread: false, completionFailed: false })).toBeUndefined()
+  })
+
+  it('puts the human, then progress, then failure, then an ordinary unread result', () => {
+    expect(dockStatusOf({ pendingInteraction: {}, running: true, completionFailed: true, completionUnread: true }))
+      .toEqual({ tone: 'attention', labelKey: 'dock.statusAttention' })
+    expect(dockStatusOf({ running: true, completionFailed: true, completionUnread: true }))
+      .toEqual({ tone: 'running', labelKey: 'dock.statusRunning' })
+    expect(dockStatusOf({ completionFailed: true, completionUnread: true }))
+      .toEqual({ tone: 'failed', labelKey: 'dock.statusFailed' })
+    expect(dockStatusOf({ completionFailed: false, completionUnread: true }))
+      .toEqual({ tone: 'unread', labelKey: 'dock.statusUnread' })
+  })
+})
+
+describe('composer guidance', () => {
+  it('guides the application-area and development Sessions and leaves every other Session alone', () => {
+    const development = [{ sessionId: 's-dev', appId: 'workbook' }]
+    const name = (appId: string) => appId.toUpperCase()
+    expect(composerPlaceholder('s-area', ['s-area'], development, name)).toEqual({ key: 'conversation.placeholderApp' })
+    expect(composerPlaceholder('s-dev', ['s-area'], development, name))
+      .toEqual({ key: 'conversation.placeholderDevelopment', app: 'WORKBOOK' })
+    expect(composerPlaceholder('s-normal', ['s-area'], development, name)).toBeUndefined()
+    expect(composerPlaceholder('s-normal', [], [], name)).toBeUndefined()
+  })
+})
+
+describe('compact status presentation', () => {
+  it('names every non-ready state with a dot tone, and nothing when ready and healthy', () => {
+    expect(statusView({ runtime: 'ready', activation: 'enabled', health: 'ok' }, t)).toEqual({ label: undefined, tone: 'ok' })
+    expect(statusView({ runtime: 'ready', activation: 'enabled', health: 'degraded' }, t, true)).toEqual({ label: 'status.pending', tone: 'warn' })
+    expect(statusView({ runtime: 'ready', activation: 'enabled', health: 'degraded' }, t)).toEqual({ label: 'status.degraded', tone: 'warn' })
+    expect(statusView({ runtime: 'stopped', activation: 'enabled', health: 'ok' }, t)).toEqual({ label: 'status.stopped', tone: 'idle' })
+    expect(statusView({ runtime: 'starting', activation: 'enabled', health: 'ok' }, t)).toEqual({ label: 'status.starting', tone: 'warn' })
+    expect(statusView({ runtime: 'stopping', activation: 'enabled', health: 'ok' }, t)).toEqual({ label: 'status.stopping', tone: 'warn' })
+    expect(statusView({ runtime: 'stopped', activation: 'enabled', health: 'degraded', reason: 'platform.start-failed' }, t)).toEqual({ label: 'status.failed', tone: 'error' })
+    expect(statusView({ runtime: 'stopping', activation: 'enabled', health: 'degraded', reason: 'platform.stop-incomplete' }, t)).toEqual({ label: 'status.stop-incomplete', tone: 'error' })
+  })
 })
 
 describe('declared needs', () => {
@@ -105,22 +171,8 @@ describe('declared needs', () => {
 
 describe('grants', () => {
   it('covers one capability by exact name', () => {
-    expect(covers(grant({ kind: 'human' }, ['workbook#write']), 'workbook#write')).toBe(true)
-    expect(covers(grant({ kind: 'human' }, ['workbook#write']), 'workbook#read')).toBe(false)
-  })
-
-
-  it('reads the grants that let OTHER callers reach one application, grouped and narrowed', () => {
-    const ai = grant({ kind: 'ai', sessionId: 'session-1' }, ['workbook#write', 'disk-analysis#scan', 'workbook#read'])
-    const appGrant = grant({ kind: 'app', appId: 'git-read' }, ['workbook#write', 'workbook#read'])
-    const unrelated = grant({ kind: 'human' }, ['capability:model'])
-    const into = grantsInto([ai, appGrant, unrelated], 'workbook')
-    expect(into.map(entry => callerLabel(entry.caller))).toEqual(['ai · session-1', 'app · git-read'])
-    // Only the capabilities naming this application travel; a duplicate of the
-    // same capability from the same caller is not listed twice.
-    expect(into[0]?.capabilities).toEqual(['workbook#write', 'workbook#read'])
-    expect(into[1]?.capabilities).toEqual(['workbook#write', 'workbook#read'])
-    expect(grantsInto([unrelated], 'workbook')).toEqual([])
+    expect(covers(grant({ kind: 'human' }, ['capability:model']), 'capability:model')).toBe(true)
+    expect(covers(grant({ kind: 'human' }, ['capability:model']), 'capability:network')).toBe(false)
   })
 
   it('counts a grant of the caller or of its own background work, and nobody else’s', () => {
@@ -140,6 +192,17 @@ describe('grants', () => {
       { kind: 'ai', sessionId: 's-2' },
       'capability:model',
     )).toBe(false)
+  })
+})
+
+describe('reason labels', () => {
+  it('localizes every known reason and falls back for an unknown code', () => {
+    expect(reasonLabel('platform.updating', t)).toBe('status.reason.updating')
+    expect(reasonLabel('platform.start-failed', t)).toBe('status.reason.start-failed')
+    expect(reasonLabel('platform.health-failed', t)).toBe('status.reason.health-failed')
+    expect(reasonLabel('platform.unavailable', t)).toBe('status.reason.unavailable')
+    expect(reasonLabel('platform.stop-incomplete', t)).toBe('status.reason.stop-incomplete')
+    expect(reasonLabel('platform.unknown' as never, t)).toBe('status.reason.unknown')
   })
 })
 
@@ -243,11 +306,27 @@ describe('one application’s records', () => {
 describe('the navigation order', () => {
   const rows = [app('workbook'), app('disk-analysis'), app('info-hub')]
 
-  it('applies the saved order, appends new rows and ignores removed ids', () => {
-    expect(orderApplications(rows, []).map(row => row.id)).toEqual(['workbook', 'disk-analysis', 'info-hub'])
-    expect(orderApplications(rows, ['info-hub', 'gone', 'workbook']).map(row => row.id)).toEqual(['info-hub', 'workbook', 'disk-analysis'])
-    // A saved list naming nothing this build knows is the host order.
-    expect(orderApplications(rows, ['gone']).map(row => row.id)).toEqual(['workbook', 'disk-analysis', 'info-hub'])
+  it('splits the fixed tabs from the more menu and keeps an unpinned current application temporary', () => {
+    const ids = (apps: readonly AppInfo[]): string[] => apps.map(row => row.id)
+    const all = splitPinnedTabs(rows, undefined, 'info-hub')
+    expect(ids(all.pinned)).toEqual(['workbook', 'disk-analysis', 'info-hub'])
+    expect(all.unpinned).toEqual([])
+    expect(ids(all.tabs)).toEqual(['workbook', 'disk-analysis', 'info-hub'])
+    expect(all.temporary).toBeUndefined()
+    // With no saved list every app is fixed in host order.
+    expect(ids(splitPinnedTabs(rows, undefined, undefined).pinned)).toEqual(['workbook', 'disk-analysis', 'info-hub'])
+    const empty = splitPinnedTabs(rows, [], 'disk-analysis')
+    expect(empty.pinned).toEqual([])
+    expect(ids(empty.unpinned)).toEqual(['workbook', 'disk-analysis', 'info-hub'])
+    expect(ids(empty.tabs)).toEqual(['disk-analysis'])
+    expect(empty.temporary?.id).toBe('disk-analysis')
+    const subset = splitPinnedTabs(rows, ['info-hub', 'gone', 'workbook', 'info-hub'], 'disk-analysis')
+    expect(ids(subset.pinned)).toEqual(['info-hub', 'workbook'])
+    expect(ids(subset.unpinned)).toEqual(['disk-analysis'])
+    expect(ids(subset.tabs)).toEqual(['info-hub', 'workbook', 'disk-analysis'])
+    const pinnedCurrent = splitPinnedTabs(rows, ['workbook'], 'workbook')
+    expect(pinnedCurrent.temporary).toBeUndefined()
+    expect(ids(pinnedCurrent.tabs)).toEqual(['workbook'])
   })
 
   it('moves before an original index for a pointer drop, and one slot for the keyboard', () => {
@@ -265,13 +344,23 @@ describe('the navigation order', () => {
     expect(moveApplicationBy(ids, 'a', -1)).toEqual(ids)
     expect(moveApplicationBy(ids, 'd', 1)).toEqual(ids)
   })
+
+  it('reads the insertion slot from tab midpoints', () => {
+    const rects = [{ left: 0, width: 80 }, { left: 100, width: 80 }, { left: 200, width: 80 }]
+    expect(dropIndexAt(rects, -10)).toBe(0)
+    expect(dropIndexAt(rects, 39)).toBe(0)
+    expect(dropIndexAt(rects, 41)).toBe(1)
+    expect(dropIndexAt(rects, 239)).toBe(2)
+    expect(dropIndexAt(rects, 241)).toBe(3)
+    expect(dropIndexAt([], 100)).toBe(0)
+  })
 })
 
 /** The first-run predicate reads only these fields; the rest keep the type honest. */
 function firstRunState(over: Partial<ApplicationsState> = {}): ApplicationsState {
   return {
-    apps: [], activeAppId: undefined, running: new Map(), runningCalls: [], outcomes: new Map(),
-    refusals: new Map(), progress: [], claims: new Map(), history: [], historyLoaded: true,
+    apps: [], activeAppId: undefined, runningCalls: [], outcomes: new Map(),
+    refusals: new Map(), progress: [], history: [], historyLoaded: true,
     historyReading: false, historyFailed: false, historyTarget: undefined, tasks: [],
     tasksLoaded: false, tasksReading: false, tasksFailed: false, policies: [], policiesReading: false, policiesFailed: false, policiesLoaded: false, grants: [], grantsReading: false,
     grantsFailed: false, onboarding: { apps: {} }, grantsLoaded: true, onboardingLoaded: true,
@@ -303,9 +392,17 @@ describe('onboardingPending', () => {
     expect(onboardingPending(subject, firstRunState({ onboarding }))).toBe(true)
   })
 
+  it('is owed again when the process command declaration changed', () => {
+    const runner = { ...app('runner', ['capability:process']), process: [{ executable: 'git', commands: ['status'], purpose: 'read a repository' }] }
+    const answered = { apps: { runner: { fingerprint: 'capability:process|process:git:status:read a repository', seenAt: '2026-01-01T00:00:00.000Z' } } }
+    expect(onboardingPending(runner, firstRunState({ onboarding: answered }))).toBe(false)
+    const changed = { ...runner, process: [{ executable: 'git', commands: ['status', 'diff'], purpose: 'read a repository' }] }
+    expect(onboardingPending(changed, firstRunState({ onboarding: answered }))).toBe(true)
+  })
+
   it('is not owed for an unknown or unavailable application', () => {
     expect(onboardingPending(undefined, firstRunState())).toBe(false)
-    expect(onboardingPending({ ...subject, status: 'failed' }, firstRunState())).toBe(false)
+    expect(onboardingPending({ ...subject, runtime: 'stopped', activation: 'disabled', health: 'degraded', reason: 'platform.start-failed' }, firstRunState())).toBe(false)
   })
 
   it('waits for both reads before deciding', () => {

@@ -20,8 +20,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 const STEPS = [
   { name: 'typecheck', command: 'pnpm', args: ['run', 'typecheck'], description: 'host/client TypeScript + test-type pass' },
-  { name: 'typecheck-release', command: 'pnpm', args: ['run', 'typecheck:release'], description: 'release-line TypeScript, generated typert and test-type pass' },
-  { name: 'test', command: 'pnpm', args: ['run', 'test'], description: 'unit suite' },
+  { name: 'docs', command: 'pnpm', args: ['run', 'check:docs'], description: 'docs links, anchors, commands and budget' },
   { name: 'coverage', command: 'pnpm', args: ['run', 'test:coverage'], description: 'unit suite + per-file thresholds' },
   { name: 'build', command: 'pnpm', args: ['run', 'build'], description: 'host and browser artifacts' },
   { name: 'scripts', command: 'pnpm', args: ['run', 'test:scripts'], description: 'script self-tests' },
@@ -29,15 +28,19 @@ const STEPS = [
   {
     name: 'contracts',
     commands: [
-      ['scripts/verify-build-role.mjs'], ['scripts/verify-engines.mjs'], ['scripts/verify-version-sync.mjs'],
+      ['scripts/verify-build-role.mjs'], ['scripts/verify-engines.mjs'], ['scripts/verify-node-line.mjs'], ['scripts/verify-version-sync.mjs'],
       ['scripts/verify-machinery-rows.mjs'], ['scripts/verify-platform-package-set.mjs'],
       ['scripts/verify-deployment-descriptor.mjs'], ['scripts/verify-layer-deps.mjs'],
-      ['scripts/verify-example-compositions.mjs'], ['scripts/verify-execution-line.mjs'],
+      ['scripts/verify-example-compositions.mjs'],
       ['scripts/verify-inject-contract.mjs'], ['scripts/verify-client-peer-shape.mjs'],
       ['scripts/verify-client-factory.mjs'], ['scripts/verify-pack.mjs'], ['scripts/verify-runtime-deps.mjs'],
       ['scripts/verify-app-scale.mjs', '--strict'],
       ['scripts/verify-api-snapshot.mjs'],
       ['scripts/platform-line.mjs', '--check'],
+      ['scripts/check-ignore-reasons.mjs'],
+      ['scripts/check-client-ui-imports.mjs'],
+      ['scripts/check-skills.mjs'],
+      ['scripts/sync-platform-fixture.mjs', '--check'],
     ].map(args => ({ command: 'node', args })),
     description: 'repository contracts and packaging checks',
   },
@@ -45,8 +48,6 @@ const STEPS = [
     name: 'platform',
     commands: [
       { command: 'node', args: ['scripts/launch-apps.mjs', '--check-only'] },
-      { command: 'node', args: ['scripts/vendor-platform-src.mjs', '--self-test'] },
-      { command: 'node', args: ['scripts/vendor-platform-src.mjs', '--check'] },
       { command: 'node', args: ['scripts/verify-platform-modules.mjs'] },
       { command: 'node', args: ['scripts/generate-bundle-patch.mjs', '--check'] },
     ],

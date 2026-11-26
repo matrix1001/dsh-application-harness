@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -36,19 +36,43 @@ describe('the durable activation table', () => {
   })
 })
 
-import { chmodSync } from 'node:fs'
-import { host } from './harness.ts'
-import { waitFor } from './harness.ts'
+import { host, waitFor } from './harness.ts'
 
 describe('activation failures', () => {
-  it('reports a corrupt table and leaves applications enabled', async () => {
+  it('fails closed on a corrupt table and starts nothing until it is repaired', async () => {
     const dir = home()
     const path = join(dir, 'activation.json')
     writeFileSync(path, '{ not json')
+    let starts = 0
     try {
-      const mounted = await host([{ id: 'demo', name: 'Demo', description: 'demo', version: '1.0.0', ops: { echo: { description: 'echo', params: {}, result: { type: 'json' }, execute: () => ({}) } } }], {}, { activationPath: path })
+      const mounted = await host([{
+        id: 'demo',
+        name: 'Demo',
+        description: 'demo',
+        version: '1.0.0',
+        start: () => { starts += 1 },
+        ops: { echo: { description: 'echo', params: {}, result: { type: 'json' }, execute: () => ({}) } },
+      }], {}, { activationPath: path, preActivation: true })
       await waitFor(() => mounted.bridge.list().length === 1)
+      expect(mounted.bridge.list()[0]).toMatchObject({ activation: 'disabled', runtime: 'stopped', activationUnavailable: true })
+      expect(starts).toBe(0)
+      expect(readFileSync(path, 'utf8')).toBe('{ not json')
+      // A late registration also resolves disabled; it never runs its start hook.
+      let lateStarts = 0
+      mounted.runtime.mount({
+        id: 'late', name: 'Late', description: 'late', version: '1.0.0',
+        start: () => { lateStarts += 1 },
+        ops: { echo: { description: 'echo', params: {}, result: { type: 'json' }, execute: () => ({}) } },
+      })
+      expect(mounted.runtime.list().find(entry => entry.declaration.id === 'late')?.activation()).toBe('disabled')
+      expect(lateStarts).toBe(0)
+
+      // A successful explicit write repairs the table and allows the app to run.
+      await mounted.bridge.setActivation('demo', 'enabled')
+      await waitFor(() => mounted.bridge.list()[0]?.runtime === 'ready')
       expect(mounted.bridge.list()[0]).toMatchObject({ activation: 'enabled' })
+      expect(mounted.bridge.list()[0]?.activationUnavailable).toBeUndefined()
+      expect(starts).toBe(1)
       await mounted.dispose()
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })

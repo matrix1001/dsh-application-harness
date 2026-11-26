@@ -49,10 +49,10 @@ describe('the page context store', () => {
   it('holds what the page reports and clears it when the report is undone', () => {
     const pageContext = createPageContext()
     expect(pageContext.current()).toBeUndefined()
-    const clear = pageContext.report('workbook', { record: { kind: 'note', id: 'n1' }, label: 'Workbook · note n1' })
+    const clear = pageContext.report('workbook', { record: { appId: 'workbook', kind: 'note', id: 'n1' }, label: 'Workbook · note n1' })
     expect(pageContext.current()).toEqual({
       appId: 'workbook',
-      record: { kind: 'note', id: 'n1' },
+      record: { appId: 'workbook', kind: 'note', id: 'n1' },
       label: 'Workbook · note n1',
     })
     clear()
@@ -61,8 +61,8 @@ describe('the page context store', () => {
 
   it('replaces the context when the page reports again, keeping the ownership of the newest report', () => {
     const pageContext = createPageContext()
-    const first = pageContext.report('workbook', { record: { kind: 'note', id: 'n1' }, label: 'note n1' })
-    const second = pageContext.report('workbook', { record: { kind: 'note', id: 'n2' }, label: 'note n2' })
+    const first = pageContext.report('workbook', { record: { appId: 'workbook', kind: 'note', id: 'n1' }, label: 'note n1' })
+    const second = pageContext.report('workbook', { record: { appId: 'workbook', kind: 'note', id: 'n2' }, label: 'note n2' })
     expect(pageContext.current()).toMatchObject({ record: { id: 'n2' } })
     // The loser's cleanup runs as React retires it; it must not blank the newer report.
     first()
@@ -74,7 +74,7 @@ describe('the page context store', () => {
   it('lets a new page take over, and the old page clean up without clearing it', () => {
     const pageContext = createPageContext()
     const workbook = pageContext.report('workbook', { label: 'Workbook' })
-    const infoHub = pageContext.report('info-hub', { record: { kind: 'project', id: 'p_1' }, label: 'Info hub' })
+    const infoHub = pageContext.report('info-hub', { record: { appId: 'info-hub', kind: 'project', id: 'p_1' }, label: 'Info hub' })
     expect(pageContext.current()).toMatchObject({ appId: 'info-hub' })
     // Unmounting the page that lost the panel must not clear the page that won it.
     workbook()
@@ -95,13 +95,13 @@ describe('the page context store', () => {
 
 describe('the page token', () => {
   it('spells the grammar the host parses', () => {
-    expect(pageToken('workbook', { kind: 'note', id: 'n3' })).toBe('@page:workbook:note:n3')
-    expect(pageToken('workbook', { kind: 'task', id: 't_9f-2' })).toBe('@page:workbook:task:t_9f-2')
+    expect(pageToken('workbook', { appId: 'workbook', kind: 'note', id: 'n3' })).toBe('@page:workbook:note:n3')
+    expect(pageToken('workbook', { appId: 'workbook', kind: 'task', id: 't_9f-2' })).toBe('@page:workbook:task:t_9f-2')
     expect(pageToken('workbook', undefined)).toBe('@page:workbook')
   })
 
   it('is stable: the same object always spells the same token', () => {
-    const record = { kind: 'event', id: 'e_1' } as const
+    const record = { appId: 'info-hub', kind: 'event', id: 'e_1' } as const
     expect(pageToken('info-hub', record)).toBe(pageToken('info-hub', { ...record }))
   })
 })
@@ -128,7 +128,7 @@ describe('the page reference source', () => {
 
   it('offers the page as one row whose value is the token it will attach', async () => {
     const { pageContext, source } = mounted()
-    pageContext.report('workbook', { record: { kind: 'note', id: 'n3' }, label: '笔记 n3' })
+    pageContext.report('workbook', { record: { appId: 'workbook', kind: 'note', id: 'n3' }, label: '笔记 n3' })
     expect(await offered(source)).toEqual({
       name: '笔记 n3',
       description: '@page:workbook:note:n3',
@@ -145,7 +145,7 @@ describe('the page reference source', () => {
 
   it('inserts the picked row as a reference chip carrying its token', async () => {
     const { pageContext, source } = mounted()
-    pageContext.report('workbook', { record: { kind: 'note', id: 'n3' }, label: '笔记 n3' })
+    pageContext.report('workbook', { record: { appId: 'workbook', kind: 'note', id: 'n3' }, label: '笔记 n3' })
     const candidate = await offered(source)
     if (candidate === undefined) throw new Error('expected one offered row')
     expect(pick(source, candidate)).toEqual({
@@ -165,7 +165,7 @@ describe('the page reference source', () => {
 
   it('keeps a picked chip on the page it was picked from, whatever page follows', async () => {
     const { pageContext, source } = mounted()
-    pageContext.report('workbook', { record: { kind: 'note', id: 'n3' }, label: '笔记 n3' })
+    pageContext.report('workbook', { record: { appId: 'workbook', kind: 'note', id: 'n3' }, label: '笔记 n3' })
     const candidate = await offered(source)
     if (candidate === undefined) throw new Error('expected one offered row')
     const picked = pick(source, candidate)
@@ -176,13 +176,13 @@ describe('the page reference source', () => {
     if (codec === undefined) throw new Error('expected the source to carry a codec')
     // The human navigates away before sending: the chip is bound to the position
     // it was picked into, and its model form is unchanged by where they are now.
-    pageContext.report('info-hub', { record: { kind: 'project', id: 'p_1' }, label: 'Info hub' })
+    pageContext.report('info-hub', { record: { appId: 'info-hub', kind: 'project', id: 'p_1' }, label: 'Info hub' })
     await expect(codec.serialize(picked.insert.ref, new AbortController().signal)).resolves.toBe('@page:workbook:note:n3')
   })
 
   it('serializes one chip as the token it carries, and two chips of one object alike', async () => {
     const { pageContext, source } = mounted()
-    pageContext.report('workbook', { record: { kind: 'note', id: 'n3' }, label: '笔记 n3' })
+    pageContext.report('workbook', { record: { appId: 'workbook', kind: 'note', id: 'n3' }, label: '笔记 n3' })
     const codec = source.codec
     if (codec === undefined) throw new Error('expected the source to carry a codec')
     const signal = new AbortController().signal
@@ -195,5 +195,23 @@ describe('the page reference source', () => {
       codec.serialize('@page:workbook:note:n3', signal),
     ])).resolves.toEqual(['@page:workbook:note:n3', '@page:workbook:note:n3'])
     expect(codec.clipboardText('@page:workbook:note:n3')).toBe('@page:workbook:note:n3')
+  })
+
+  it('offers no page row in an ordinary Session', async () => {
+    const pageContext = createPageContext()
+    pageContext.report('workbook', { label: 'Workbook' })
+    const source = createPageSource(pageContext, undefined, { isOwner: () => false, boundApp: () => undefined })
+    expect(await offered(source)).toBeUndefined()
+  })
+
+  it('offers the page only to a development Session bound to its application', async () => {
+    const pageContext = createPageContext()
+    pageContext.report('workbook', { label: 'Workbook' })
+    const owner = createPageSource(pageContext, undefined, { isOwner: () => true, boundApp: () => undefined })
+    expect(await offered(owner)).toBeDefined()
+    const otherApp = createPageSource(pageContext, undefined, { isOwner: () => true, boundApp: () => 'todo' })
+    expect(await offered(otherApp)).toBeUndefined()
+    const sameApp = createPageSource(pageContext, undefined, { isOwner: () => true, boundApp: () => 'workbook' })
+    expect(await offered(sameApp)).toBeDefined()
   })
 })

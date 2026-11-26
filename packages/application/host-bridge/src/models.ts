@@ -4,8 +4,7 @@
  * default. Values are validated on read and write and never grant model access.
  * @module @matrix1001/dsh-application-harness-host-bridge/models
  */
-import { existsSync } from 'node:fs'
-import { readVersionedJson, writeVersionedJson } from './platform-files.ts'
+import { AppTableStore } from './app-table.ts'
 
 /** One fixed model route. */
 export interface AppModelSelection {
@@ -28,47 +27,23 @@ function selectionOf(value: unknown): AppModelSelection {
  * The model-selection table.
  */
 export class ModelSelectionStore {
-  private readonly entries = new Map<string, AppModelSelection>()
-  private queue: Promise<void> = Promise.resolve()
-  private readonly path: string
+  private readonly table: AppTableStore<AppModelSelection>
 
-  constructor(path: string) { this.path = path }
+  constructor(path: string) {
+    this.table = new AppTableStore(path, 'model-selection table', selectionOf)
+  }
 
   /** Load the table, ignoring a missing file but never misreading a bad one. */
   async load(): Promise<void> {
-    if (!existsSync(this.path)) return
-    const record = await readVersionedJson(this.path, 1, 'model-selection table', (document) => {
-      const apps = document.apps
-      if (typeof apps !== 'object' || apps === null || Array.isArray(apps)) throw new Error('the model-selection table needs an apps object')
-      const parsed: Record<string, AppModelSelection> = {}
-      for (const [appId, value] of Object.entries(apps)) parsed[appId] = selectionOf(value)
-      return parsed
-    })
-    /* v8 ignore next -- a file that disappears between the existence check and the read is treated as empty */
-    for (const [appId, selection] of Object.entries(record ?? {})) this.entries.set(appId, selection)
+    await this.table.load()
   }
 
   /** One application's fixed route, if any. */
-  get(appId: string): AppModelSelection | undefined { return this.entries.get(appId) }
-
-  /** All fixed routes, for management display. */
-  list(): Readonly<Record<string, AppModelSelection>> { return Object.fromEntries(this.entries) }
+  get(appId: string): AppModelSelection | undefined { return this.table.get(appId) }
 
   /** Replace or clear one application's route, then persist atomically. */
   async set(appId: string, selection: AppModelSelection | null): Promise<void> {
     const next = selection === null ? undefined : selectionOf(selection)
-    this.queue = this.queue.then(async () => {
-      const previous = this.entries.get(appId)
-      if (next === undefined) this.entries.delete(appId)
-      else this.entries.set(appId, next)
-      try {
-        await writeVersionedJson(this.path, 1, { apps: this.list() })
-      } catch (error) {
-        if (previous === undefined) this.entries.delete(appId)
-        else this.entries.set(appId, previous)
-        throw error
-      }
-    })
-    await this.queue
+    await this.table.update(appId, () => next)
   }
 }

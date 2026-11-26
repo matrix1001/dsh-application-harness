@@ -6,8 +6,8 @@
 # history as the ai actor — the phase-2 acceptance — without an agent loop
 # anchor.
 #
-# 本组合经 `include`（`./cordis.yml`）+ `patches[0].insert` 挂载五行（`system-prompt`、
-# `tools`、`tool-executor-native`、`app-tool-bridge`），**没有自己的
+# 本组合经 `include`（`./cordis.yml`）+ `patches[0].insert` 挂载六行（`session`、
+# `session-projection`、`system-prompt`、`tools`、`tool-executor-native`、`app-tool-bridge`），**没有自己的
 # 行列表**；机械行有效行集 = include 源的 `application-runtime` + 本补丁新增的
 # `app-tool-bridge`。其余是平台行，不算机械行。机械行集由
 # `scripts/verify-example-compositions.mjs` 门禁守护——门禁对 include+insert
@@ -27,6 +27,15 @@
           # simply waits (PENDING) until the service is provided, so either
           # order activates the same way. The rows below are ordered for
           # reading, not for mounting.
+          #
+          # On the 0.2.3 line system-prompt injects the session projection
+          # registry, and projections mount on the session store. Mount both
+          # here: the tooled example still has no llm/agent anchor, but the
+          # platform tool face now needs these two Session services.
+          - id: session
+            name: '@deepseek-ai/dsh-session'
+          - id: session-projection
+            name: '@deepseek-ai/dsh-session-projection'
           - id: system-prompt
             name: '@deepseek-ai/dsh-system-prompt'
           - id: tools

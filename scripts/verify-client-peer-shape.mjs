@@ -13,10 +13,11 @@
  * deliberately, never ad-hoc. `--self-test` runs the checker against
  * synthetic fixtures and must trip it.
  */
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { packageDirs } from './package-areas.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -25,13 +26,9 @@ const ALLOWED_PEERS = new Set(['@deepseek-ai/cordis'])
 
 /** Collect `{ packageName -> peerDependencies }` for every `packages/client/*` package declaring `dsh.client`. */
 export function collectClientPluginPeers(root) {
-  const clientDir = join(root, 'packages', 'client')
   const declared = new Map()
-  if (!existsSync(clientDir)) return declared
-  for (const dir of readdirSync(clientDir)) {
-    const pkgPath = join(clientDir, dir, 'package.json')
-    if (!existsSync(pkgPath)) continue
-    const manifest = JSON.parse(readFileSync(pkgPath, 'utf8'))
+  for (const dir of packageDirs(root)) {
+    const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
     if (manifest.dsh?.client === undefined) continue
     declared.set(manifest.name, Object.keys(manifest.peerDependencies ?? {}))
   }

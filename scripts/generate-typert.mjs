@@ -9,10 +9,9 @@
  * failed to activate (2026-09-16). Running this pass first means `tsdown` only
  * bundles JavaScript, and the client bundles inline the current contract.
  *
- * The generator follows the same checkout-first rule as the tsdown plugin
- * (`scripts/platform-checkout.mjs`): a built checkout supplies it, no checkout
- * falls back to the published package (CI), and an unbuilt checkout is an
- * error rather than a silent fallback.
+ * The generator is the published `@deepseek-ai/dsh-typert-generator` installed
+ * in `node_modules` — the same package CI, the daily build and a release use,
+ * so the emitted faces cannot follow a second line.
  *
  * Usage: `node scripts/generate-typert.mjs` from the repository root.
  * @module scripts/generate-typert
@@ -20,7 +19,7 @@
 
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { loadTypertGenerator } from './platform-checkout.mjs'
+import { findWorkspaceRoot, WorkspaceTypertGenerator, writeWorkspaceArtifacts } from '@deepseek-ai/dsh-typert-generator'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -45,9 +44,7 @@ function report(error) {
   console.error(`generate-typert: Typert generation failed\n  ${detail.replaceAll('\n', '\n  ')}`)
 }
 
-async function main() {
-  const generator = await loadTypertGenerator()
-  const { findWorkspaceRoot, WorkspaceTypertGenerator, writeWorkspaceArtifacts } = generator
+function main() {
   const root = findWorkspaceRoot(ROOT)
   const artifacts = new WorkspaceTypertGenerator(root, OPTIONS).generateContributors(FACES)
   writeWorkspaceArtifacts(root, artifacts)
@@ -55,7 +52,9 @@ async function main() {
   console.log(`generate-typert: wrote ${artifacts.length} Typert artifact(s) for ${packages} package(s)`)
 }
 
-main().catch((error) => {
+try {
+  main()
+} catch (error) {
   report(error)
   process.exitCode = 1
-})
+}

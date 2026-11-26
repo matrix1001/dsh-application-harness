@@ -1,8 +1,7 @@
 /**
- * The management dialog's record lists: what one application declares it needs
- * (each needing the user's approval), who may reach it (its own operations,
- * granted to other callers), the calls it received, and the confirmations
- * waiting for an answer.
+ * The management page's record lists: what one application declares it needs
+ * (each needing the user's approval), the calls it received, and the
+ * confirmations waiting for an answer.
  *
  * A need is shown the way a human decides on it: what it is in words, why the
  * application asks, and the switch that gives or takes it away. The RAW
@@ -17,10 +16,10 @@
  * @module @matrix1001/dsh-application-harness-client-applications/client/Lists
  */
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { Button, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, Switch } from '@matrix1001/dsh-application-harness-client-chrome'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
-  Caller, CapabilityGrant, ConfirmationDecision, HistoryRecord, PendingConfirmation,
+  Caller, CapabilityGrant, ConfirmationDecision, HistoryRecord, PendingConfirmation, ProcessDeclaration,
 } from '@matrix1001/dsh-application-harness-host-bridge/client'
 import { callerLabel, grantedTo, type NeedDescription } from './model.ts'
 import css from './ApplicationsLists.module.css'
@@ -153,76 +152,31 @@ function NeedRow({ need, caller, allowed, describe, grant, revoke, disabled, t }
 }
 
 /**
- * The other callers' access INTO one application: only the capabilities that
- * name this application, grouped by caller. Revoking here takes away exactly
- * what is shown — never the caller's unrelated grants.
- * @param props - the captions, the grouped entries, the descriptions, the revoke command and the translate seat.
- * @returns the grouped list, or the "nobody" hint.
+ * Render the executables and commands an application declared for review.
+ * This is disclosure, not a whitelist or a second grant: the process capability
+ * switch above it is the permission.
+ * @param props - the declaration and the translate seat.
+ * @returns the process list, one row per executable.
  */
-export function GrantsIntoList({ title, empty, entries, describe, revoke, t, loaded = true, reading = false, failed = false, onRetry }: {
-  readonly title: string
-  readonly empty: string
-  readonly entries: readonly { readonly caller: Caller; readonly capabilities: readonly string[] }[]
-  readonly describe: (need: string) => NeedDescription
-  readonly revoke: (caller: Caller, selector?: string) => Promise<boolean>
+export function ProcessList({ process, t }: {
+  readonly process: readonly ProcessDeclaration[]
   readonly t: TranslateNS<'applications'>
-} & ReadStateProps): ReactNode {
-  const [pending, setPending] = useState<string | undefined>(undefined)
-  const [rowError, setRowError] = useState<string | undefined>(undefined)
-  if (entries.length === 0) return <p className={css.hint}>{empty}</p>
-  const disabled = !loaded || reading || failed
-  const revokeOne = async (key: string, caller: Caller, capability: string): Promise<void> => {
-    setPending(key)
-    setRowError(undefined)
-    const ok = await revoke(caller, capability)
-    if (!ok) setRowError(key)
-    setPending(undefined)
-  }
+}): ReactNode {
   return (
-    <div className={css.section}>
-      <p className={css.sectionTitle}>{title}</p>
-      {reading && <p className={css.hint} data-into-reading>{t('reads.loading')}</p>}
-      {failed && (
-        <p className={css.needError} role="alert" data-into-failed>
-          {t('reads.failed')}
-          {onRetry !== undefined && <Button size="sm" variant="ghost" onClick={onRetry} data-into-retry>{t('reads.retry')}</Button>}
-        </p>
-      )}
-      <ul className={css.records}>
-        {entries.map(entry => (
-          <li key={callerLabel(entry.caller)} className={css.record}>
-            <div className={css.recordHead}>
-              <span>{callerLabel(entry.caller)}</span>
+    <section className={css.section} data-app-process>
+      <p className={css.sectionTitle}>{t('process.title')}</p>
+      <ul className={css.needList}>
+        {process.map(entry => (
+          <li className={css.need} key={entry.executable} data-app-process-entry={entry.executable}>
+            <div className={css.needHead}>
+              <span className={css.needName}>{entry.executable}</span>
             </div>
-            <ul className={css.capabilities}>
-              {entry.capabilities.map(capability => {
-                const description = describe(capability)
-                const key = `${callerLabel(entry.caller)}\u0000${capability}`
-                return (
-                  <li key={capability} className={css.capability}>
-                    <span className={css.capabilityText}>
-                      <span>{description.label}</span>
-                      {/* The exact operation and the exact caller: revoking here
-                          takes away what is shown, and the wire id says which. */}
-                      <code className={css.code}>{capability}</code>
-                    </span>
-                    <Button
-                      size="sm"
-                      disabled={disabled || pending === key}
-                      data-grant-revoke={capability}
-                      onClick={() => { void revokeOne(key, entry.caller, capability) }}
-                    >
-                      {pending === key ? t('grants.pending') : t('grants.revoke')}
-                    </Button>
-                    {rowError === key && <p className={css.needError} role="alert" data-grant-error={capability}>{t('grants.failed')}</p>}
-                  </li>
-                )
-              })}
-            </ul>
+            <p className={css.needPurpose}>{t('process.commands', { commands: entry.commands.join(', ') })}</p>
+            <p className={css.needPurpose}>{entry.purpose}</p>
           </li>
         ))}
       </ul>
-    </div>
+    </section>
   )
 }
 
@@ -261,13 +215,13 @@ export function HistoryList({ records, t, loaded = true, reading = false, failed
             {records.map(record => (
               <li key={record.callId} className={css.record}>
                 <div className={css.recordHead}>
-                  <code className={css.code}>{record.op}</code>
+                  <code className={css.code}>{record.command ?? record.op}</code>
                   <code className={css.code}>{record.status}</code>
                   {record.code !== undefined && <code className={css.code}>{record.code}</code>}
                 </div>
                 <div className={css.recordMeta}>
                   <span>{t('history.caller')}: {callerLabel(record.caller)}</span>
-                  <span>{record.startedAt} → {record.endedAt}</span>
+                  <span>{localStamp(record.startedAt)} → {localStamp(record.endedAt)}</span>
                 </div>
                 {record.message !== undefined && <p className={css.recordMessage}>{record.message}</p>}
               </li>
@@ -359,6 +313,12 @@ export function ConfirmationsList({ confirmations, answer, cancelConfirmation, s
                     <code>{request.capability}</code>
                     <code>{callerLabel(request.caller)}</code>
                     <p>{request.reason}</p>
+                    {request.preview !== undefined && (
+                      <div className={css.confirmPreview} data-confirm-preview>
+                        <span>{request.preview.effect}</span>
+                        <code>{request.preview.args}</code>
+                      </div>
+                    )}
                     <time dateTime={request.at} title={request.at}>{localStamp(request.at)}</time>
                   </details>
                 </li>
@@ -399,6 +359,11 @@ export function PoliciesList({ app, policies, setPolicy, t, loaded = true, readi
   if (ops.length === 0) return <p className={css.hint}>{t('policy.empty')}</p>
   const policyOf = (op: string): import('@matrix1001/dsh-application-harness-host-bridge/client').OperationPolicy =>
     policies.find(entry => entry.appId === app.id && entry.operation === op)?.policy ?? 'default'
+  const exposureLabel = (value: string): string => value === 'open'
+    ? t('policy.exposure.open')
+    : value === 'confirm'
+      ? t('policy.exposure.confirm')
+      : t('policy.exposure.closed')
   return (
     <section>
       <h3 className={css.needTitle}>{t('policy.title')}</h3>
@@ -415,12 +380,13 @@ export function PoliciesList({ app, policies, setPolicy, t, loaded = true, readi
           {ops.map((op) => {
             const current = policyOf(op.name)
             const exposure = op.exposure
+            const label = op.description ?? op.name
             return (
               <li className={css.need} data-app-policy={op.name} data-policy-state={current} key={op.name}>
                 <div className={css.needHead}>
-                  <span className={css.needName}>{op.name}</span>
+                  <span className={css.needName}>{label}</span>
                   <select
-                    aria-label={t('policy.for', { op: op.name })}
+                    aria-label={t('policy.for', { op: label })}
                     value={current}
                     disabled={pending !== undefined}
                     onChange={(event) => {
@@ -441,10 +407,14 @@ export function PoliciesList({ app, policies, setPolicy, t, loaded = true, readi
                 </div>
                 <p className={css.needPurpose}>
                   {t('policy.authorDefaults', {
-                    ai: exposure.ai ?? 'closed',
-                    peers: exposure.peers ?? 'closed',
+                    ai: exposureLabel(exposure.ai ?? 'closed'),
+                    peers: exposureLabel(exposure.peers ?? 'closed'),
                   })}
                 </p>
+                <details className={css.needDetails} data-policy-technical>
+                  <summary>{t('policy.technical')}</summary>
+                  <code>{op.name}</code>
+                </details>
                 {pending === op.name && <p className={css.needPending} data-policy-pending>{t('policy.pending')}</p>}
               </li>
             )

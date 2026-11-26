@@ -38,7 +38,6 @@ const row: AppInfo = {
   name: 'Info hub',
   description: 'the reading surface',
   version: '1.0.0',
-  status: 'available',
   health: 'ok', activation: 'enabled', runtime: 'ready',
   needs: [],
   ops: [],
@@ -63,11 +62,9 @@ function state(over: Partial<ApplicationsState> = {}): ApplicationsState {
   return {
     apps: [row],
     activeAppId: row.id,
-    running: new Map(),
     runningCalls: [],
     outcomes: new Map(),
     refusals: new Map(),
-    claims: new Map(),
     progress: [],
     history: [],
     historyLoaded: true,
@@ -128,7 +125,6 @@ function show(view: ApplicationView | undefined, over: { readonly state?: Applic
       onAllowOnboarding={async () => false}
       onLaterOnboarding={async () => false}
       onDebug={noop}
-      onReleaseClaims={noop}
       t={t}
     />,
   )
@@ -269,8 +265,7 @@ describe('AppSurface: the first-run permission card', () => {
         onAllowOnboarding={onAllowOnboarding}
         onLaterOnboarding={onLaterOnboarding}
         onDebug={noop}
-        onReleaseClaims={noop}
-        t={t}
+          t={t}
       />,
     )
     fireEvent.click(document.body.querySelector('[data-onboarding-action="allow-all"]')!)

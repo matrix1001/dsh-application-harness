@@ -1,92 +1,56 @@
 #!/usr/bin/env node
 /**
- * Reconciliation of the reference plane against the platform package set
- * (origin: `PL1 step ②` of the pre-2026-09-13 backlog, recorded as
- * "T8 平台包集合对账门"; that backlog now lives only in git history):
- * every `@deepseek-ai/dsh*` name we reference must exist on
- * the platform line. The three package renames of the 0.1.6 line
- * (`code-runtime*` → `ptc-runtime*`, `workflow-worker-thread` → `workflow-ptc`)
- * are exactly the failure this catches — and it also covers the two inert
- * mirror lists in `pnpm-workspace.yaml` (`overrides`, `minimumReleaseAgeExclude`),
- * which `pnpm install` cannot police: the resolver reads them, the dependency
- * graph never sees them, so a stale name there fails in no other gate.
+ * Reconciliation of the reference plane against the installed platform line:
+ * every `@deepseek-ai/dsh*` name this repo references must be a package the
+ * published line actually ships — either the `@deepseek-ai/dsh` CLI itself or
+ * a package directory under `node_modules/@deepseek-ai`.
  *
- * Reference plane: `dependencies`/`devDependencies`/`peerDependencies` of the
- * root manifest and of every `packages/<group>/<pkg>/package.json`, plus the
- * `overrides` names and `minimumReleaseAgeExclude` entries of
- * `pnpm-workspace.yaml` (each entry carries `@version`, which is stripped).
- * The plane is deliberately RAW: the platform filter belongs to `diffSets`, so
- * the names this repo owns stay visible in the report.
+ * The reference plane is `dependencies`/`devDependencies`/`peerDependencies`
+ * of the root manifest and of every `packages/<group>/<pkg>/package.json`, plus
+ * the names in `pnpm-workspace.yaml`'s `overrides` list — that is read by the
+ * resolver, never by the dependency graph, so a stale name there fails in no
+ * other gate.
  *
- * Available plane: the checkout's package set as the checkout ITSELF declares
- * it — the `packages` globs of its `pnpm-workspace.yaml` (the package tier,
- * `apps/*`, `vendor/*`, …). Scanning the package tier alone would be wrong:
- * `@deepseek-ai/dsh` (the CLI bin) lives in `apps/cli` and
- * `@deepseek-ai/dsh-web-frontend` in `apps/web`, and we reference both — a gate
- * that called them missing would be crying wolf on names that plainly exist,
- * which is how a gate gets switched off. Reading the platform's own
- * declaration also keeps test fixtures buried inside the package tier (the
- * typert generator's fixture workspaces) out of the answer.
- *
- * No checkout (CI) → UNVERIFIED, exit 0 — the same convention as
- * `vendor-platform-src --check`.
+ * What it catches: a rename arrived with a platform release (`ptc-runtime*`
+ * for `code-runtime*`, or the package-name cleanup) and a manifest or mirror
+ * list still names the old package. What it deliberately does not do: compare
+ * against a platform checkout's own workspace — the installed line is the
+ * contract this repo builds and ships against.
  * @module
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { load as parseYaml } from 'js-yaml'
+import { packageManifests } from './package-areas.mjs'
+import { readDeclaredLine } from './platform-line.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
-/**
- * The platform's naming convention. A regex over the name, not a registry
- * lookup, and the gate's whole filter: `@deepseek-ai/dsh` itself matches (the
- * `-` or end alternative), while this repo's own `@matrix1001/dsh-application-harness-*`
- * packages and the vendored `@deepseek-ai/cordis` / `@deepseek-ai/schemastery`
- * edges do not.
- */
+/** `@deepseek-ai/dsh*` — the CLI and every platform package. */
 const PLATFORM_NAME = /^@deepseek-ai\/dsh(-|$)/u
 
-/** Manifest sections that make a name a reference (`optionalDependencies` is not used in this repo). */
+/** Manifest sections that make a name a reference. */
 const DEPENDENCY_FIELDS = ['dependencies', 'devDependencies', 'peerDependencies']
 
-/** Where a checkout's packages are looked for when it declares no workspace globs. */
-const WORKSPACE_FALLBACK = ['packages/*/*']
+/** The umbrella package: a CLI entry, not a workspace package. */
+const UMBRELLA = '@deepseek-ai/dsh'
 
-/**
- * Whether a name is a platform package.
- * @param name - the package name.
- * @returns the verdict.
- */
+/** Whether a name belongs to the platform train. */
 function platformName(name) {
   return typeof name === 'string' && PLATFORM_NAME.test(name)
 }
 
 /**
- * Drop the `@version` a `minimumReleaseAgeExclude` entry carries. The last `@`
- * is the separator (`@scope/name@1.2.3`); a bare name (index 0, or none) is
- * already a name.
- * @param entry - the workspace entry.
- * @returns the package name.
- */
-function stripVersion(entry) {
-  const at = entry.lastIndexOf('@')
-  return at > 0 ? entry.slice(0, at) : entry
-}
-
-/**
- * Every name this repo refers to, with the files that refer to it. The sites
- * are what makes a FAIL actionable: a rename arrives as "this name is gone",
- * and the fix starts at the manifest or workspace list that still names it.
- * @param root - the repo root.
- * @returns a Map from package name to its sorted, root-relative sources.
+ * Every platform name this repo refers to, with the files that refer to it.
+ * @param {string} root - the repo root.
+ * @returns {Map<string, string[]>} name → sorted root-relative sources.
  */
 export function referenceSites(root = ROOT) {
   const sites = new Map()
   const record = (name, site) => {
-    if (typeof name !== 'string' || name === '') return
+    if (!platformName(name)) return
     const existing = sites.get(name)
     if (existing === undefined) sites.set(name, [site])
     else if (!existing.includes(site)) existing.push(site)
@@ -98,165 +62,105 @@ export function referenceSites(root = ROOT) {
     }
   }
   readManifest(join(root, 'package.json'), 'package.json')
-  const groups = join(root, 'packages')
-  if (existsSync(groups)) {
-    for (const group of readdirSync(groups)) {
-      const groupDir = join(groups, group)
-      if (!statSync(groupDir).isDirectory()) continue
-      for (const entry of readdirSync(groupDir)) {
-        const manifestPath = join(groupDir, entry, 'package.json')
-        if (!existsSync(manifestPath)) continue
-        readManifest(manifestPath, `packages/${group}/${entry}/package.json`)
-      }
-    }
+  for (const manifestPath of packageManifests(root)) {
+    readManifest(manifestPath, relative(root, manifestPath).split('\\').join('/'))
   }
   const workspacePath = join(root, 'pnpm-workspace.yaml')
   if (existsSync(workspacePath)) {
     const workspace = parseYaml(readFileSync(workspacePath, 'utf8'))
     for (const name of Object.keys(workspace?.overrides ?? {})) record(name, 'pnpm-workspace.yaml (overrides)')
-    for (const entry of workspace?.minimumReleaseAgeExclude ?? []) {
-      record(stripVersion(entry), 'pnpm-workspace.yaml (minimumReleaseAgeExclude)')
-    }
   }
   for (const list of sites.values()) list.sort()
   return sites
 }
 
 /**
- * The reference plane as a sorted name list, unfiltered (see `diffSets`).
- * @param root - the repo root.
- * @returns the names.
+ * The version one `node_modules/.pnpm` entry directory carries.
+ *
+ * Store entries look like `@deepseek-ai+dsh-tool@0.2.3-alpha.2_<peer hash>`;
+ * the peer hash suffix makes a name-only prefix match insufficient after a
+ * platform upgrade, when the previous line's directories are still present.
+ * @param {string} entry - one `.pnpm` directory name.
+ * @returns {string | undefined} the version, or undefined for a name that does not parse.
  */
-export function referencedNames(root = ROOT) {
-  return [...referenceSites(root).keys()].sort()
+export function storeEntryVersion(entry) {
+  const at = entry.indexOf('@', entry.indexOf('+') + 1)
+  if (at === -1) return undefined
+  const rest = entry.slice(at + 1)
+  const underscore = rest.indexOf('_')
+  return underscore === -1 ? undefined : rest.slice(0, underscore)
 }
 
 /**
- * The package globs a checkout declares as its own workspace. An unreadable
- * declaration THROWS rather than quietly shrinking the available plane: a
- * smaller set would turn into false "missing" verdicts, and a wrong list is
- * worse than a loud stop.
- * @param checkout - the platform checkout root.
- * @returns the globs.
+ * The version a package manifest names, or undefined when it cannot be read.
+ * @param {string} path - the manifest path.
+ * @returns {string | undefined} the version.
  */
-function workspaceGlobs(checkout) {
-  const path = join(checkout, 'pnpm-workspace.yaml')
-  if (!existsSync(path)) return WORKSPACE_FALLBACK
-  const declared = parseYaml(readFileSync(path, 'utf8'))?.packages
-  if (!Array.isArray(declared) || declared.length === 0) {
-    throw new Error(`${path} declares no packages: list — the platform package set cannot be read from it`)
-  }
-  return declared
-}
-
-/**
- * Expand one workspace glob to directories. Only the forms the platform's own
- * file uses are supported — literal paths and `*` segments — because a pattern
- * this resolver silently mis-reads would shrink the available plane.
- * @param checkout - the platform checkout root.
- * @param pattern - one `packages` entry.
- * @returns the matched directories (existing ones for `*` segments; a literal is returned whether or not it exists).
- */
-function matchWorkspaceGlob(checkout, pattern) {
-  if (pattern.startsWith('!') || pattern.includes('**')) {
-    throw new Error(`${pattern}: this gate expands literal paths and single-segment * globs only — update the resolver`)
-  }
-  let current = [checkout]
-  for (const segment of pattern.split('/')) {
-    if (segment === '') continue
-    const next = []
-    for (const base of current) {
-      if (segment !== '*') {
-        next.push(join(base, segment))
-        continue
-      }
-      if (!existsSync(base)) continue
-      for (const entry of readdirSync(base)) {
-        const candidate = join(base, entry)
-        if (statSync(candidate).isDirectory()) next.push(candidate)
-      }
-    }
-    current = next
-  }
-  return current
-}
-
-/**
- * The names available on the platform line: every package in the checkout's
- * own workspace globs that carries a manifest.
- * @param checkout - the platform checkout root.
- * @returns the sorted names.
- */
-export function platformNamesFromCheckout(checkout) {
-  const names = new Set()
-  for (const glob of workspaceGlobs(checkout)) {
-    for (const dir of matchWorkspaceGlob(checkout, glob)) {
-      const manifestPath = join(dir, 'package.json')
-      // A matched directory without a manifest is not a package (a group dir, a
-      // docs folder): it contributes no name and is not an error.
-      if (!existsSync(manifestPath)) continue
-      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
-      if (typeof manifest.name === 'string' && manifest.name !== '') names.add(manifest.name)
-    }
-  }
-  return [...names].sort()
-}
-
-/**
- * Compare the two planes. The filter lives HERE, on both sides: only
- * `@deepseek-ai/dsh*` names are compared, so the caller may hand over the raw
- * lists and this repo's own workspace packages / vendored edges can never
- * appear as missing.
- * @param options - the two name lists.
- * @returns `{ missing, unused }`, both sorted.
- */
-export function diffSets({ referenced, available }) {
-  const referencedPlatform = [...new Set(referenced.filter(platformName))].sort()
-  const availablePlatform = new Set(available.filter(platformName))
-  return {
-    missing: referencedPlatform.filter((name) => !availablePlatform.has(name)),
-    unused: [...availablePlatform].filter((name) => !referencedPlatform.includes(name)).sort(),
-  }
-}
-
-/**
- * Run the gate.
- * @param options - the repo root, the platform checkout (undefined = none), and the log seats.
- * @returns the exit code (0 = OK or UNVERIFIED, 1 = FAIL).
- */
-export function verify({ root = ROOT, checkout, log = console.log, error = console.error } = {}) {
-  const sites = referenceSites(root)
-  const referenced = [...sites.keys()].sort()
-  const platformReferenced = referenced.filter(platformName)
-  if (checkout === undefined) {
-    log(`verify-platform-package-set: UNVERIFIED — no platform checkout; ${platformReferenced.length} referenced platform name(s) were not reconciled against the line`)
-    return 0
-  }
-  let available
+function manifestVersion(path) {
   try {
-    available = platformNamesFromCheckout(checkout)
-  } catch (cause) {
-    error(`verify-platform-package-set: FAIL — the checkout's package set could not be read: ${String(cause?.message ?? cause)}`)
-    return 1
+    return JSON.parse(readFileSync(path, 'utf8')).version
+  } catch {
+    return undefined
   }
-  const { missing, unused } = diffSets({ referenced, available })
-  if (missing.length > 0) {
-    error(`verify-platform-package-set: FAIL — ${missing.length} referenced platform name(s) do not exist on the platform line (${checkout}):`)
-    for (const name of missing) error(`  - ${name} — referenced by ${sites.get(name).join(', ')}`)
-    error('  a rename on the platform line arrives here first: fix the name at the site(s) above, then re-run')
-    return 1
-  }
-  log(`verify-platform-package-set: OK — ${platformReferenced.length} referenced platform names all exist (${available.length} available on the line, ${unused.length} unreferenced)`)
-  return 0
 }
 
-function main() {
-  const argv = process.argv.slice(2)
-  const index = argv.indexOf('--checkout')
-  const checkout = index === -1
-    ? (process.env.DSH_HARNESS_REPO !== undefined && process.env.DSH_HARNESS_REPO !== '' ? process.env.DSH_HARNESS_REPO : join(process.env.HOME ?? '', 'deepseek-harness'))
-    : argv[index + 1]
-  process.exit(verify({ checkout: existsSync(join(checkout, '.git')) ? checkout : undefined }))
+/**
+ * Whether the installed line ships this name AT the declared version: a hoisted
+ * package, or one the lockfile resolved into the pnpm store (the mirror lists
+ * name transitive platform packages that are normally not hoisted).
+ *
+ * The store may still hold directories from earlier platform lines after an
+ * upgrade; those do not satisfy the reference, or a removed package would keep
+ * passing this gate forever.
+ * @param {string} root - the repo root.
+ * @param {string} name - the platform package name.
+ * @param {(path: string) => boolean} exists - the existence probe (injectable for the tests).
+ * @param {string[]} store - the pnpm store entries (injectable for the tests).
+ * @param {(path: string) => string | undefined} versionOf - manifest version reader (injectable for the tests).
+ * @param {string} line - the declared platform line the reference must resolve at.
+ * @returns {'hoisted' | 'store' | 'missing'} where it was found.
+ */
+export function installed(root, name, exists = existsSync, store = storeEntries(root), versionOf = manifestVersion, line = readDeclaredLine(root)) {
+  const bare = name === UMBRELLA ? 'dsh' : name.slice('@deepseek-ai/'.length)
+  const manifest = join(root, 'node_modules', '@deepseek-ai', bare, 'package.json')
+  if (exists(manifest) && versionOf(manifest) === line) return 'hoisted'
+  const prefix = `@deepseek-ai+${bare}@`
+  return store.some(entry => entry.startsWith(prefix) && storeEntryVersion(entry) === line) ? 'store' : 'missing'
 }
 
-if (process.argv[1] !== undefined && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) main()
+/**
+ * The pnpm store's entry names (`node_modules/.pnpm`), or an empty list.
+ * @param {string} root - the repo root.
+ * @returns {string[]} the entry names.
+ */
+export function storeEntries(root) {
+  const store = join(root, 'node_modules', '.pnpm')
+  if (!existsSync(store)) return []
+  return readdirSync(store)
+}
+
+/**
+ * The check.
+ * @param {{ root?: string }} [options] - the repo root.
+ * @returns {number} the exit code.
+ */
+export function verify({ root = ROOT } = {}) {
+  const sites = referenceSites(root)
+  const store = storeEntries(root)
+  const line = readDeclaredLine(root)
+  const manifestNames = [...sites.entries()].filter(([, where]) => where.some(site => !site.startsWith('pnpm-workspace.yaml')))
+  const mirrorOnly = sites.size - manifestNames.length
+  const missing = manifestNames.filter(([name]) => installed(root, name, existsSync, store, manifestVersion, line) === 'missing')
+  console.log(`verify-platform-package-set: ${manifestNames.length} imported platform name(s) checked against the installed line ${line}`
+    + (mirrorOnly === 0 ? '' : `; ${mirrorOnly} mirror-list name(s) are declarative and not checked here`))
+  if (missing.length === 0) return 0
+  console.error(`verify-platform-package-set: FAIL — ${missing.length} name(s) are not installed at ${line}:`)
+  for (const [name, where] of missing) {
+    console.error(`  - ${name} — referenced by ${where.join(', ')}`)
+  }
+  return 1
+}
+
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
+  process.exit(verify({ root: ROOT }))
+}

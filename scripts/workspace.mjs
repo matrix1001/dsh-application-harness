@@ -2,7 +2,7 @@
  * Resolve the stable workspace shared by both launchers.
  *
  * DSH_WORKSPACE wins; otherwise use ~/dsh-workspaces/<profile>. The workspace
- * must stay outside this repository and the platform checkout. Application
+ * must stay outside this repository and the installed platform line. Application
  * documents now live in the harness-home SQLite store; .dsh-applications is
  * retained as a legacy directory, including the one-time legacy import files.
  *
@@ -229,18 +229,16 @@ export function isInside(parent, child) {
 
 /**
  * The directories a previous entry may have written the world to. Default: this
- * repo (`setup.mjs --launch` booted from here) and the platform checkout
- * (`launch-apps.mjs` gave the child THIS as its cwd). Deduplicated by canonical
- * path, so "the repo IS the checkout" is one candidate — not a two-world
- * conflict. `$DSH_WORKSPACE_LEGACY` replaces the default set (empty = none).
- * @param {{ repoRoot?: string, checkout?: string, env?: Record<string, string | undefined>, io?: object }} [options] - the candidates and their override.
+ * repo (pre-wrapper launches booted from here). Deduplicated by canonical path.
+ * `$DSH_WORKSPACE_LEGACY` replaces the default set (empty = none).
+ * @param {{ repoRoot?: string, env?: Record<string, string | undefined>, io?: object }} [options] - the candidates and their override.
  * @returns {Array<{dir: string, label: string}>} the canonical candidates, labelled for the messages.
  */
-export function legacyWorldDirs({ repoRoot, checkout, env = process.env, io = {} } = {}) {
+export function legacyWorldDirs({ repoRoot, env = process.env, io = {} } = {}) {
   const ops = opsOf(io)
   const configured = env[LEGACY_ENV]
   const named = configured === undefined
-    ? [{ dir: repoRoot, label: 'this repository' }, { dir: checkout, label: 'the platform checkout' }]
+    ? [{ dir: repoRoot, label: 'this repository' }]
     : configured.split(delimiter).map((dir) => ({ dir, label: 'a named legacy directory' }))
   const seen = new Map()
   for (const { dir: candidate, label } of named) {
@@ -257,20 +255,18 @@ export function legacyWorldDirs({ repoRoot, checkout, env = process.env, io = {}
 }
 
 /**
- * The preflight half: the workspace must not live inside the platform checkout
- * or this repository. A world there is destroyed by a re-clone, a
+ * The preflight half: the workspace must not live inside this repository. A world there is destroyed by a re-clone, a
  * `git clean -xdf` or a platform update, and `.gitignore` is not a protection
  * mechanism. The judgement is on canonical paths (symlinks, trailing slashes,
  * `.`/`..`), never on string prefixes.
- * @param {{ workspace: string, repoRoot?: string, checkout?: string, io?: object }} options - the resolved workspace and the two directories it must stay out of.
+ * @param {{ workspace: string, repoRoot?: string, io?: object }} options - the resolved workspace and the two directories it must stay out of.
  * @returns {Array<{name: string, file: string, hint: string}>} one problem per containing directory (empty = fine).
  */
-export function workspaceProblems({ workspace, repoRoot, checkout, io = {} }) {
+export function workspaceProblems({ workspace, repoRoot, io = {} }) {
   const ops = opsOf(io)
   const world = canonicalPath(workspace, ops)
   const problems = []
   for (const owner of [
-    { dir: checkout, label: 'the platform checkout' },
     { dir: repoRoot, label: 'this repository' },
   ]) {
     if (typeof owner.dir !== 'string' || owner.dir === '') continue
@@ -363,27 +359,27 @@ export function inspectWorkspace({ workspace, legacyDirs = [], io = {} }) {
  * machine's data layout, not a defect of the repository under test, so the
  * quality gate reports it as UNVERIFIED instead of failing. The check lane
  * never writes anything, and the launch's hard refusal is unchanged.
- * @param {{ workspace: string, repoRoot?: string, checkout?: string, env?: Record<string, string | undefined>, io?: object, dryRun?: boolean, confirmAdoption?: (paths: { source: string, target: string }) => boolean }} options - workspace paths, inspection switch, and the confirmation port (injectable for tests).
+ * @param {{ workspace: string, repoRoot?: string, env?: Record<string, string | undefined>, io?: object, dryRun?: boolean, confirmAdoption?: (paths: { source: string, target: string }) => boolean }} options - workspace paths, inspection switch, and the confirmation port (injectable for tests).
  * @returns {{action: 'existing'|'migrate'|'new', workspace: string, world: string, source?: string, refusal?: string, note?: string}} what was done (or, under `dryRun`, what would be; a refusal comes back in `refusal` with every path and the by-hand fix in it).
  * @throws {Error} on a refusal (a real launch) or a failed move; the message names every path involved.
  */
-export function prepareWorkspace({ workspace, repoRoot, checkout, env = process.env, io = {}, dryRun = false, confirmAdoption = confirmLegacyAdoption } = {}) {
+export function prepareWorkspace({ workspace, repoRoot, env = process.env, io = {}, dryRun = false, confirmAdoption = confirmLegacyAdoption } = {}) {
   const ops = opsOf(io)
-  const problems = workspaceProblems({ workspace, repoRoot, checkout, io: ops })
+  const problems = workspaceProblems({ workspace, repoRoot, io: ops })
   if (problems.length > 0) throw new Error(problems.map((problem) => `${problem.name} (${problem.file})\n${problem.hint}`).join('\n'))
-  const legacyDirs = legacyWorldDirs({ repoRoot, checkout, env, io: ops })
+  const legacyDirs = legacyWorldDirs({ repoRoot, env, io: ops })
   const state = inspectWorkspace({ workspace, legacyDirs, io: ops })
   if (state.refusal !== undefined) {
     if (!dryRun) throw new Error(state.refusal)
     return { action: state.action, workspace, world: state.world, refusal: state.refusal }
   }
   if (state.action === 'existing') {
-    return { action: 'existing', workspace, world: state.world, note: `world: ${state.world} (${state.holders[0].what})` }
+    return { action: 'existing', workspace, world: state.world, note: `legacy world: ${state.world} (${state.holders[0].what})` }
   }
   if (dryRun) {
     return state.action === 'migrate'
-      ? { action: 'migrate', workspace, world: state.world, source: state.source, note: `would adopt the world at ${state.source} into ${state.world} only after interactive confirmation; an unattended launch refuses` }
-      : { action: 'new', workspace, world: state.world, note: `no world anywhere yet — a launch would create a NEW WORLD at ${state.world}` }
+      ? { action: 'migrate', workspace, world: state.world, source: state.source, note: `would adopt the legacy world at ${state.source} into ${state.world} only after interactive confirmation; an unattended launch refuses` }
+      : { action: 'new', workspace, world: state.world, note: `no legacy .dsh-applications world anywhere yet — a launch would create one at ${state.world}` }
   }
   if (state.action === 'migrate' && confirmAdoption({ source: state.source, target: state.world }) !== true) {
     throw new Error(`legacy adoption requires interactive confirmation — nothing was moved:\n  source: ${state.source}\n  target: ${state.world}\nRun the launcher in a terminal and confirm these paths, or move the whole directory explicitly before launching.`)
@@ -393,13 +389,13 @@ export function prepareWorkspace({ workspace, repoRoot, checkout, env = process.
     ops.mkdir(state.world)
     return {
       action: 'new', workspace, world: state.world,
-      note: `NEW WORLD: no data under ${state.world} and none in the legacy candidates (${legacyDirs.length === 0 ? 'none' : legacyDirs.map((entry) => `${entry.dir} — ${entry.label}`).join('; ')}) — this workspace starts empty`,
+      note: `NO LEGACY WORLD: no data under ${state.world} and none in the legacy candidates (${legacyDirs.length === 0 ? 'none' : legacyDirs.map((entry) => `${entry.dir} — ${entry.label}`).join('; ')}) — application documents live in the harness-home SQLite store, so this is not an empty-data signal`,
     }
   }
   moveWorld(state.source, state.world, ops)
   return {
     action: 'migrate', workspace, world: state.world, source: state.source,
-    note: `adopted the world: ${state.source} → ${state.world} (the old directory is no longer a run path)`,
+    note: `adopted the legacy world: ${state.source} → ${state.world} (the old directory is no longer a run path)`,
   }
 }
 

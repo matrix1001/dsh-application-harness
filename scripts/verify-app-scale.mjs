@@ -36,7 +36,10 @@ const BREAKPOINTS = new Set(['720', '1040'])
 
 /** Every source CSS module (never a dependency's copy). */
 export function clientStylesheets() {
-  return globSync('packages/client/*/src/**/*.module.css', { cwd: ROOT, absolute: true })
+  return [
+    ...globSync('packages/client/*/src/**/*.module.css', { cwd: ROOT, absolute: true }),
+    ...globSync('apps/*/view/src/**/*.module.css', { cwd: ROOT, absolute: true }),
+  ]
     .filter(file => !file.includes(`${'/'}node_modules${'/'}`))
 }
 

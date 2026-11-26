@@ -34,6 +34,8 @@ export interface AppNavigationSnapshot {
 export interface AppNavigation {
   readonly state: HostObservable<AppNavigationSnapshot>
   open(input: { appId: string; record?: PageRecordRef; view?: string }): void
+  /** Open and report whether the leave guard accepted it (page commands). */
+  openAndWait(input: { appId: string; record?: PageRecordRef; view?: string }): Promise<boolean>
   back(): void
   /** Switch to another application, guarding the current page first. */
   select(appId: string): Promise<boolean>
@@ -91,15 +93,17 @@ export function createAppNavigation(host: NavigationHost): AppNavigation {
       },
     },
     open(input) {
-      void (async () => {
-        const current = host.currentLocation()
-        const appId = host.currentAppId()
-        if (!await canLeave(appId)) return
-        if (current !== undefined) remember(current)
-        nonce += 1
-        setSnapshot({ route: { ...input, nonce: String(nonce) }, canBack: stack.length > 0, ...(stack.length > 0 ? { backAppId: stack[stack.length - 1]!.appId } : {}) })
-        host.select(input.appId)
-      })()
+      void this.openAndWait(input)
+    },
+    async openAndWait(input) {
+      const current = host.currentLocation()
+      const appId = host.currentAppId()
+      if (!await canLeave(appId)) return false
+      if (current !== undefined) remember(current)
+      nonce += 1
+      setSnapshot({ route: { ...input, nonce: String(nonce) }, canBack: stack.length > 0, ...(stack.length > 0 ? { backAppId: stack[stack.length - 1]!.appId } : {}) })
+      host.select(input.appId)
+      return true
     },
     back() {
       void (async () => {

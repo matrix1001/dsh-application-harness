@@ -1,178 +1,22 @@
 #!/usr/bin/env node
 /**
- * The platform-contract half of the T3/T4/T5 checks: the vendored-source lock,
- * the profile-shape comparator, and the platform-module table parser.
+ * The platform contracts this repo still shares with the published line:
  *
- * The split of duties (plan 2026-09-13 §C2):
- * - **T3** (`vendor-platform-src.mjs --record/--check`) owns the lock: where each
- *   vendored tree came from (an immutable commit of the declared line), which
- *   files it holds, and their digest.
- * - **T4** (inside `verify-deployment-descriptor.mjs`) compares the profile this
- *   repo generates against the official `initProfile` sample, normalized for the
- *   differences that are OURS by design.
- * - **T5** (`verify-platform-modules.mjs`) compares the two local copies of the
- *   platform's shared-module table with the lock's snapshot of the real one.
+ * - the local shared-module table parser (`PLATFORM_MODULES` in our own two
+ *   copies) — the platform's upstream table is not published as a package, so
+ *   the two local copies are compared with each other;
+ * - the profile-shape comparator (`initProfile` sample vs the profile this repo
+ *   generates), used by `verify-deployment-descriptor.mjs`;
+ * - the installed-package locator for the official profile packages.
  *
- * What a digest proves and what it does not: it proves the local snapshot still
- * matches what was recorded (and matches the tag when a checkout is available).
- * It is NOT an upstream signature — the first recording is what binds the two,
- * and that is why the tag's commit is recorded too.
+ * Everything that used to compare against a platform checkout (vendored trees,
+ * digests, the lock) is gone: the repo depends on the published line only.
  * @module
  */
 
-import { createHash } from 'node:crypto'
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
-import { join, relative, sep } from 'node:path'
+import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 
-/** The lock file holding the vendored-source provenance (T3) and the T5 snapshot. */
-export const PLATFORM_LOCK = 'scripts/platform-src-lock.json'
-
-/** The vendored trees: checkout-relative `src` path, lock name, and destination. */
-export const VENDOR_PAIRS = [
-  ['api/gateway', 'dsh-api-gateway'],
-  ['api/session-controller', 'dsh-api-session-controller'],
-  ['client/connection', 'dsh-client-connection'],
-  ['client/locale', 'dsh-client-locale'],
-  ['client/store', 'dsh-client-store'],
-  ['client/ui-chat', 'dsh-client-ui-chat'],
-  ['client/ui-context-menu', 'dsh-client-ui-context-menu'],
-  ['client/ui-conversation', 'dsh-client-ui-conversation'],
-  ['client/ui-session', 'dsh-client-ui-session'],
-  ['llm/token-meter', 'dsh-token-meter'],
-  ['test-support/client-runtime', 'dsh-client-test-runtime'],
-  ['client/ui-renderer', 'dsh-client-ui-renderer'],
-  // The typert protocol shell (`packages/typert/protocol`) is deliberately NOT
-  // vendored here: the test plane follows the declared line, but the shell is
-  // the build plane's type face and follows the **checkout** (its generator
-  // does — see `scripts/platform-checkout.mjs`). `vendor-platform-src.mjs
-  // --check` compares it against the checkout instead of the tag.
-]
-
-/** The platform file whose exported table T5 compares against (bound to the recorded commit). */
-export const PLATFORM_MODULES_SOURCE = 'packages/client/web/src/platform.ts'
-
-/**
- * The vendored destination of one pair, relative to the repo root.
- * @param {[string, string]} pair - one {@link VENDOR_PAIRS} entry.
- * @returns {string} the destination directory.
- */
-export function targetOf(pair) {
-  const [, name] = pair
-  return `.platform-src/${name}/src`
-}
-
-/**
- * Every file under `dir`, as repo-relative POSIX paths, sorted.
- * @param {string} dir - the directory to walk.
- * @param {string} [base] - the base the relative paths are taken from.
- * @returns {string[]} the sorted relative file paths.
- */
-export function listFiles(dir, base = dir) {
-  const out = []
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const abs = join(dir, entry.name)
-    if (entry.isDirectory()) out.push(...listFiles(abs, base))
-    else if (entry.isFile()) out.push(relative(base, abs).split(sep).join('/'))
-  }
-  return out.sort()
-}
-
-/**
- * The digest of one tree: every file's relative path and content hash, in sorted
- * order — so an added, removed, renamed, or edited file all change it.
- * @param {string} dir - the tree to digest.
- * @returns {{ files: number, digest: string }} the file count and the `sha256:<hex>` digest.
- */
-export function digestTree(dir) {
-  const files = listFiles(dir)
-  const hash = createHash('sha256')
-  for (const file of files) {
-    hash.update(file)
-    hash.update('\0')
-    hash.update(createHash('sha256').update(readFileSync(join(dir, file))).digest('hex'))
-    hash.update('\n')
-  }
-  return { files: files.length, digest: `sha256:${hash.digest('hex')}` }
-}
-
-/**
- * Read the lock file.
- * @param {string} root - the repo root.
- * @returns {object} the parsed lock.
- * @throws {Error} when the lock is missing or unparseable (a FAIL condition, never a silent skip).
- */
-export function readLock(root) {
-  const path = join(root, PLATFORM_LOCK)
-  if (!existsSync(path)) throw new Error(`${PLATFORM_LOCK} is missing — record it: node scripts/vendor-platform-src.mjs --record`)
-  let parsed
-  try {
-    parsed = JSON.parse(readFileSync(path, 'utf8'))
-  } catch (error) {
-    throw new Error(`${PLATFORM_LOCK} is unreadable (${String(error)}) — re-record it: node scripts/vendor-platform-src.mjs --record`)
-  }
-  if (typeof parsed !== 'object' || parsed === null || !Array.isArray(parsed.targets)) {
-    throw new Error(`${PLATFORM_LOCK} is malformed (no targets array) — re-record it: node scripts/vendor-platform-src.mjs --record`)
-  }
-  return parsed
-}
-
-/**
- * Compare the working tree against the lock (the CI-side, checkout-free check).
- * @param {string} root - the repo root.
- * @param {object} lock - the parsed lock.
- * @returns {{ failures: string[], checked: number }} drift failures and how many trees were compared.
- */
-export function compareTreesToLock(root, lock) {
-  const failures = []
-  for (const target of lock.targets) {
-    const dir = join(root, target.to)
-    if (!existsSync(dir)) {
-      failures.push(`${target.to} is missing (recorded ${target.files} file(s), ${target.digest})`)
-      continue
-    }
-    const current = digestTree(dir)
-    if (current.files !== target.files || current.digest !== target.digest) {
-      failures.push(`${target.to} drifted: recorded ${target.files} file(s) ${target.digest}, found ${current.files} file(s) ${current.digest}`)
-    }
-  }
-  return { failures, checked: lock.targets.length }
-}
-
-/**
- * Parse the platform's `PLATFORM_MODULES` static array out of its source text.
- * Only an explicit `export const PLATFORM_MODULES = [ ... ]` literal is
- * accepted: a generated or computed table must FAIL (and require the parser to
- * be updated), never silently parse as an empty list.
- * @param {string} source - the platform source file's text.
- * @returns {string[]} the module specifiers, in declaration order.
- * @throws {Error} when the table is absent or not a literal array of strings.
- */
-export function parsePlatformModules(source) {
-  const start = source.indexOf('export const PLATFORM_MODULES')
-  if (start === -1) throw new Error('PLATFORM_MODULES is not exported from the platform source — update the parser')
-  const open = source.indexOf('[', start)
-  const close = source.indexOf(']', open)
-  if (open === -1 || close === -1 || close < open) throw new Error('PLATFORM_MODULES is not a literal array — update the parser')
-  const inner = source.slice(open + 1, close)
-  const specifiers = [...inner.matchAll(/'([^']+)'/gu)].map(match => match[1])
-  // Every non-empty, non-comment segment must be a quoted string; anything else
-  // (a spread, a computed entry) means the table is no longer a static literal.
-  const leftovers = inner
-    .replace(/'[^']*'/gu, '')
-    .split(',')
-    .map(part => part.trim())
-    .filter(part => part !== '')
-  if (leftovers.length > 0) throw new Error(`PLATFORM_MODULES carries non-literal entries (${leftovers.join(' ')}) — update the parser`)
-  if (specifiers.length === 0) throw new Error('PLATFORM_MODULES parsed as empty — refusing to treat that as a pass')
-  return specifiers
-}
-
-/**
- * Parse a local `PLATFORM_MODULES` array out of one of this repo's files (the
- * same literal rule as {@link parsePlatformModules}).
- * @param {string} file - the file path (for the error message).
- * @returns {string[]} the module specifiers.
- */
 export function parseLocalPlatformModules(file) {
   const source = readFileSync(file, 'utf8')
   const start = source.indexOf('const PLATFORM_MODULES')

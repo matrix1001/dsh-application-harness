@@ -7,7 +7,7 @@
  * @module @matrix1001/dsh-application-harness-client-applications/client/AppIcon
  */
 import type { ReactNode } from 'react'
-import { IconCordisPluginOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconCordisPluginOutlineRegular } from '@matrix1001/dsh-application-harness-client-chrome'
 import type { ApplicationView } from './contract.ts'
 import css from './ApplicationsArea.module.css'
 

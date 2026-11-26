@@ -1,0 +1,5 @@
+{
+  "proseLineLimit": 300,
+  "longProseLines": 0,
+  "note": "Ratchet only: lower longProseLines in the change that shortens the prose. A green run proves format and references, never the facts."
+}

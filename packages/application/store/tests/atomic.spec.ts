@@ -8,15 +8,14 @@
  * original error).
  *
  * The shared seam the two candidate-then-rename repositories sit on is here
- * too: `DocumentIO` / `nodeDocumentIO` (the five effects, and their real
- * default) and the three helpers (`isMissingFile` / `reasonOf` / `aborted`) —
+ * and the two file-error helpers (`isMissingFile` / `reasonOf`).
  * exercised for real against the filesystem, not through a double.
  */
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { aborted, isMissingFile, nodeDocumentIO, reasonOf, writeFileAtomic, writeFileDurable } from '../src/atomic.ts'
+import { isMissingFile, reasonOf, writeFileAtomic, writeFileDurable } from '../src/atomic.ts'
 
 const dirs: string[] = []
 
@@ -41,6 +40,23 @@ describe('writeFileDurable', () => {
     await writeFileDurable(path, '{"中文":"内容"}')
     expect(readFileSync(path, 'utf8')).toBe('{"中文":"内容"}')
     expect(readdirSync(dir)).toEqual(['doc.json'])
+  })
+
+  it('honours an explicit file mode for the durable write and the atomic publish', async () => {
+    const dir = tempDir()
+    // The kernel ANDs the requested mode with the process umask, so derive the
+    // expected bits from a default-mode (0o666) probe file: 0o640 is a subset
+    // of 0o666, and the probe leaves exactly the umask's surviving bits.
+    const probe = join(dir, 'probe.json')
+    writeFileSync(probe, '')
+    const expected = 0o640 & (statSync(probe).mode & 0o777)
+    const direct = join(dir, 'direct.json')
+    await writeFileDurable(direct, 'direct', 0o640)
+    expect(statSync(direct).mode & 0o777).toBe(expected)
+    const atomic = join(dir, 'atomic.json')
+    await writeFileAtomic(atomic, 'atomic', 0o640)
+    expect(readFileSync(atomic, 'utf8')).toBe('atomic')
+    expect(statSync(atomic).mode & 0o777).toBe(expected)
   })
 })
 
@@ -86,24 +102,6 @@ describe('writeFileAtomic', () => {
   })
 })
 
-describe('nodeDocumentIO', () => {
-  it('exposes the five effects over the real filesystem, the temp write being the durable one', async () => {
-    const dir = tempDir()
-    const nested = join(dir, 'nested', 'deep')
-    await expect(nodeDocumentIO.readFile(join(dir, 'missing.json'))).rejects.toMatchObject({ code: 'ENOENT' })
-    await nodeDocumentIO.mkdir(nested)
-    const temp = join(nested, 'candidate.tmp')
-    await nodeDocumentIO.writeFile(temp, '{"中文":"内容"}')
-    expect(await nodeDocumentIO.readFile(temp)).toBe('{"中文":"内容"}')
-    const target = join(nested, 'doc.json')
-    await nodeDocumentIO.rename(temp, target)
-    expect(readFileSync(target, 'utf8')).toBe('{"中文":"内容"}')
-    await nodeDocumentIO.unlink(target)
-    expect(existsSync(target)).toBe(false)
-    expect(readdirSync(nested)).toEqual([])
-  })
-})
-
 describe('the shared vocabulary of a document repository', () => {
   it('isMissingFile is true only for an object carrying code ENOENT', () => {
     expect(isMissingFile(Object.assign(new Error('missing'), { code: 'ENOENT' }))).toBe(true)
@@ -120,11 +118,4 @@ describe('the shared vocabulary of a document repository', () => {
     expect(reasonOf('磁盘满了')).toBe('磁盘满了')
   })
 
-  it('aborted is false without a signal, false before the abort and true after it', () => {
-    const controller = new AbortController()
-    expect(aborted(undefined)).toBe(false)
-    expect(aborted(controller.signal)).toBe(false)
-    controller.abort()
-    expect(aborted(controller.signal)).toBe(true)
-  })
 })

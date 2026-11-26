@@ -62,7 +62,7 @@ export function useModalFocus(
     const panel = panelRef.current
     // A form dialog starts in its first field; a custom target outside the panel
     // is not this dialog's to focus, so it falls back to the container.
-    const initial = initialFocusRef?.current
+    const initial = initialFocusRef?.current ?? panel?.querySelector<HTMLElement>('[data-modal-autofocus]')
     if (panel !== null && initial !== null && initial !== undefined && panel.contains(initial)) initial.focus()
     else panel?.focus()
 

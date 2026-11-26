@@ -43,6 +43,7 @@ import { fileURLToPath } from 'node:url'
 import { load as parseYaml } from 'js-yaml'
 import { compareProfileShape, officialAppBoot, officialBundleLists } from './platform-contract.mjs'
 import { appPackagesOf, appRosterProblems, clientRosterProblems, clientRowProblems, clientRowsOf, homeFileProblems, machineryRowProblems, machineryRowsOf, patchRowsOf, workspaceFileProblems } from './descriptor-rows.mjs'
+import { packageDirs, packageDirsByName } from './package-areas.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const DESCRIPTOR = join(ROOT, 'packages/bundle/app-harness/deployment.yml')
@@ -57,15 +58,9 @@ function read(path) {
 /** Every workspace package that declares a client face (`dsh.client`) — the client roster's derivation source. */
 function clientFacePackages() {
   const names = []
-  for (const group of ['application', 'client', 'examples', 'bundle']) {
-    const base = join(ROOT, 'packages', group)
-    if (!existsSync(base)) continue
-    for (const entry of readdirSync(base)) {
-      const manifestPath = join(base, entry, 'package.json')
-      if (!existsSync(manifestPath)) continue
-      const manifest = JSON.parse(read(manifestPath))
-      if (typeof manifest.name === 'string' && manifest.dsh?.client !== undefined) names.push(manifest.name)
-    }
+  for (const dir of packageDirs(ROOT)) {
+    const manifest = JSON.parse(read(join(dir, 'package.json')))
+    if (typeof manifest.name === 'string' && manifest.dsh?.client !== undefined) names.push(manifest.name)
   }
   return names
 }
@@ -73,17 +68,10 @@ function clientFacePackages() {
 /** Every string value declared in any package's `dsh.appRow.config` (the workspace-file single sources). */
 function appRowConfigValues() {
   const values = []
-  for (const dir of ['packages/examples', 'packages/bundle']) {
-    const base = join(ROOT, dir)
-    if (!existsSync(base)) continue
-    for (const name of readdirSync(base)) {
-      const manifestPath = join(base, name, 'package.json')
-      if (!existsSync(manifestPath)) continue
-      const manifest = JSON.parse(read(manifestPath))
-      const config = dir === 'packages/bundle' ? manifest.dsh?.appRow?.config : manifest.dsh?.appRow?.config
-      for (const value of Object.values(config ?? {})) {
-        if (typeof value === 'string') values.push(value)
-      }
+  for (const dir of packageDirs(ROOT)) {
+    const manifest = JSON.parse(read(join(dir, 'package.json')))
+    for (const value of Object.values(manifest.dsh?.appRow?.config ?? {})) {
+      if (typeof value === 'string') values.push(value)
     }
   }
   return values
@@ -136,23 +124,20 @@ for (const problem of clientRosterProblems({ declared: descriptor?.client?.packa
 }
 
 // 4b′. the declared client packages exist on disk.
+const byName = packageDirsByName(ROOT)
 for (const pkg of descriptor?.client?.packages ?? []) {
-  const dir = pkg.replace('@matrix1001/dsh-application-harness-', '').replace(/^client-/, '')
-  const manifestPath = join(ROOT, 'packages/client', dir, 'package.json')
-  if (!existsSync(manifestPath)) {
-    problems.push(`declared client package ${pkg} has no package at packages/client/${dir}`)
+  const dir = byName.get(pkg)
+  if (dir === undefined) {
+    problems.push(`declared client package ${pkg} has no package in the workspace`)
     continue
   }
-  const manifest = JSON.parse(read(manifestPath))
+  const manifest = JSON.parse(read(join(dir, 'package.json')))
   if (manifest.dsh?.client === undefined) problems.push(`declared client package ${pkg} declares no dsh.client half`)
 }
 
 // 4c. inlined static libraries exist (they carry no dsh.client half by design).
 for (const pkg of descriptor?.client?.inlined ?? []) {
-  const dir = pkg.replace('@matrix1001/dsh-application-harness-', '').replace(/^client-/, '')
-  if (!existsSync(join(ROOT, 'packages/client', dir, 'package.json'))) {
-    problems.push(`declared inlined client library ${pkg} has no package at packages/client/${dir}`)
-  }
+  if (!byName.has(pkg)) problems.push(`declared inlined client library ${pkg} has no package in the workspace`)
 }
 
 // 5. execution compositions exist.

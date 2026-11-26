@@ -31,7 +31,8 @@ function carrierFailure(): RemoteResult<never> {
 
 /** One application row. */
 function app(id: string, status: AppStatus = 'available'): AppInfo {
-  return { id, name: `${id} title`, description: `${id} description`, version: '1.2.3', status, health: 'ok', activation: 'enabled', runtime: 'ready', needs: [], ops: [] }
+  const failed = status === 'failed'
+  return { id, name: `${id} title`, description: `${id} description`, version: '1.2.3', health: failed ? 'degraded' : 'ok', activation: failed ? 'disabled' : 'enabled', runtime: status === 'available' ? 'ready' : status === 'starting' ? 'starting' : status === 'stopping' || status === 'stop-incomplete' ? 'stopping' : 'stopped', ...(failed ? { reason: 'platform.start-failed', detail: `${id} failed to start` } : {}), needs: [], ops: [] }
 }
 
 /** One settled history record. */
@@ -125,7 +126,7 @@ function fakeRemote() {
       _appId: string, _op: string, _args: JsonValue, _requestId?: string,
     ): Promise<RemoteResult<CallOutcome>> => ok<CallOutcome>({ callId: 'runtime-1', status: 'success', result: { ok: true } })),
     cancel: vi.fn(async () => ok(true)),
-    dataInfo: vi.fn(async (appId: string) => ok({ appId, path: '/tmp/app-data.sqlite', byteSize: 1, schemaVersion: 1, documentCount: 1, collections: {}, backups: [], backupCount: 0, legacyImports: {} })),
+    dataInfo: vi.fn(async (appId: string) => ok({ appId, path: '/tmp/app-data.sqlite', byteSize: 1, schemaVersion: 1, documentCount: 1, collections: {}, backups: [], backupCount: 0 })),
     dataExport: vi.fn(async () => ok({ fileName: 'app.json', json: '{}' })),
     dataImportPreview: vi.fn(async (appId: string) => ok({ appId, apps: 1, documents: 1, collections: 0, newDocuments: 1, overwrittenDocuments: 0, removedDocuments: 0, newCollectionItems: 0, overwrittenCollectionItems: 0, removedCollectionItems: 0 })),
     dataImport: vi.fn(async (appId: string) => ok({ appId, apps: 1, documents: 1, collections: 0, backupPath: '/tmp/backup.sqlite', reload: 'ok' as const })),
@@ -136,15 +137,13 @@ function fakeRemote() {
     cancelTask: vi.fn(async () => ok('accepted' as const)),
     policies: vi.fn(async () => ok([])),
     setActivation: vi.fn(async () => ok([])),
+    checkHealth: vi.fn(async () => ok<readonly AppInfo[]>([app('workbook')])),
     setAppModel: vi.fn(async () => ok(true)),
     modelCatalog: vi.fn(async () => ok({ providers: [] })),
     modelUsage: vi.fn(async () => ok({ calls: 0, succeeded: 0, failed: 0, cancelled: 0, usageMissing: 0, totalDurationMs: 0 })),
     modelLimits: vi.fn(async () => ok({ background: true })),
     setModelLimits: vi.fn(async () => ok(true)),
-    credentials: vi.fn(async () => ok([{ name: 'token', set: true }])),
-    setCredential: vi.fn(async () => ok(true)),
-    deleteCredential: vi.fn(async () => ok(true)),
-    resolveObject: vi.fn(async () => ok({ ref: { appId: 'objects', type: 'task', id: '1' }, title: 'Task 1' })),
+    resolveObject: vi.fn(async () => ok({ ok: true, value: { ref: { appId: 'objects', type: 'task', id: '1' }, title: 'Task 1' } })),
     completePageCommand: vi.fn(async () => ok(true)),
     setPolicy: vi.fn(async () => ok([])),
     grants: vi.fn(async () => ok<readonly CapabilityGrant[]>([grant({ kind: 'human' })])),
@@ -255,9 +254,9 @@ describe('applications shell: start, list and watch', () => {
     shell.start()
     streamOf(remote).push({ kind: 'lifecycle', appId: 'workbook', apps: [app('workbook')] })
     await tick()
-    pending.resolve(ok([{ ...app('workbook'), status: 'starting' }]))
+    pending.resolve(ok([{ ...app('workbook'), runtime: 'starting' }]))
     await tick()
-    expect(shell.state.getSnapshot().apps?.[0]?.status).toBe('available')
+    expect(shell.state.getSnapshot().apps?.[0]?.runtime).toBe('ready')
     shell.dispose()
   })
 
@@ -269,13 +268,13 @@ describe('applications shell: start, list and watch', () => {
     const refresh = vi.fn()
     shell.onChanged('workbook', refresh)
     const stream = streamOf(remote)
-    stream.push({ kind: 'lifecycle', appId: 'workbook', apps: [app('disk-analysis'), { ...app('workbook'), status: 'starting' }] })
+    stream.push({ kind: 'lifecycle', appId: 'workbook', apps: [app('disk-analysis'), { ...app('workbook'), runtime: 'starting' }] })
     await tick()
-    expect(shell.state.getSnapshot().apps?.[1]?.status).toBe('starting')
+    expect(shell.state.getSnapshot().apps?.[1]?.runtime).toBe('starting')
     expect(refresh).not.toHaveBeenCalled()
     stream.push({ kind: 'lifecycle', appId: 'workbook', apps: [app('workbook')] })
     await tick()
-    expect(shell.state.getSnapshot().apps?.[0]?.status).toBe('available')
+    expect(shell.state.getSnapshot().apps?.[0]?.runtime).toBe('ready')
     expect(refresh).toHaveBeenCalledTimes(1)
     stream.push({ kind: 'lifecycle', appId: 'workbook', apps: [] })
     await tick()
@@ -288,7 +287,7 @@ describe('applications shell: start, list and watch', () => {
     const remote = fakeRemote()
     const shell = shellOf(remote)
     const seen: number[] = []
-    const off = shell.state.subscribe(() => { seen.push(shell.state.getSnapshot().running.size) })
+    const off = shell.state.subscribe(() => { seen.push(shell.state.getSnapshot().runningCalls.length) })
     shell.start()
     expect(shell.state.getSnapshot().watching).toBe(true)
     expect(remote.watch).toHaveBeenCalledTimes(1)
@@ -427,7 +426,7 @@ describe('applications shell: reconnect', () => {
     expect(shell.state.getSnapshot().watching).toBe(true)
     await tick()
     expect(remote.list).toHaveBeenCalledTimes(2)
-    expect(shell.state.getSnapshot().apps?.[0]?.status).toBe('failed')
+    expect(shell.state.getSnapshot().apps?.[0]?.reason).toBe('platform.start-failed')
     expect(workbook).toHaveBeenCalledTimes(1)
     // A view that never registered a listener is not touched, and the old
     // generation's frames no longer reach anyone.
@@ -477,7 +476,7 @@ describe('applications shell: calls', () => {
     expect(outcome).toEqual({ callId: 'runtime-7', status: 'success', result: 42 })
     expect(remote.call).toHaveBeenCalledWith('workbook', 'write', { text: 'hello' }, 'request-7')
     expect(shell.state.getSnapshot().outcomes.get('workbook')).toEqual(outcome)
-    expect(shell.state.getSnapshot().running.size).toBe(0)
+    expect(shell.state.getSnapshot().runningCalls).toEqual([])
   })
 
   it('mints a requestId when the caller names none', async () => {
@@ -499,7 +498,7 @@ describe('applications shell: calls', () => {
     })
     const pending = shell.call('workbook', 'write', {})
     await tick()
-    expect(shell.state.getSnapshot().running.get('workbook')).toBe(1)
+    expect(shell.state.getSnapshot().runningCalls.filter(call => call.appId === 'workbook')).toHaveLength(1)
     expect(shell.state.getSnapshot().runningCalls).toMatchObject([{ appId: 'workbook', op: 'write' }])
     expect(Number.isNaN(Date.parse(shell.state.getSnapshot().runningCalls[0]!.startedAt))).toBe(false)
     expect(shell.viewProps('workbook').running).toBe(true)
@@ -507,6 +506,14 @@ describe('applications shell: calls', () => {
     await pending
     expect(shell.state.getSnapshot().runningCalls).toEqual([])
     expect(shell.viewProps('workbook').running).toBe(false)
+  })
+
+  it('refuses a cross-application page call before it reaches the host', async () => {
+    const remote = fakeRemote()
+    const shell = shellOf(remote)
+    const outcome = await shell.call('workbook', 'write', {}, undefined, 'other')
+    expect(outcome).toMatchObject({ status: 'rejected', error: { code: 'platform.cross-app-page' } })
+    expect(remote.call).not.toHaveBeenCalled()
   })
 
   it('refuses an application the host does not run, without calling it', async () => {
@@ -548,7 +555,7 @@ describe('applications shell: calls', () => {
     const shell = shellOf(remote)
     remote.call.mockResolvedValue(carrierFailure())
     await expect(shell.call('workbook', 'write', {})).rejects.toThrow('the carrier is gone')
-    expect(shell.state.getSnapshot().running.size).toBe(0)
+    expect(shell.state.getSnapshot().runningCalls).toEqual([])
     expect(shell.state.getSnapshot().outcomes.size).toBe(0)
   })
 
@@ -802,7 +809,6 @@ describe('applications shell: selection and view props', () => {
     expect(second.call).toBe(first.call)
     expect(second.cancel).toBe(first.cancel)
     expect(second.onChanged).toBe(first.onChanged)
-    expect(second.claimProgress).toBe(first.claimProgress)
     expect(shell.viewProps('disk-analysis').call).not.toBe(first.call)
     shell.dispose()
     expect(shell.viewProps('workbook').call).not.toBe(first.call)
@@ -824,109 +830,6 @@ describe('applications shell: selection and view props', () => {
     props.cancel('request-4')
     await tick()
     expect(remote.cancel).toHaveBeenCalledWith('request-4')
-  })
-})
-
-describe('applications shell: progress take-over', () => {
-  it('claims one call’s row for the application that made it, and hands it back on release', () => {
-    const shell = shellOf(fakeRemote())
-    const release = shell.viewProps('workbook').claimProgress('request-9')
-    expect([...(shell.state.getSnapshot().claims.get('workbook') ?? [])]).toEqual(['request-9'])
-    // The claim is the APPLICATION’s: no other application is named by it.
-    expect(shell.state.getSnapshot().claims.has('disk-analysis')).toBe(false)
-    release()
-    expect(shell.state.getSnapshot().claims.size).toBe(0)
-    // Idempotent: a page that cleaned up twice changes nothing the second time.
-    release()
-    expect(shell.state.getSnapshot().claims.size).toBe(0)
-    shell.dispose()
-  })
-
-  it('keeps every application’s claims apart, and drops them a page at a time', () => {
-    const shell = shellOf(fakeRemote())
-    // Two applications may legitimately use the same call id (ids are per
-    // application), so a claim is namespaced by the application that made it.
-    const workbook = shell.viewProps('workbook').claimProgress('call-1')
-    shell.viewProps('disk-analysis').claimProgress('call-1')
-    expect([...(shell.state.getSnapshot().claims.get('workbook') ?? [])]).toEqual(['call-1'])
-    expect([...(shell.state.getSnapshot().claims.get('disk-analysis') ?? [])]).toEqual(['call-1'])
-    shell.releaseClaims('workbook')
-    expect(shell.state.getSnapshot().claims.has('workbook')).toBe(false)
-    expect([...(shell.state.getSnapshot().claims.get('disk-analysis') ?? [])]).toEqual(['call-1'])
-    // The late release of a dropped claim reaches nothing — the other
-    // application’s take-over is not its to undo.
-    workbook()
-    expect([...(shell.state.getSnapshot().claims.get('disk-analysis') ?? [])]).toEqual(['call-1'])
-    shell.releaseClaims('disk-analysis')
-    expect(shell.state.getSnapshot().claims.size).toBe(0)
-    shell.dispose()
-  })
-
-  it('drops only the claim it names, and releases nothing for an application that holds none', () => {
-    const shell = shellOf(fakeRemote())
-    const first = shell.viewProps('workbook').claimProgress('call-1')
-    shell.viewProps('workbook').claimProgress('call-2')
-    first()
-    // The other call of the same application is still taken over.
-    expect([...(shell.state.getSnapshot().claims.get('workbook') ?? [])]).toEqual(['call-2'])
-    // An application nobody claimed under is not a release the shell owes.
-    shell.releaseClaims('disk-analysis')
-    expect([...(shell.state.getSnapshot().claims.get('workbook') ?? [])]).toEqual(['call-2'])
-    shell.dispose()
-  })
-
-  it('keeps the raw notice: a take-over changes what the surface draws, not what the shell holds', async () => {
-    const remote = fakeRemote()
-    const shell = shellOf(remote)
-    shell.start()
-    await tick()
-    streamOf(remote).push({
-      kind: 'progress',
-      notice: { appId: 'workbook', op: 'write', callId: 'request-9', message: 'scanning' },
-    })
-    await tick()
-    const release = shell.viewProps('workbook').claimProgress('request-9')
-    expect(shell.state.getSnapshot().progress.map(notice => notice.callId)).toEqual(['request-9'])
-    expect([...(shell.state.getSnapshot().claims.get('workbook') ?? [])]).toEqual(['request-9'])
-    release()
-    shell.dispose()
-  })
-
-  it('drops a claim when the call settles, and a late release cannot touch a newer claim', async () => {
-    const remote = fakeRemote()
-    const shell = shellOf(remote)
-    remote.call.mockResolvedValue(ok<CallOutcome>({ callId: 'runtime-1', status: 'success', result: null }))
-    const first = shell.viewProps('workbook').claimProgress('request-9')
-    await shell.call('workbook', 'write', {}, 'request-9')
-    // The call is over: its take-over dies with it, so nothing lingers for the
-    // next call that reuses the id.
-    expect(shell.state.getSnapshot().claims.size).toBe(0)
-    const second = shell.viewProps('workbook').claimProgress('request-9')
-    // The late release belongs to the finished call, not to this one.
-    first()
-    expect([...(shell.state.getSnapshot().claims.get('workbook') ?? [])]).toEqual(['request-9'])
-    second()
-    expect(shell.state.getSnapshot().claims.size).toBe(0)
-    shell.dispose()
-  })
-
-  it('drops a claim however the call ends — a local refusal, a failed confirming read', async () => {
-    const remote = fakeRemote()
-    const shell = shellOf(remote)
-    const refused = shell.viewProps('ghost').claimProgress('request-1')
-    await shell.call('ghost', 'write', {}, 'request-1')
-    expect(shell.state.getSnapshot().claims.size).toBe(0)
-    // …including the ending that never got to begin: the read that confirms the
-    // application failed, so the call rejected before it started.
-    remote.list.mockResolvedValue(carrierFailure())
-    const unbegun = shell.viewProps('workbook').claimProgress('request-2')
-    await expect(shell.call('workbook', 'write', {}, 'request-2')).rejects.toThrow('the carrier is gone')
-    expect(shell.state.getSnapshot().claims.size).toBe(0)
-    // The late releases of both are no-ops.
-    refused()
-    unbegun()
-    expect(shell.state.getSnapshot().claims.size).toBe(0)
-    shell.dispose()
   })
 })
 
@@ -952,9 +855,9 @@ describe('application data reads', () => {
     remote.dataInfo.mockResolvedValueOnce({ ok: false, error: new RemoteError('gateway/internal', 'data down', {}) })
     await expect(shell.dataInfo('workbook')).rejects.toThrow('data down')
     await expect(shell.previewDataImport('workbook', '{}')).resolves.toMatchObject({ documents: 1 })
-    await expect(shell.importData('workbook', '{}')).resolves.toMatchObject({ backupPath: '/tmp/backup.sqlite' })
+    await expect(shell.importData('workbook', 'plan', 'request')).resolves.toMatchObject({ backupPath: '/tmp/backup.sqlite' })
     remote.dataImport.mockResolvedValueOnce({ ok: false, error: new RemoteError('gateway/internal', 'import down', {}) })
-    await expect(shell.importData('workbook', '{}')).rejects.toThrow('import down')
+    await expect(shell.importData('workbook', 'plan', 'request')).rejects.toThrow('import down')
     await expect(shell.dataReload('workbook')).resolves.toBeUndefined()
     remote.dataReload.mockResolvedValueOnce({ ok: false, error: new RemoteError('gateway/internal', 'reload down', {}) })
     await expect(shell.dataReload('workbook')).rejects.toThrow('reload down')
@@ -1022,21 +925,6 @@ describe('model selection command', () => {
     expect(await shell.setModelLimits('workbook', { background: true })).toBe(false)
     remote.setModelLimits.mockRejectedValueOnce(new Error('offline'))
     expect(await shell.setModelLimits('workbook', { background: true })).toBe(false)
-    expect(await shell.credentials('workbook')).toEqual([{ name: 'token', set: true }])
-    expect(await shell.setCredential('workbook', 'token', 'x')).toBe(true)
-    expect(await shell.deleteCredential('workbook', 'token')).toBe(true)
-    remote.credentials.mockRejectedValueOnce(new Error('offline'))
-    await expect(shell.credentials('workbook')).rejects.toThrow(/offline/u)
-    remote.credentials.mockResolvedValueOnce(carrierFailure())
-    await expect(shell.credentials('workbook')).rejects.toBeDefined()
-    remote.setCredential.mockResolvedValueOnce(ok(false))
-    expect(await shell.setCredential('workbook', 'token', 'x')).toBe(false)
-    remote.setCredential.mockRejectedValueOnce(new Error('offline'))
-    expect(await shell.setCredential('workbook', 'token', 'x')).toBe(false)
-    remote.deleteCredential.mockResolvedValueOnce(ok(false))
-    expect(await shell.deleteCredential('workbook', 'token')).toBe(false)
-    remote.deleteCredential.mockRejectedValueOnce(new Error('offline'))
-    expect(await shell.deleteCredential('workbook', 'token')).toBe(false)
     shell.dispose()
   })
 })
@@ -1057,20 +945,85 @@ describe('activation commands', () => {
   })
 })
 
+describe('health checks', () => {
+  it('runs the explicit check and paints the rows the host answered', async () => {
+    const remote = fakeRemote()
+    const shell = shellOf(remote)
+    remote.checkHealth.mockResolvedValueOnce(ok<readonly AppInfo[]>([{
+      ...app('workbook'),
+      health: 'degraded',
+      detail: 'the model is not configured',
+    }]))
+    expect(await shell.checkHealth('workbook')).toBe(true)
+    expect(remote.checkHealth).toHaveBeenCalledWith('workbook')
+    expect(shell.state.getSnapshot().apps?.[0]).toMatchObject({
+      health: 'degraded',
+      detail: 'the model is not configured',
+    })
+    expect(shell.state.getSnapshot().error).toBeUndefined()
+    shell.dispose()
+  })
+
+  it('reports a failed check instead of painting a result', async () => {
+    const remote = fakeRemote()
+    const shell = shellOf(remote)
+    remote.checkHealth.mockResolvedValueOnce(carrierFailure())
+    expect(await shell.checkHealth('workbook')).toBe(false)
+    expect(shell.state.getSnapshot().error).toBeDefined()
+    // The failed answer does not overwrite the rows.
+    expect(shell.state.getSnapshot().apps).toBeUndefined()
+    shell.dispose()
+  })
+
+  it('does not paint a check answer over a newer streamed lifecycle snapshot', async () => {
+    const remote = fakeRemote()
+    const shell = shellOf(remote)
+    shell.start()
+    await tick()
+    const pending = Promise.withResolvers<Awaited<ReturnType<typeof remote.checkHealth>>>()
+    remote.checkHealth.mockReturnValueOnce(pending.promise)
+    const checking = shell.checkHealth('workbook')
+    const streamed = { ...app('workbook'), health: 'degraded' as const }
+    streamOf(remote).push({ kind: 'lifecycle', appId: 'workbook', apps: [streamed] })
+    await tick()
+    pending.resolve(ok<readonly AppInfo[]>([app('workbook')]))
+    expect(await checking).toBe(true)
+    expect(shell.state.getSnapshot().apps?.[0]?.health).toBe('degraded')
+    shell.dispose()
+  })
+})
+
 describe('object references', () => {
   it('resolves through the host and rejects a failed resolution', async () => {
     const remote = fakeRemote()
     const shell = shellOf(remote)
     const ref = { appId: 'objects', type: 'task', id: '1' }
     const resolve = shell.viewProps('objects').resolveObject!
-    expect(await resolve(ref)).toEqual({ ref, title: 'Task 1' })
+    expect(await resolve(ref)).toEqual({ ok: true, value: { ref, title: 'Task 1' } })
+    // A carrier failure is still an answer about the reference: it could not be
+    // checked, so the page branches on a code instead of crashing.
     remote.resolveObject.mockResolvedValueOnce(carrierFailure())
-    await expect(resolve(ref)).rejects.toThrow(/carrier is gone/u)
+    expect(await resolve(ref)).toEqual({ ok: false, error: { code: 'gateway/internal', message: 'the carrier is gone' } })
   })
 })
 
 
 describe('page commands', () => {
+  it('notifies page-close listeners', async () => {
+    const remote = fakeRemote()
+    const shell = shellOf(remote)
+    shell.start()
+    await tick()
+    const closed: Array<{ sessionId: string; pageId: string }> = []
+    const off = shell.onPageClosed(notice => { closed.push(notice) })
+    streamOf(remote).push({ kind: 'page-closed', sessionId: 's-app', pageId: 'page-1' })
+    await tick()
+    off()
+    streamOf(remote).push({ kind: 'page-closed', sessionId: 's-app', pageId: 'page-2' })
+    await tick()
+    expect(closed).toEqual([{ sessionId: 's-app', pageId: 'page-1' }])
+  })
+
   it('asks the first interested listener and answers the host', async () => {
     const remote = fakeRemote()
     const shell = shellOf(remote)

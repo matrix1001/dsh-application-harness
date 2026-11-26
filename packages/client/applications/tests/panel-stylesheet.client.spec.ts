@@ -2,9 +2,9 @@
  * The application area's stylesheet contracts, measured against the platform
  * theme:
  *
- * - **the management dialog** — one centered card, capped at `min(720px, 100%)`
- *   on a wide area and near-full-screen on a narrow one, with the head and the
- *   tab strip fixed while the body scrolls;
+ * - **the management page** — a full-area page with its own fixed header, a
+ *   persistent list beside the detail on a wide area, and list/detail pages on
+ *   a narrow one, while the detail body scrolls;
  * - **no CSS containment** — a `container-type` (or an `@container` query) on
  *   the area or its navigation would make them a containing block for the
  *   application pages' `position: fixed` overlays, which anchor to the viewport;
@@ -27,7 +27,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import {
-  atRuleBody, contrastRatio, outerRules, propertyOf, readPlatformTheme, resolveToken, ruleBody,
+  contrastRatio, outerRules, propertyOf, readPlatformTheme, resolveToken, ruleBody,
 } from './stylesheet.ts'
 
 /** The two stylesheets the area paints with (the CSS-module imports carry class maps, not tokens). */
@@ -38,12 +38,6 @@ const sources = {
 
 /** The unconditional rules of one stylesheet: what a wide area is painted with. */
 const wide = { area: outerRules(sources.area), lists: outerRules(sources.lists) } as const
-
-/** The marker of the narrow media query (the dialog goes near-full-screen there). */
-const NARROW_MARKER = '(max-width: 720px)'
-
-/** The narrow rules of the area stylesheet. */
-const narrow = atRuleBody(sources.area, NARROW_MARKER) ?? ''
 
 /** The declared value of one class's property in one stylesheet face. */
 function value(face: string, className: string, property: string): string | undefined {
@@ -62,16 +56,10 @@ type TextPair = readonly [what: string, sheet: 'area' | 'lists', selector: strin
 
 /** The pairs whose foreground is a platform LABEL colour. */
 const TEXT_PAIRS: readonly TextPair[] = [
-  ['a navigation row', 'area', 'navRow', 'dsw-alias-label-primary', 'dsw-alias-bg-base'],
-  ['a navigation row status', 'area', 'navStatus', 'dsw-alias-label-secondary', 'dsw-alias-bg-base'],
-  ['the navigation hint', 'area', 'navHint', 'dsw-alias-label-secondary', 'dsw-alias-bg-base'],
-  ['the management entry', 'area', 'navManage', 'dsw-alias-label-secondary', 'dsw-alias-bg-base'],
-  ['the header switcher', 'area', 'switcher', 'dsw-alias-label-primary', 'dsw-alias-bg-base'],
   ['a surface state', 'area', 'state', 'dsw-alias-label-primary', 'dsw-alias-bg-layer-1'],
   ['a state reason', 'area', 'stateReason', 'dsw-alias-label-secondary', 'dsw-alias-bg-layer-1'],
   ['a record code', 'lists', 'code', 'dsw-alias-label-secondary', 'dsw-alias-bg-layer-1'],
   ['a record meta line', 'lists', 'recordMeta', 'dsw-alias-label-secondary', 'dsw-alias-bg-layer-1'],
-  ['a record meta value', 'lists', 'recordMetaText', 'dsw-alias-label-secondary', 'dsw-alias-bg-layer-1'],
   ['a record message', 'lists', 'recordMessage', 'dsw-alias-label-secondary', 'dsw-alias-bg-layer-1'],
 ]
 
@@ -85,26 +73,37 @@ const STATE_FLOOR = 4.49
 
 /** The pairs whose foreground is a platform STATE colour rather than a label. */
 const STATE_PAIRS: readonly TextPair[] = [
-  ['a failed navigation row', 'area', ".navStatus[data-status='failed']", 'dsw-alias-state-error-primary', 'dsw-alias-bg-base'],
-  ['the transport error line', 'area', 'error', 'dsw-alias-state-error-primary', 'dsw-alias-bg-layer-1'],
   ['a failed call’s message', 'lists', 'outcomeMessage', 'dsw-alias-state-error-primary', 'dsw-alias-bg-layer-1'],
 ]
 
-describe('the management dialog (the new geometry)', () => {
-  it('caps the card on a wide area and fills a narrow one', () => {
-    expect(value(wide.area, 'dialog', 'width')).toBe('min(720px, 100%)')
-    expect(value(wide.area, 'dialog', 'height')).toBe('min(620px, 100%)')
-    expect(narrow).not.toBe('')
-    expect(value(narrow, 'dialog', 'width')).toBe('100%')
-    expect(value(narrow, 'dialog', 'height')).toBe('100%')
+describe('the management page (the new geometry)', () => {
+  it('covers the application frame and keeps the header and area tabs outside the scroller', () => {
+    expect(value(wide.area, 'stage', 'position')).toBe('relative')
+    expect(value(wide.area, 'managePage', 'position')).toBe('absolute')
+    expect(value(wide.area, 'managePage', 'inset')).toBe('0')
+    expect(value(wide.area, 'manageHeader', 'height')).toBe('var(--app-header-height)')
+    expect(value(wide.area, 'manageTabs', 'flex')).toBe('none')
+    expect(value(wide.area, 'manageTabs', 'flex-wrap')).toBe('wrap')
+    expect(value(wide.area, 'manageBody', 'overflow')).toBe('auto')
+    expect(value(wide.area, 'manageListPane', 'flex')).toBe('0 0 280px')
   })
 
-  it('keeps the head and the tabs fixed while the body scrolls', () => {
-    expect(value(wide.area, 'manageHead', 'flex')).toBe('none')
-    expect(value(wide.area, 'manageTabs', 'flex')).toBe('none')
-    expect(value(wide.area, 'manageBody', 'overflow')).toBe('auto')
-    // A narrow tab strip wraps instead of overflowing the card.
-    expect(value(wide.area, 'manageTabs', 'flex-wrap')).toBe('wrap')
+  it('turns the persistent list and the detail into two pages on a narrow area', () => {
+    expect(selectorValue(wide.area, ".managePage[data-narrow='true'][data-view='detail'] .manageListPane", 'display')).toBe('none')
+    expect(selectorValue(wide.area, ".managePage[data-narrow='true'][data-view='list'] .manageDetailPane", 'display')).toBe('none')
+    expect(wide.area).toContain('managePage[data-narrow=\'true\']')
+  })
+})
+
+describe('the shell’s defined primitives', () => {
+  it('defines the narrow conversation overlay and the call-form/data-meta classes it uses', () => {
+    // The narrow dock body has to cover the content column; an undefined class
+    // here silently leaves the side column on a small area.
+    expect(value(wide.area, 'dockBodyNarrow', 'position')).toBe('absolute')
+    expect(value(wide.area, 'dockBodyNarrow', 'inset')).toBe('0')
+    expect(value(wide.area, 'dockBodyNarrow', 'border-left')).toBe('0')
+    expect(value(wide.area, 'input', 'border')).toBe('1px solid var(--dsw-alias-border-l1)')
+    expect(value(wide.area, 'meta', 'color')).toBe('var(--dsw-alias-label-secondary)')
   })
 })
 
@@ -115,9 +114,8 @@ describe('the area’s layout invariants', () => {
     // A container QUERY is the same containment by another spelling.
     expect(sources.area).not.toMatch(/@container/u)
     expect(sources.lists).not.toMatch(/@container/u)
-    // The outer box is a plain flex row: the navigation column and the frame.
+    // The outer box is a plain flex row: the frame fills it.
     expect(value(wide.area, 'area', 'display')).toBe('flex')
-    expect(value(wide.area, 'nav', 'display')).toBe('flex')
     expect(value(wide.area, 'frame', 'min-width')).toBe('0')
   })
 
@@ -133,15 +131,11 @@ describe('the area’s layout invariants', () => {
     expect(value(wide.area, 'contentFill', 'min-height')).toBe('0')
   })
 
-  it('anchors the narrow drawer to the area, and folds the wide column away entirely', () => {
-    // The drawer is absolutely positioned, so the area root must be its
-    // containing block while narrow — and only then.
-    expect(value(wide.area, 'navDrawer', 'position')).toBe('absolute')
-    expect(selectorValue(wide.area, ".area[data-narrow='true']", 'position')).toBe('relative')
-    // Wide and folded: the column leaves the row (display: none), it does not
-    // shrink to a sliver.
-    expect(value(wide.area, 'nav', 'flex')).toBe('0 0 204px')
-    expect(selectorValue(wide.area, ".nav[data-nav-state='collapsed']", 'display')).toBe('none')
+  it('no longer carries the removed navigation column or its drawer', () => {
+    // The applications area is a header plus frame; the old side column and
+    // drawer styles were removed rather than left as dead rules.
+    expect(sources.area).not.toMatch(/\.nav(?:[-\w])/u)
+    expect(sources.area).not.toMatch(/navDrawer|drawerBackdrop|navRow/u)
   })
 
   it('paints no copy with the tertiary label and no rule with a literal colour', () => {
@@ -162,7 +156,6 @@ describe('the area text pairs', () => {
   const SURFACES: readonly [sheet: 'area' | 'lists', className: string, token: string][] = [
     ['area', 'area', 'dsw-alias-bg-base'],
     ['area', 'state', 'dsw-alias-bg-layer-1'],
-    ['area', 'error', 'dsw-alias-bg-layer-1'],
     ['lists', 'record', 'dsw-alias-bg-layer-1'],
     ['lists', 'outcome', 'dsw-alias-bg-layer-1'],
   ]

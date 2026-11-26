@@ -35,12 +35,12 @@
     # to the applications themselves (the generated rows below).
     - id: application-runtime
       name: '@matrix1001/dsh-application-harness-runtime'
+      config: {}
 
     # The unified application data store (SQLite documents/collections; not part of the world).
     # It lives under the harness home (dshHomePath — cwd-independent) so every
-    # application's namespace survives restarts. The old JSON blob is a
-    # one-way import source for settings and filters; it is never rewritten.
-    # Absent a path, the store is in-memory only (not durable).
+    # application's namespace survives restarts. Absent a path, the store is
+    # in-memory only (not durable).
     - id: app-store
       name: '@matrix1001/dsh-application-harness-store'
       config:
@@ -85,12 +85,14 @@
         onboardingPath: !!js dshHomePath('application-harness/onboarding.json')
         historyPath: !!js dshHomePath('application-harness/history.jsonl')
         tasksPath: !!js dshHomePath('application-harness/tasks.jsonl')
-        secretsPath: !!js dshHomePath('application-harness/secrets.json')
-        dataPath: !!js dshHomePath('application-harness/app-data.sqlite')
+        delegationsPath: !!js dshHomePath('application-harness/delegations.json')
         conversationPath: !!js dshHomePath('application-harness/app-conversation.json')
 
     # The harness network capability (ctx.applicationHttp): applications make outbound
     # requests through it; an application declares no transport policy of its own.
+    # The row's one tunable, `proxy`, is the application network proxy: a volatile
+    # field the application area's management page edits (persisted in the user
+    # layer), routing application backends only — never model calls or DSH itself.
     - id: app-http
       name: '@matrix1001/dsh-application-harness-http'
 
@@ -106,39 +108,27 @@
 
     # --- generated application rows (do not edit below; node scripts/generate-bundle-patch.mjs) ---
     # 示例应用/视图行（真源 = 各包的 package.json `dsh.appRow` 声明）
-    - id: calendar
-      name: '@matrix1001/dsh-application-harness-calendar'
-    - id: disk-space
-      name: '@matrix1001/dsh-application-harness-disk-space'
-      config:
-        databasePath: !!js dshHomePath('application-harness/disk-space/index.db')
     - id: git-browser
       name: '@matrix1001/dsh-application-harness-git-browser'
       config:
         timeoutMs: 10000
+    - id: home
+      name: '@matrix1001/dsh-application-harness-home'
     - id: inbox
       name: '@matrix1001/dsh-application-harness-inbox'
     - id: notes
       name: '@matrix1001/dsh-application-harness-notes'
-    - id: tasks
-      name: '@matrix1001/dsh-application-harness-tasks'
-    - id: usage
-      name: '@matrix1001/dsh-application-harness-usage'
-    - id: workspace-review
-      name: '@matrix1001/dsh-application-harness-workspace-review'
-    - id: client-ui-calendar
-      name: '@matrix1001/dsh-application-harness-calendar-view'
-    - id: client-ui-disk-space
-      name: '@matrix1001/dsh-application-harness-disk-space-view'
+      config:
+        attachmentsPath: !!js dshHomePath('application-harness/notes/attachments')
+    - id: todo
+      name: '@matrix1001/dsh-application-harness-todo'
     - id: client-ui-git-browser
       name: '@matrix1001/dsh-application-harness-git-browser-view'
+    - id: client-ui-home
+      name: '@matrix1001/dsh-application-harness-home-view'
     - id: client-ui-inbox
       name: '@matrix1001/dsh-application-harness-inbox-view'
     - id: client-ui-notes
       name: '@matrix1001/dsh-application-harness-notes-view'
-    - id: client-ui-tasks
-      name: '@matrix1001/dsh-application-harness-tasks-view'
-    - id: client-ui-usage
-      name: '@matrix1001/dsh-application-harness-usage-view'
-    - id: client-ui-workspace-review
-      name: '@matrix1001/dsh-application-harness-workspace-review-view'
+    - id: client-ui-todo
+      name: '@matrix1001/dsh-application-harness-todo-view'

@@ -78,7 +78,7 @@ describe('the durable grant table', () => {
     const store = new GrantFileStore(path)
     expect(await store.list()).toEqual([])
 
-    const grant = { caller: { kind: 'app' as const, appId: 'notes' }, capabilities: ['tasks#create'], grantedAt: '2026-10-13T00:00:00.000Z' }
+    const grant = { caller: { kind: 'app' as const, appId: 'notes' }, capabilities: ['capability:storage'], grantedAt: '2026-10-13T00:00:00.000Z' }
     await store.save([grant])
     expect(await store.list()).toEqual([grant])
     // The file is the versioned envelope, written whole (and its directory created).
@@ -96,6 +96,7 @@ describe('the durable grant table', () => {
       ['no version this build writes', JSON.stringify({ schemaVersion: 99, grants: [] }), /names schema 99/],
       ['no grants array', JSON.stringify({ schemaVersion: GRANT_TABLE_VERSION }), /carries no grants array/],
       ['a malformed grant', JSON.stringify({ schemaVersion: GRANT_TABLE_VERSION, grants: [{ caller: { kind: 'app' }, capabilities: ['x#y'], grantedAt: 'now' }] }), /malformed grant/],
+      ['no approval time', JSON.stringify({ schemaVersion: GRANT_TABLE_VERSION, grants: [{ caller: { kind: 'app', appId: 'notes' }, capabilities: ['capability:storage'] }] }), /malformed grant/],
     ]
     for (const [label, text, pattern] of cases) {
       writeFileSync(path, text)
@@ -110,9 +111,9 @@ describe('the durable grant table', () => {
   it('round-trips every caller shape it stores, and refuses a grant it cannot read', async () => {
     const store = new GrantFileStore(path)
     const grants = [
-      { caller: { kind: 'ai' as const, sessionId: 'session-1', turnId: 'turn-1' }, capabilities: ['notes#create'], grantedAt: '2026-10-13T00:00:00.000Z' },
-      { caller: { kind: 'ai' as const }, capabilities: ['notes#list'], grantedAt: '2026-10-13T00:00:00.000Z' },
-      { caller: { kind: 'app' as const, appId: 'notes' }, capabilities: ['tasks#create'], grantedAt: '2026-10-13T00:00:00.000Z' },
+      { caller: { kind: 'ai' as const, sessionId: 'session-1', turnId: 'turn-1' }, capabilities: ['capability:model'], grantedAt: '2026-10-13T00:00:00.000Z' },
+      { caller: { kind: 'ai' as const }, capabilities: ['capability:model'], grantedAt: '2026-10-13T00:00:00.000Z' },
+      { caller: { kind: 'app' as const, appId: 'notes' }, capabilities: ['event:notes#created'], grantedAt: '2026-10-13T00:00:00.000Z' },
       { caller: { kind: 'background' as const, appId: 'notes' }, capabilities: ['capability:model'], grantedAt: '2026-10-13T00:00:00.000Z' },
     ]
     await store.save(grants)
@@ -144,7 +145,7 @@ describe('the durable grant table', () => {
     const blocked = join(home, 'a-file')
     writeFileSync(blocked, 'not a directory')
     const store = new GrantFileStore(join(blocked, 'grants.json'))
-    await expect(store.save([{ caller: { kind: 'ai' }, capabilities: ['demo#echo'], grantedAt: '2026-10-13T00:00:00.000Z' }]))
+    await expect(store.save([{ caller: { kind: 'ai' }, capabilities: ['capability:model'], grantedAt: '2026-10-13T00:00:00.000Z' }]))
       .rejects.toThrow()
   })
 })
@@ -156,20 +157,20 @@ describe('the grant face over the durable table', () => {
     const home = mkdtempSync(join(tmpdir(), 'application-harness-grants-'))
     const grantsPath = join(home, 'grants.json')
 
-    const first = await host([openDemoApp()], {}, { grantsPath })
-    await first.bridge.grant({ kind: 'app', appId: 'notes' }, ['demo#echo'])
-    expect(await first.bridge.grants()).toMatchObject([{ caller: { kind: 'app', appId: 'notes' }, capabilities: ['demo#echo'] }])
+    const first = await host([{ ...openDemoApp(), capabilities: ['model'] }], {}, { grantsPath })
+    await first.bridge.grant({ kind: 'app', appId: 'notes' }, ['capability:model'])
+    expect(await first.bridge.grants()).toMatchObject([{ caller: { kind: 'app', appId: 'notes' }, capabilities: ['capability:model'] }])
     await first.dispose()
-    expect(JSON.parse(readFileSync(grantsPath, 'utf8')).grants).toMatchObject([{ capabilities: ['demo#echo'] }])
+    expect(JSON.parse(readFileSync(grantsPath, 'utf8')).grants).toMatchObject([{ capabilities: ['capability:model'] }])
 
     // A fresh host over the SAME table: the approval survived the restart.
-    const second = await host([openDemoApp()], {}, { grantsPath })
-    expect(await second.bridge.grants()).toMatchObject([{ caller: { kind: 'app', appId: 'notes' }, capabilities: ['demo#echo'] }])
+    const second = await host([{ ...openDemoApp(), capabilities: ['model'] }], {}, { grantsPath })
+    expect(await second.bridge.grants()).toMatchObject([{ caller: { kind: 'app', appId: 'notes' }, capabilities: ['capability:model'] }])
     // The revoke drops it from the table, so a third host sees nothing.
     await second.bridge.revoke({ kind: 'app', appId: 'notes' })
     await second.dispose()
 
-    const third = await host([openDemoApp()], {}, { grantsPath })
+    const third = await host([{ ...openDemoApp(), capabilities: ['model'] }], {}, { grantsPath })
     expect(await third.bridge.grants()).toEqual([])
     await third.dispose()
     rmSync(home, { recursive: true, force: true })
@@ -183,8 +184,8 @@ describe('the grant face over the durable table', () => {
     writeFileSync(grantsPath, JSON.stringify({ schemaVersion: GRANT_TABLE_VERSION, grants: [] }))
     chmodSync(home, 0o500)
     try {
-      const { bridge, dispose } = await host([openDemoApp()], {}, { grantsPath })
-      await expect(bridge.grant({ kind: 'ai', sessionId: 'session-1' }, ['demo#echo'])).rejects.toThrow()
+      const { bridge, dispose } = await host([{ ...openDemoApp(), capabilities: ['model'] }], {}, { grantsPath })
+      await expect(bridge.grant({ kind: 'app', appId: 'notes' }, ['capability:model'])).rejects.toThrow()
       expect(await bridge.grants()).toEqual([])
       await dispose()
     } finally {
@@ -203,8 +204,8 @@ describe('the grant face over the durable table', () => {
     try {
       const { bridge, grantsPath, dispose } = await host([openDemoApp()], {}, { grantsPath: null })
       expect(grantsPath).toBe(join(home, 'application-harness', 'grants.json'))
-      await bridge.grant({ kind: 'ai', sessionId: 'session-1' }, ['demo#echo'])
-      expect(JSON.parse(readFileSync(grantsPath, 'utf8')).grants).toMatchObject([{ capabilities: ['demo#echo'] }])
+      await bridge.grant({ kind: 'app', appId: 'notes' }, ['capability:model'])
+      expect(JSON.parse(readFileSync(grantsPath, 'utf8')).grants).toMatchObject([{ capabilities: ['capability:model'] }])
       await dispose()
     } finally {
       if (previous === undefined) delete process.env.DSH_HOME

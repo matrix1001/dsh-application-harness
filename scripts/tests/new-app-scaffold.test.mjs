@@ -71,8 +71,8 @@ test('the default scaffold writes a host declaration and a view whose peers pass
     assert.match(instructions, /deployment\.yml/u)
     assert.match(instructions, /inject-contract\.json/u)
     assert.match(instructions, /node scripts\/deps\.mjs/u)
-    const hostManifest = JSON.parse(readFileSync(join(root, 'packages/examples/demo/package.json'), 'utf8'))
-    const viewManifest = JSON.parse(readFileSync(join(root, 'packages/client/demo-view/package.json'), 'utf8'))
+    const hostManifest = JSON.parse(readFileSync(join(root, 'apps/demo/host/package.json'), 'utf8'))
+    const viewManifest = JSON.parse(readFileSync(join(root, 'apps/demo/view/package.json'), 'utf8'))
     assert.equal(hostManifest.name, '@matrix1001/dsh-application-harness-demo')
     assert.deepEqual(hostManifest.dsh.appRow, { id: 'demo', name: '@matrix1001/dsh-application-harness-demo' })
     // The declaration is written against the runtime, not the retired anchor.
@@ -84,16 +84,23 @@ test('the default scaffold writes a host declaration and a view whose peers pass
 
     // The host half: an `AppDeclaration` built from the platform's schema DSL,
     // mounted through the shared helper, including disposal during startup.
-    const appSource = readFileSync(join(root, 'packages/examples/demo/src/app.ts'), 'utf8')
-    const indexSource = readFileSync(join(root, 'packages/examples/demo/src/index.ts'), 'utf8')
+    const appSource = readFileSync(join(root, 'apps/demo/host/src/app.ts'), 'utf8')
+    const indexSource = readFileSync(join(root, 'apps/demo/host/src/index.ts'), 'utf8')
     assert.match(appSource, /export function DemoDeclaration\(\): AppDeclaration/u)
     assert.match(appSource, /import \{ AppError \} from '@matrix1001\/dsh-application-harness-runtime'/u)
     assert.match(appSource, /^      ping: \{$/mu)
+    // Generation 2 with a data description and read semantics: the scaffolded
+    // declaration is the guide's standard example, not a file the reader has to
+    // replace (asserted here so the two cannot drift apart again).
+    assert.match(appSource, /generation: 2/u)
+    assert.match(appSource, /data: \{ kind: 'none' \}/u)
+    assert.match(appSource, /effect: 'read'/u)
+    assert.match(appSource, /additionalProperties: false/u)
     assert.match(appSource, /params: \{\n\s+message: \{ type: 'string', required: true/u)
     assert.match(appSource, /exposure: \{ ai: 'closed' \}/u)
     assert.match(indexSource, /export const inject = \['applications'\]/u)
     assert.match(indexSource, /await mountApplication\(ctx, DemoDeclaration\(\)\)/u)
-    assert.equal(hostManifest.engines.dsh, '>=0.2.2-rc.1 <0.3.0-0')
+    assert.equal(hostManifest.engines.dsh, '0.1.6-alpha.2')
     assert.doesNotMatch(indexSource, /registerOp|applicationRuntime|manifest/u)
 
     // The view half: registration into the shell's `applicationViews`, keyed by
@@ -103,7 +110,7 @@ test('the default scaffold writes a host declaration and a view whose peers pass
     assert.deepEqual(viewManifest.dsh.appRow, { id: 'client-ui-demo', name: '@matrix1001/dsh-application-harness-demo-view', appId: 'demo' })
     assert.equal(viewManifest.devDependencies['@matrix1001/dsh-application-harness-client-applications'], 'workspace:*')
     assert.equal(viewManifest.peerDependencies['@deepseek-ai/cordis'], FIXTURE_PIN)
-    const clientSource = readFileSync(join(root, 'packages/client/demo-view/src/client/index.ts'), 'utf8')
+    const clientSource = readFileSync(join(root, 'apps/demo/view/src/client/index.ts'), 'utf8')
     assert.match(clientSource, /export const inject = \['locale', 'applicationViews'\]/u)
     assert.match(clientSource, /ctx\.applicationViews\.register\(APP_ID, view\)/u)
     assert.match(clientSource, /const APP_ID = 'demo'/u)
@@ -114,23 +121,23 @@ test('the default scaffold writes a host declaration and a view whose peers pass
     assert.deepEqual(Object.keys(viewManifest.peerDependencies), ['@deepseek-ai/cordis'])
     // The browser/type edge to the shell is a devDependency plus a tsconfig
     // reference, not a peer.
-    const references = JSON.parse(readFileSync(join(root, 'packages/client/demo-view/tsconfig.json'), 'utf8')).references
-    assert.deepEqual(references, [{ path: '../applications' }])
-    const hostReferences = JSON.parse(readFileSync(join(root, 'packages/examples/demo/tsconfig.json'), 'utf8')).references
-    assert.deepEqual(hostReferences, [{ path: '../../application/runtime' }])
+    const references = JSON.parse(readFileSync(join(root, 'apps/demo/view/tsconfig.json'), 'utf8')).references
+    assert.deepEqual(references, [{ path: '../../../packages/client/applications' }])
+    const hostReferences = JSON.parse(readFileSync(join(root, 'apps/demo/host/tsconfig.json'), 'utf8')).references
+    assert.deepEqual(hostReferences, [{ path: '../../../packages/application/runtime' }])
 
     // No package README (and no pair record) is generated any more.
-    assert.equal(existsSync(join(root, 'packages/examples/demo/README.md')), false)
-    assert.equal(existsSync(join(root, 'packages/examples/demo/README.zh.md')), false)
-    assert.equal(existsSync(join(root, 'packages/examples/demo/README.i18n.yaml')), false)
-    assert.equal(existsSync(join(root, 'packages/client/demo-view/README.md')), false)
-    assert.equal(existsSync(join(root, 'packages/client/demo-view/README.zh.md')), false)
-    assert.ok(readdirSync(join(root, 'packages/examples/demo')).every((entry) => !entry.startsWith('README')))
+    assert.equal(existsSync(join(root, 'apps/demo/host/README.md')), false)
+    assert.equal(existsSync(join(root, 'apps/demo/host/README.zh.md')), false)
+    assert.equal(existsSync(join(root, 'apps/demo/host/README.i18n.yaml')), false)
+    assert.equal(existsSync(join(root, 'apps/demo/view/README.md')), false)
+    assert.equal(existsSync(join(root, 'apps/demo/view/README.zh.md')), false)
+    assert.ok(readdirSync(join(root, 'apps/demo/host')).every((entry) => !entry.startsWith('README')))
 
     // Both packages were wired into the build graphs.
-    assert.match(readFileSync(join(root, 'tsconfig.host.json'), 'utf8'), /packages\/examples\/demo/u)
-    assert.match(readFileSync(join(root, 'tsconfig.client.json'), 'utf8'), /packages\/client\/demo-view/u)
-    assert.match(readFileSync(join(root, 'tsdown.config.ts'), 'utf8'), /'packages\/client\/demo-view',/u)
+    assert.match(readFileSync(join(root, 'tsconfig.host.json'), 'utf8'), /apps\/demo\/host/u)
+    assert.match(readFileSync(join(root, 'tsconfig.client.json'), 'utf8'), /apps\/demo\/view/u)
+    assert.match(readFileSync(join(root, 'tsdown.config.ts'), 'utf8'), /'apps\/demo\/view',/u)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -140,12 +147,12 @@ test('--no-view scaffolds the host package only', () => {
   const root = scaffoldRoot()
   try {
     scaffold(root, 'solo', ['--no-view'])
-    assert.equal(existsSync(join(root, 'packages/examples/solo/package.json')), true)
-    assert.equal(existsSync(join(root, 'packages/client/solo-view')), false)
+    assert.equal(existsSync(join(root, 'apps/solo/host/package.json')), true)
+    assert.equal(existsSync(join(root, 'apps/solo/view')), false)
     assert.deepEqual(checkPeerShape(root), [])
     // The wiring follows the product: nothing named the skipped view package.
-    assert.doesNotMatch(readFileSync(join(root, 'tsconfig.client.json'), 'utf8'), /solo-view/u)
-    assert.doesNotMatch(readFileSync(join(root, 'tsdown.config.ts'), 'utf8'), /solo-view/u)
+    assert.doesNotMatch(readFileSync(join(root, 'tsconfig.client.json'), 'utf8'), /apps\/solo\/view/u)
+    assert.doesNotMatch(readFileSync(join(root, 'tsdown.config.ts'), 'utf8'), /apps\/solo\/view/u)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -155,11 +162,11 @@ test('--version is honoured in both forms (it used to be silently dropped)', () 
   const root = scaffoldRoot()
   try {
     scaffold(root, 'vone', ['--version', '9.9.9'])
-    assert.equal(JSON.parse(readFileSync(join(root, 'packages/examples/vone/package.json'), 'utf8')).version, '9.9.9')
+    assert.equal(JSON.parse(readFileSync(join(root, 'apps/vone/host/package.json'), 'utf8')).version, '9.9.9')
     scaffold(root, 'vtwo', ['--version=8.8.8'])
-    assert.equal(JSON.parse(readFileSync(join(root, 'packages/examples/vtwo/package.json'), 'utf8')).version, '8.8.8')
+    assert.equal(JSON.parse(readFileSync(join(root, 'apps/vtwo/host/package.json'), 'utf8')).version, '8.8.8')
     // The flag's VALUE never becomes the appid.
-    assert.equal(existsSync(join(root, 'packages/examples/9.9.9')), false)
+    assert.equal(existsSync(join(root, 'apps/9.9.9/host')), false)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -184,13 +191,16 @@ function verificationRoot() {
   writeFileSync(join(root, 'tsconfig.client.json'), '{\n  "references": [\n    { "path": "./packages/client/applications" }\n  ]\n}\n')
   writeFileSync(join(root, 'tsdown.config.ts'), "const CLIENT_WORKSPACE = [\n  'packages/client/applications',\n] as const\n")
   mkdirSync(join(root, 'packages/client'), { recursive: true })
-  mkdirSync(join(root, 'packages/examples'), { recursive: true })
+  mkdirSync(join(root, 'apps'), { recursive: true })
   mkdirSync(join(root, 'node_modules/@deepseek-ai'), { recursive: true })
   mkdirSync(join(root, 'node_modules/@matrix1001'), { recursive: true })
   // The shared trees the referenced projects live in.
   symlinkSync(join(ROOT, 'packages/application'), join(root, 'packages/application'))
   symlinkSync(join(ROOT, 'packages/typert'), join(root, 'packages/typert'))
   symlinkSync(join(ROOT, 'packages/client/applications'), join(root, 'packages/client/applications'))
+  // applications references the chrome project; the verification root needs the
+  // same sibling so the copied tsconfig resolves it.
+  symlinkSync(join(ROOT, 'packages/client/chrome'), join(root, 'packages/client/chrome'))
   // The one workspace package node_modules resolution cannot reach from here
   // (it is not a root dependency): the shell the view registers into.
   symlinkSync(join(ROOT, 'packages/client/applications'), join(root, 'node_modules/@matrix1001/dsh-application-harness-client-applications'))
@@ -214,6 +224,7 @@ function requireBuiltDeclarations() {
     join(ROOT, 'packages/application/runtime/lib/types/index.d.ts'),
     join(ROOT, 'packages/application/host-bridge/lib/types/index.d.ts'),
     join(ROOT, 'packages/client/applications/lib/types/client/index.d.ts'),
+    join(ROOT, 'packages/client/chrome/lib/types/index.d.ts'),
   ]
   const missing = required.filter((path) => !existsSync(path))
   if (missing.length > 0) {
@@ -226,8 +237,8 @@ test('the generated packages typecheck (tsc --noEmit -p) and run under vitest', 
   try {
     requireBuiltDeclarations()
     scaffold(root, 'demo')
-    const hostPackage = join(root, 'packages/examples/demo')
-    const viewPackage = join(root, 'packages/client/demo-view')
+    const hostPackage = join(root, 'apps/demo/host')
+    const viewPackage = join(root, 'apps/demo/view')
     // The real commands: the generated package's own tsconfig, nothing relaxed.
     runBin('tsc', ['--noEmit', '-p', join(hostPackage, 'tsconfig.json')])
     runBin('tsc', ['--noEmit', '-p', join(viewPackage, 'tsconfig.json')])
@@ -238,7 +249,7 @@ test('the generated packages typecheck (tsc --noEmit -p) and run under vitest', 
     writeFileSync(join(hostPackage, 'tests/demo.spec.ts'), `import { expect, test } from 'vitest'
 import { DemoDeclaration, apply as mountDemo } from '../src/index.ts'
 import { ApplicationRuntime } from '@matrix1001/dsh-application-harness-runtime'
-import { apply, inject } from '../../../client/demo-view/src/client/index.ts'
+import { apply, inject } from '../../view/src/client/index.ts'
 
 test('the generated declaration answers ping through its own op', async () => {
   const declaration = DemoDeclaration()
@@ -276,7 +287,7 @@ test('the generated view registers the demo page into the shell registry', () =>
 `)
     const run = runBin('vitest', [
       'run', '--root', root, '--config', join(ROOT, 'vitest.config.ts'),
-      'packages/examples/demo/tests/demo.spec.ts',
+      'apps/demo/host/tests/demo.spec.ts',
     ])
     const plain = stripVTControlCharacters(run)
     assert.match(plain, /Test Files\s+1 passed/u)

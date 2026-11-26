@@ -13,9 +13,9 @@
  * so its assertions read the document rather than the slot's own container.
  */
 import { Context } from '@deepseek-ai/cordis'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { act, cleanup, fireEvent, waitFor, within } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SlotTestRuntime, type SlotView } from '@deepseek-ai/dsh-client-test-runtime'
 import { resolveSlotLabel } from '@deepseek-ai/dsh-client-ui-slots'
 import { apply as applyLocale, inject as localeInject } from '@deepseek-ai/dsh-client-locale/client'
@@ -26,7 +26,7 @@ import type {
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import { RemoteError, type RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type {
-  AppDataImportResult, AppDataRestorePreview, AppDataRestoreResult, AppInfo, AppOp, AppStatus, CallOutcome, Caller, CapabilityGrant, HistoryRecord, OnboardingState, PendingConfirmation, TaskSnapshot, WatchEvent,
+  AppDataImportResult, AppDataRestorePreview, AppDataRestoreResult, AppInfo, AppOp, AppStatus, CallOutcome, Caller, CapabilityGrant, DelegationInfo, HistoryRecord, OnboardingState, PendingConfirmation, TaskSnapshot, WatchEvent,
 } from '@matrix1001/dsh-application-harness-host-bridge/client'
 import { apply, inject } from '../src/client/index.ts'
 import { APPLICATION_PANEL_KEY } from '../src/client/panel-key.ts'
@@ -45,18 +45,19 @@ function carrierFailure<T>(): RemoteResult<T> {
 
 /** One application row. */
 function app(id: string, status: AppStatus = 'available', ops: readonly AppOp[] = []): AppInfo {
+  const failed = status === 'failed'
+  const incomplete = status === 'stop-incomplete'
   return {
     id,
     name: `${id} title`,
     description: `${id} description`,
     version: '1.2.3',
-    status,
-    health: 'ok', activation: 'enabled',
+    health: failed || incomplete ? 'degraded' : 'ok',
+    activation: failed ? 'disabled' : 'enabled',
     runtime: status === 'available' ? 'ready' : status === 'starting' ? 'starting' : status === 'stopping' || status === 'stop-incomplete' ? 'stopping' : 'stopped',
+    ...(failed ? { reason: 'platform.start-failed', detail: `${id} failed to start` } : incomplete ? { reason: 'platform.stop-incomplete', detail: `${id} stop incomplete` } : {}),
     needs: [],
     ops,
-    // A failed row always reports why (the wire's own contract).
-    ...(status === 'failed' ? { failure: `${id} failed to start` } : {}),
   }
 }
 
@@ -101,7 +102,13 @@ function notePage(): ApplicationView {
     name: 'Notebook',
     Component: (viewProps) => {
       useEffect(() => viewProps.pageContext.report({
-        record: { kind: 'note', id: 'n1' },
+        record: { appId: 'workbook', kind: 'note', id: 'n1' },
+        selection: [{ appId: 'workbook', kind: 'note', id: 'n1' }],
+        view: 'list',
+        draftId: 'draft-1',
+        filters: { status: 'open' },
+        visibleRange: { from: '2026-01-01', to: '2026-01-31' },
+        dirty: true,
         selectionNote: '笔记页选中',
         label: '笔记 n1',
       }), [])
@@ -125,6 +132,21 @@ function markerPage(marker: string, name?: string): ApplicationView {
   return {
     ...(name === undefined ? {} : { name }),
     Component: () => <p data-testid={`${marker}-page`}>{`${marker} page`}</p>,
+  }
+}
+
+/** A page whose button asks the shell for a cross-application record. */
+function jumpPage(target: string): ApplicationView {
+  return {
+    Component: (props) => (
+      <button
+        type="button"
+        data-testid="jump-page"
+        onClick={() => {
+          props.navigation?.open({ appId: target, record: { appId: target, kind: 'record', id: 'r1' }, view: 'detail' })
+        }}
+      >jump</button>
+    ),
   }
 }
 
@@ -154,47 +176,6 @@ function draftPage(received: Array<unknown>): ApplicationView {
         return input.revision === 'old' ? { conflict: true } : { revision: 'r2', values: input.values }
       }), [props.drafts])
       return <><button type="button" data-draft-share onClick={() => { void props.drafts?.share({ draftId: 'd1', fields: ['/title'] }) }}>share</button><button type="button" data-draft-revoke onClick={() => { void props.drafts?.revoke({ draftId: 'd1' }) }}>revoke</button></>
-    },
-  }
-}
-
-/**
- * A page that takes over one call's ordinary progress rows on request and hands
- * them back on request — the info-hub's own shape, where the feedback of a
- * refresh is drawn beside the button that started it. Claiming through a CLICK
- * (never a mount effect) lets a case leave a take-over behind on purpose and
- * watch who cleans it up.
- */
-function claimingPage(requestId: string): ApplicationView {
-  return {
-    Component: (props) => {
-      const release = useRef<(() => void) | undefined>(undefined)
-      const claim = props.claimProgress
-      return (
-        <>
-          <button type="button" onClick={() => { release.current = claim(requestId) }}>take over</button>
-          <button type="button" onClick={() => { release.current?.() }}>hand back</button>
-        </>
-      )
-    },
-  }
-}
-
-/**
- * A page that reads on mount the way every real one does, and takes over the
- * rows of a call of its own (a different id: this page's take-over outlives the
- * read it starts beside it).
- */
-function claimingReaderPage(requestId: string): ApplicationView {
-  return {
-    Component: (props) => {
-      const call = props.call
-      const claim = props.claimProgress
-      useEffect(() => {
-        claim(requestId)
-        void call('read', {}, 'read-1')
-      }, [call, claim, requestId])
-      return <p data-testid="reader-page">page</p>
     },
   }
 }
@@ -262,6 +243,20 @@ class LingerWatch {
 }
 
 /** The Remote namespace double every case drives. */
+/** One delegation record the management/send surfaces read. */
+function delegationRecord(over: Partial<DelegationInfo> = {}): DelegationInfo {
+  return {
+    id: 'delegation-1',
+    appId: 'workbook',
+    title: 'Review the draft',
+    instructions: 'Review the prepared draft and report what changed',
+    status: 'pending',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    ...over,
+  }
+}
+
 function fakeRemote() {
   return {
     list: vi.fn(async (): Promise<RemoteResult<readonly AppInfo[]>> => ok<readonly AppInfo[]>([
@@ -272,7 +267,7 @@ function fakeRemote() {
     call: vi.fn(async (appId: string, opName: string, _args?: unknown, _requestId?: string): Promise<RemoteResult<CallOutcome>> =>
       ok<CallOutcome>({ callId: 'runtime-1', status: 'success', result: { called: `${appId}#${opName}` } })),
     cancel: vi.fn(async (): Promise<RemoteResult<boolean>> => ok(true)),
-    dataInfo: vi.fn(async (appId: string) => ok({ appId, path: '/tmp/app-data.sqlite', byteSize: 1024, schemaVersion: 2, documentCount: 1, collections: { notes: 3 }, backups: [] as Array<{ path: string; byteSize: number; modifiedAt: number }>, backupCount: 0, legacyImports: {} })),
+    dataInfo: vi.fn(async (appId: string) => ok({ appId, path: '/tmp/app-data.sqlite', byteSize: 1024, schemaVersion: 2, documentCount: 1, collections: { notes: 3 }, backups: [] as Array<{ path: string; byteSize: number; modifiedAt: number }>, backupCount: 0 })),
     dataExport: vi.fn(async () => ok({ fileName: 'application-harness-workbook.json', json: '{"version":1}' })),
     dataImportPreview: vi.fn(async (appId: string) => ok({ appId, apps: 1, documents: 1, collections: 0, newDocuments: 1, overwrittenDocuments: 0, removedDocuments: 0, newCollectionItems: 0, overwrittenCollectionItems: 0, removedCollectionItems: 0, planId: 'plan_import_1', expiresAt: Date.now() + 60_000 })),
     dataImport: vi.fn(async (appId: string): Promise<RemoteResult<AppDataImportResult>> => ok({ appId, apps: 1, documents: 1, collections: 0, newDocuments: 1, overwrittenDocuments: 0, removedDocuments: 0, newCollectionItems: 0, overwrittenCollectionItems: 0, removedCollectionItems: 0, backupPath: '/tmp/app-data.before-import.sqlite', reload: 'ok' })),
@@ -282,7 +277,7 @@ function fakeRemote() {
       appId, backupPath, backupModifiedAt: 1, backupByteSize: 1,
       documents: { backupOnly: 0, currentOnly: 0, modified: 0, unchanged: 0 },
       collections: { backupOnly: 0, currentOnly: 0, modified: 0, unchanged: 0 },
-      conflicts: [], conflictCount: 0, truncated: false, metaChanged: [], previewFingerprint: 'fingerprint',
+      conflicts: [], conflictCount: 0, truncated: false, metaChanged: [], previewFingerprint: 'fingerprint', planId: 'plan_restore', expiresAt: Date.now() + 60_000,
     })),
     dataRestore: vi.fn(async (appId: string, backupPath: string, _previewFingerprint?: string, _planId?: string, _requestId?: string): Promise<RemoteResult<AppDataRestoreResult>> => ok<AppDataRestoreResult>({
       appId, restoredFrom: backupPath, backupPath: '/tmp/pre-restore.sqlite', documents: 1, collections: 0, reload: 'ok',
@@ -290,20 +285,19 @@ function fakeRemote() {
     history: vi.fn(async (): Promise<RemoteResult<readonly HistoryRecord[]>> => ok<readonly HistoryRecord[]>([record('call-1')])),
     tasks: vi.fn(async (): Promise<RemoteResult<readonly TaskSnapshot[]>> => ok<readonly TaskSnapshot[]>([])),
     cancelTask: vi.fn(async (): Promise<RemoteResult<'accepted' | 'settled' | 'not-found'>> => ok('accepted' as const)),
+    suggestedAppConversationPath: vi.fn(async (): Promise<RemoteResult<string>> => ok('/home/user/dsh-workspaces/app-conversation/default')),
     registerAppConversation: vi.fn(async (): Promise<RemoteResult<boolean>> => ok(true)),
     registerDevelopmentSession: vi.fn(async (): Promise<RemoteResult<boolean>> => ok(true)),
     clearDevelopmentSession: vi.fn(async (): Promise<RemoteResult<boolean>> => ok(true)),
     setAppConversationContext: vi.fn(async (): Promise<RemoteResult<boolean>> => ok(true)),
     policies: vi.fn(async (): Promise<RemoteResult<readonly import('@matrix1001/dsh-application-harness-host-bridge/client').OperationPolicyEntry[]>> => ok([])),
     setActivation: vi.fn(async (_appId: string, _activation: 'enabled' | 'disabled'): Promise<RemoteResult<readonly AppInfo[]>> => ok([])),
+    checkHealth: vi.fn(async (_appId: string): Promise<RemoteResult<readonly AppInfo[]>> => ok<readonly AppInfo[]>([app('workbook')])),
     setAppModel: vi.fn(async (_appId: string, _selection: { provider: string; model: string } | null): Promise<RemoteResult<boolean>> => ok(true)),
     modelCatalog: vi.fn(async (): Promise<RemoteResult<{ providers: readonly unknown[] }>> => ok({ providers: [] })),
-    modelUsage: vi.fn(async (): Promise<RemoteResult<{ calls: number; succeeded: number; failed: number; cancelled: number; usageMissing: number; totalDurationMs: number; inputTokens?: number; outputTokens?: number }>> => ok({ calls: 2, succeeded: 1, failed: 1, cancelled: 0, usageMissing: 0, totalDurationMs: 5, inputTokens: 10, outputTokens: 20 })),
+    modelUsage: vi.fn(async (): Promise<RemoteResult<import('@matrix1001/dsh-application-harness-host-bridge/client').ModelUsageSummary>> => ok({ calls: 2, succeeded: 1, failed: 1, cancelled: 0, usageMissing: 0, totalDurationMs: 5, inputTokens: 10, outputTokens: 20 })),
     modelLimits: vi.fn(async (): Promise<RemoteResult<{ background: boolean; maxConcurrent?: number; maxCallsPerMinute?: number }>> => ok({ background: true })),
     setModelLimits: vi.fn(async (): Promise<RemoteResult<boolean>> => ok(true)),
-    credentials: vi.fn(async (): Promise<RemoteResult<readonly { name: string; set: boolean }[]>> => ok([{ name: 'token', set: true }])),
-    setCredential: vi.fn(async (): Promise<RemoteResult<boolean>> => ok(true)),
-    deleteCredential: vi.fn(async (): Promise<RemoteResult<boolean>> => ok(true)),
     completePageCommand: vi.fn(async (): Promise<RemoteResult<boolean>> => ok(true)),
     shareDraft: vi.fn(async (): Promise<RemoteResult<boolean>> => ok(true)),
     revokeDraftShare: vi.fn(async (): Promise<RemoteResult<boolean>> => ok(true)),
@@ -316,6 +310,12 @@ function fakeRemote() {
     cancelConfirmation: vi.fn(async (): Promise<RemoteResult<boolean>> => ok(true)),
     grant: vi.fn(async (): Promise<RemoteResult<CapabilityGrant>> => ok(grant({ kind: 'app', appId: 'workbook' }, ['capability:model']))),
     revoke: vi.fn(async (): Promise<RemoteResult<void>> => ok(undefined)),
+    delegations: vi.fn(async (): Promise<RemoteResult<readonly DelegationInfo[]>> => ok<readonly DelegationInfo[]>([delegationRecord()])),
+    delegation: vi.fn(async (id: string): Promise<RemoteResult<DelegationInfo>> => ok(delegationRecord({ id }))),
+    sendDelegation: vi.fn(async (id: string, sessionId: string, supplement?: string): Promise<RemoteResult<DelegationInfo>> =>
+      ok(delegationRecord({ id, status: 'active', sessionId, ...(supplement === undefined ? {} : {}) }))),
+    cancelDelegation: vi.fn(async (id: string): Promise<RemoteResult<DelegationInfo>> =>
+      ok(delegationRecord({ id, status: 'ended', outcome: 'cancelled' }))),
     watch: vi.fn((): FakeWatch => new FakeWatch()),
   }
 }
@@ -376,6 +376,7 @@ async function mountPanel(
   configure?: (remote: RemoteDouble) => void,
   provideServices?: (ctx: Context) => void,
   extraNamespaces?: Record<string, unknown>,
+  seed?: (runtime: SlotTestRuntime) => Promise<void>,
 ): Promise<Harness> {
   const remote = fakeRemote()
   configure?.(remote)
@@ -388,10 +389,13 @@ async function mountPanel(
   runtime.ctx.provide('connection', {} as never)
   runtime.ctx.provide('configForms', { get: () => undefined } as never)
   provideServices?.(runtime.ctx)
+  await seed?.(runtime)
   await runtime.ctx.plugin({ inject: localeInject, apply: applyLocale }).await()
   await runtime.declare({
     'main': { kind: 'keyed', scope: 'root' },
     'sidebar.panellist': { kind: 'list', scope: 'root' },
+    'sidebar.panellist.trailing': { kind: 'list', scope: 'root' },
+    'conversation.input.placeholder': { kind: 'chain', scope: 'session' },
   })
   await runtime.mount({ inject: [...inject], apply })
   await settle()
@@ -424,28 +428,28 @@ function register(harness: Harness, appId: string, view: ApplicationView): () =>
   return dispose
 }
 
-/** One application's row in the navigation. */
+/** One application's tab in the header. */
 function navRow(panel: SlotView<'main'>, appId: string): HTMLElement {
-  const row = panel.container.querySelector(`[data-app-nav="${appId}"]`)
-  if (!(row instanceof HTMLElement)) throw new Error(`the navigation has no row for ${appId}`)
+  const row = panel.container.querySelector(`[data-app-tab="${appId}"]`)
+  if (!(row instanceof HTMLElement)) throw new Error(`the header has no tab for ${appId}`)
   return row
 }
 
-/** The navigation root (also the drawer, when the area is narrow). */
+/** The application tab strip. */
 function nav(panel: SlotView<'main'>): HTMLElement {
-  const element = panel.container.querySelector('[data-app-nav-root]')
-  if (!(element instanceof HTMLElement)) throw new Error('the area rendered no navigation')
+  const element = panel.container.querySelector('[data-app-tabs]')
+  if (!(element instanceof HTMLElement)) throw new Error('the area rendered no application tabs')
   return element
 }
 
-/** The management dialog: the platform Modal portals it to `document.body`. */
+/** The open management page (the area keeps it inside the application frame). */
 function dialog(): HTMLElement {
-  const element = document.body.querySelector('[data-manage-dialog]')
+  const element = document.body.querySelector('[data-manage-page]')
   if (!(element instanceof HTMLElement)) throw new Error('the management dialog is not open')
   return element
 }
 
-/** Testing Library queries bound to the open management dialog. */
+/** Testing Library queries bound to the open management page. */
 function inDialog() {
   return within(dialog())
 }
@@ -457,11 +461,21 @@ function inDocument(selector: string): HTMLElement {
   return element
 }
 
-/** Open the management surface at its list, from the navigation's own entry. */
+/** Open one data action's confirm dialog through its trigger, then confirm it. */
+async function confirmDataAction(trigger: Element | null): Promise<void> {
+  if (trigger === null) throw new Error('nothing to confirm')
+  fireEvent.click(trigger)
+  await waitFor(() => { expect(document.body.querySelector('[data-data-confirm-dialog]')).not.toBeNull() })
+  fireEvent.click(inDocument('[data-data-confirm-yes]'))
+  await waitFor(() => { expect(document.body.querySelector('[data-data-confirm-dialog]')).toBeNull() })
+}
+
+/** Open the management surface at its list, from the all-applications menu. */
 function openManageList(panel: SlotView<'main'>): void {
-  const entry = panel.container.querySelector('[data-app-manage]')
-  if (!(entry instanceof HTMLElement)) throw new Error('the navigation offers no management entry')
+  const entry = panel.container.querySelector('[data-app-all]')
+  if (!(entry instanceof HTMLElement)) throw new Error('the header offers no all-applications entry')
   fireEvent.click(entry)
+  fireEvent.click(inDocument('[data-app-manage-list]'))
 }
 
 /**
@@ -484,15 +498,36 @@ async function mountWithTriggers(): Promise<Harness & { registered: InputTrigger
 }
 
 /** Ask one source for its rows, the way the pipeline does on `@`. */
-function rows(source: InputTriggerSource): Promise<readonly InputTriggerCandidate[]> {
+function rowsFor(source: InputTriggerSource, sessionId: string): Promise<readonly InputTriggerCandidate[]> {
   return source.candidates(
-    { sessionId: 'session-1' } as ClientSessionContext,
+    { sessionId } as ClientSessionContext,
     { query: '', position: 'inline', drilled: false, signal: new AbortController().signal } satisfies CandidateRequest,
   )
 }
 
+function rows(source: InputTriggerSource): Promise<readonly InputTriggerCandidate[]> {
+  return rowsFor(source, 'session-1')
+}
+
+/**
+ * jsdom has no ResizeObserver. The platform's Tooltip and the area's own
+ * narrow-width observer both construct one; the stand-in keeps their effects
+ * from crashing without pretending a layout exists. Narrow behavior is
+ * covered by the browser lane, where the real observer runs.
+ */
+class ResizeObserverStub {
+  observe(): void {}
+  unobserve(): void {}
+  disconnect(): void {}
+}
+
+beforeEach(() => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub)
+})
+
 afterEach(() => {
   cleanup()
+  vi.unstubAllGlobals()
   vi.restoreAllMocks()
   // The area's preferences and the per-application view state persist through
   // localStorage: a case must never inherit the previous one's choices.
@@ -500,7 +535,7 @@ afterEach(() => {
 })
 
 describe('plugin bindings', () => {
-  it('renders a navigation row for every application that draws a page, and the rail entry beside the area', async () => {
+  it('renders a tab for every application that draws a page, and the sidebar entry beside the area', async () => {
     const harness = await mountPanel()
     register(harness, 'workbook', markerPage('workbook'))
     register(harness, 'disk-analysis', markerPage('disk', 'Disk analysis'))
@@ -512,9 +547,33 @@ describe('plugin bindings', () => {
     expect(navRow(panel, 'disk-analysis').textContent).toContain('Disk analysis')
     // An application without a page is reached through management, never here:
     // losing the page half is not losing the application.
-    expect(navigation.querySelector('[data-app-nav="info-hub"]')).toBeNull()
+    expect(navigation.querySelector('[data-app-tab="info-hub"]')).toBeNull()
     const rail = harness.runtime.renderSlot('sidebar.panellist', { size: 16, active: false }, { only: APPLICATION_PANEL_KEY })
     expect(rail.container.querySelector('svg')).not.toBeNull()
+    // The trailing entry carries the waiting-confirmation count; the fixture
+    // holds one parked confirmation.
+    const trailing = harness.runtime.renderSlot('sidebar.panellist.trailing', { wide: true, active: false }, { only: APPLICATION_PANEL_KEY })
+    const badge = trailing.container.querySelector('[data-app-rail-badge]')
+    expect(badge?.querySelector('[aria-hidden="true"]')?.textContent).toBe('1')
+    expect(badge?.textContent).toContain('1')
+    await harness.runtime.dispose()
+  })
+
+  it('selects composer guidance for application-area and development Sessions', async () => {
+    localStorage.setItem('dsh.applications.preferences.v1', JSON.stringify({
+      appConversation: { workspaceId: 'w-area', sessionId: 's-area' },
+      appConversations: [{ workspaceId: 'w-area', sessionId: 's-area' }],
+      developmentSessions: [{ appId: 'workbook', sessionId: 's-dev' }],
+    }))
+    const harness = await mountPanel()
+    register(harness, 'workbook', markerPage('workbook'))
+    await settle()
+    const [entry] = harness.runtime.slots.entriesOfSlot('conversation.input.placeholder')
+    const select = entry?.select
+    expect(select).toBeTypeOf('function')
+    expect(select!({ sessionId: 's-area' } as never)).toEqual({ text: expect.stringContaining('application page') })
+    expect(select!({ sessionId: 's-dev' } as never)).toEqual({ text: expect.stringContaining('workbook') })
+    expect(select!({ sessionId: 's-other' } as never)).toBeNull()
     await harness.runtime.dispose()
   })
 
@@ -526,32 +585,184 @@ describe('plugin bindings', () => {
     await settle()
     // Rows in, nobody selected: the first application with a page takes the area.
     expect(panel.view.getByTestId('workbook-page')).toBeDefined()
-    expect(navRow(panel, 'workbook').getAttribute('aria-current')).toBe('page')
+    expect(navRow(panel, 'workbook').getAttribute('aria-selected')).toBe('true')
     fireEvent.click(navRow(panel, 'disk-analysis'))
     expect(panel.view.getByTestId('disk-page')).toBeDefined()
     expect(panel.view.queryByTestId('workbook-page')).toBeNull()
-    expect(navRow(panel, 'disk-analysis').getAttribute('aria-current')).toBe('page')
-    expect(inDocument('[data-app-switcher]').textContent).toContain('Disk analysis')
+    expect(navRow(panel, 'disk-analysis').getAttribute('aria-selected')).toBe('true')
     await harness.runtime.dispose()
   })
 
-  it('switches through the header’s own quick switcher', async () => {
+  it('unpins from the complete application list and reopens the temporary tab there', async () => {
     const harness = await mountPanel()
     register(harness, 'workbook', markerPage('workbook'))
     register(harness, 'disk-analysis', markerPage('disk', 'Disk analysis'))
     const panel = renderPanel(harness)
     await settle()
-    fireEvent.click(inDocument('[data-app-switcher]'))
-    // Escape closes the menu without switching anything.
+    // The list is complete even on a fresh deployment where every page
+    // application is already fixed; it is not an overflow-only menu.
+    fireEvent.click(inDocument('[data-app-all]'))
+    expect(inDocument('[data-app-apps-panel]')).not.toBeNull()
+    const unpin = inDocument('[data-app-pin-toggle="disk-analysis"]')
+    expect(unpin.getAttribute('aria-pressed')).toBe('true')
+    unpin.focus()
+    fireEvent.click(unpin)
+    await settle()
+    // Pinning is a row action: the panel stays open and focus stays on it.
+    expect(inDocument('[data-app-apps-panel]')).not.toBeNull()
+    expect(document.activeElement).toBe(inDocument('[data-app-pin-toggle="disk-analysis"]'))
+    expect(inDocument('[data-app-pin-toggle="disk-analysis"]').getAttribute('aria-pressed')).toBe('false')
+    expect(nav(panel).querySelector('[data-app-tab="disk-analysis"]')).toBeNull()
     fireEvent.keyDown(document, { key: 'Escape' })
-    expect(panel.view.queryByRole('menuitem', { name: 'Disk analysis' })).toBeNull()
-    fireEvent.click(inDocument('[data-app-switcher]'))
-    fireEvent.click(panel.view.getByRole('menuitem', { name: 'Disk analysis' }))
+    await settle()
+    expect(document.activeElement).toBe(inDocument('[data-app-all]'))
+    // The unpinned application is reopened from the same complete list.
+    fireEvent.click(inDocument('[data-app-all]'))
+    fireEvent.click(inDocument('[data-app-apps-row="disk-analysis"]'))
+    await settle()
     expect(panel.view.getByTestId('disk-page')).toBeDefined()
-    expect(navRow(panel, 'disk-analysis').getAttribute('aria-current')).toBe('page')
+    expect(navRow(panel, 'disk-analysis').getAttribute('aria-selected')).toBe('true')
+    // The current application is not fixed: it is a temporary last tab until
+    // the human pins it or leaves it.
+    expect(navRow(panel, 'disk-analysis').getAttribute('data-app-tab-temporary')).toBe('true')
+    fireEvent.click(inDocument('[data-app-all]'))
+    fireEvent.click(inDocument('[data-app-pin-toggle="disk-analysis"]'))
+    await settle()
+    expect(navRow(panel, 'disk-analysis').getAttribute('data-app-tab-temporary')).toBeNull()
     await harness.runtime.dispose()
   })
 
+  it('pins and unpins from the tab context menu and moves focus to the survivor', async () => {
+    localStorage.setItem('dsh.applications.preferences.v1', JSON.stringify({ pinned: ['workbook'], lastAppId: 'disk-analysis',
+    }))
+    const harness = await mountPanel()
+    register(harness, 'workbook', markerPage('workbook'))
+    register(harness, 'disk-analysis', markerPage('disk', 'Disk analysis'))
+    const panel = renderPanel(harness)
+    await settle()
+    // The active, unpinned application is the temporary last tab.
+    expect(navRow(panel, 'disk-analysis').getAttribute('data-app-tab-temporary')).toBe('true')
+    fireEvent.contextMenu(navRow(panel, 'disk-analysis'), { clientX: 20, clientY: 20 })
+    fireEvent.click(within(inDocument('[role="menu"]')).getByRole('menuitem', { name: 'Pin' }))
+    await settle()
+    expect(navRow(panel, 'disk-analysis').getAttribute('data-app-tab-temporary')).toBeNull()
+    // Unpinning the other (inactive) tab removes it and moves focus to the
+    // surviving tab, not to body.
+    fireEvent.contextMenu(navRow(panel, 'workbook'), { clientX: 20, clientY: 20 })
+    fireEvent.click(within(inDocument('[role="menu"]')).getByRole('menuitem', { name: 'Unpin' }))
+    await settle()
+    expect(nav(panel).querySelector('[data-app-tab="workbook"]')).toBeNull()
+    await waitFor(() => { expect(document.activeElement).toBe(navRow(panel, 'disk-analysis')) })
+    // Unpinning the active tab keeps it as the temporary last tab.
+    fireEvent.contextMenu(navRow(panel, 'disk-analysis'), { clientX: 20, clientY: 20 })
+    fireEvent.click(within(inDocument('[role="menu"]')).getByRole('menuitem', { name: 'Unpin' }))
+    await settle()
+    expect(navRow(panel, 'disk-analysis').getAttribute('data-app-tab-temporary')).toBe('true')
+    await waitFor(() => { expect(document.activeElement).toBe(navRow(panel, 'disk-analysis')) })
+    // Dismissing the menu returns focus to the tab; the temporary tab also
+    // cannot start a drag.
+    fireEvent.contextMenu(navRow(panel, 'disk-analysis'), { clientX: 20, clientY: 20 })
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await waitFor(() => { expect(document.activeElement).toBe(navRow(panel, 'disk-analysis')) })
+    const transfer = { effectAllowed: '', dropEffect: '', setData: vi.fn(), setDragImage: vi.fn() }
+    fireEvent.dragStart(navRow(panel, 'disk-analysis'), { dataTransfer: transfer })
+    expect(navRow(panel, 'disk-analysis').getAttribute('data-app-tab-dragging')).toBeNull()
+    fireEvent.dragEnd(navRow(panel, 'disk-analysis'), { dataTransfer: transfer })
+    await harness.runtime.dispose()
+  })
+
+  it('treats a drop after the last tab as a no-op and clears the insertion line on leave', async () => {
+    const harness = await mountPanel()
+    register(harness, 'workbook', markerPage('workbook'))
+    register(harness, 'disk-analysis', markerPage('disk', 'Disk analysis'))
+    register(harness, 'info-hub', markerPage('info'))
+    const panel = renderPanel(harness)
+    await settle()
+    const order = (): Array<string | null> => [...nav(panel).querySelectorAll('[data-app-tab]')].map(row => row.getAttribute('data-app-tab'))
+    const rows = ['workbook', 'disk-analysis', 'info-hub'].map(id => navRow(panel, id))
+    rows.forEach((row, index) => {
+      Object.defineProperty(row, 'getBoundingClientRect', {
+        configurable: true,
+        value: () => ({ left: index * 100, width: 80, right: index * 100 + 80, top: 0, bottom: 28, height: 28, x: index * 100, y: 0, toJSON: () => ({}) }),
+      })
+    })
+    const transfer = { effectAllowed: '', dropEffect: '', setData: vi.fn(), setDragImage: vi.fn() }
+    // Dropping the last tab beyond the last midpoint is its current slot: no
+    // line and no preference write.
+    fireEvent.dragStart(rows[2]!, { dataTransfer: transfer })
+    fireEvent.dragOver(nav(panel), { clientX: 250, dataTransfer: transfer })
+    expect(document.body.querySelector('[data-app-drop-line]')).toBeNull()
+    fireEvent.drop(nav(panel), { clientX: 250, dataTransfer: transfer })
+    await settle()
+    expect(order()).toEqual(['workbook', 'disk-analysis', 'info-hub'])
+    fireEvent.dragEnd(rows[2]!, { dataTransfer: transfer })
+    // A drag that leaves the strip hides the caret; the drop then recomputes
+    // the slot from the pointer instead of trusting stale state.
+    fireEvent.dragStart(rows[0]!, { dataTransfer: transfer })
+    fireEvent.dragOver(nav(panel), { clientX: 250, dataTransfer: transfer })
+    expect(document.body.querySelector('[data-app-drop-line]')).not.toBeNull()
+    fireEvent.dragLeave(nav(panel), { relatedTarget: document.body })
+    expect(document.body.querySelector('[data-app-drop-line]')).toBeNull()
+    fireEvent.drop(nav(panel), { clientX: 250, dataTransfer: transfer })
+    await settle()
+    expect(order()).toEqual(['disk-analysis', 'info-hub', 'workbook'])
+    // A drag source without a DataTransfer (or an older transfer without
+    // setDragImage) still starts and ends cleanly.
+    fireEvent.dragStart(rows[0]!, {})
+    fireEvent.dragEnd(rows[0]!, {})
+    const plain = { effectAllowed: '', dropEffect: '', setData: vi.fn() }
+    fireEvent.dragStart(rows[0]!, { dataTransfer: plain })
+    fireEvent.dragEnd(rows[0]!, { dataTransfer: plain })
+    await harness.runtime.dispose()
+  })
+
+  it('shows a non-ready application status in the complete list', async () => {
+    const harness = await mountPanel((remote) => {
+      remote.list.mockResolvedValue(ok<readonly AppInfo[]>([app('workbook', 'available'), app('disk-analysis', 'starting')]))
+    })
+    register(harness, 'workbook', markerPage('workbook'))
+    register(harness, 'disk-analysis', markerPage('disk'))
+    renderPanel(harness)
+    await settle()
+    fireEvent.click(inDocument('[data-app-all]'))
+    expect(inDocument('[data-app-apps-row="disk-analysis"] [data-tone="warn"]')).not.toBeNull()
+    await harness.runtime.dispose()
+  })
+
+  it('ignores unrelated tab keys and drag events without a drag source', async () => {
+    const harness = await mountPanel()
+    register(harness, 'workbook', markerPage('workbook'))
+    register(harness, 'disk-analysis', markerPage('disk'))
+    const panel = renderPanel(harness)
+    await settle()
+    const order = (): Array<string | null> => [...nav(panel).querySelectorAll('[data-app-tab]')].map(row => row.getAttribute('data-app-tab'))
+    fireEvent.keyDown(navRow(panel, 'workbook'), { key: 'x' })
+    fireEvent.dragOver(nav(panel), { clientX: 10 })
+    fireEvent.drop(nav(panel), { clientX: 10 })
+    await settle()
+    expect(order()).toEqual(['workbook', 'disk-analysis'])
+    await harness.runtime.dispose()
+  })
+
+  it('moves a fixed tab from its context menu without a custom shortcut', async () => {
+    const harness = await mountPanel()
+    register(harness, 'workbook', markerPage('workbook'))
+    register(harness, 'disk-analysis', markerPage('disk', 'Disk analysis'))
+    register(harness, 'info-hub', markerPage('info'))
+    const panel = renderPanel(harness)
+    await settle()
+    const order = (): Array<string | null> => [...nav(panel).querySelectorAll('[data-app-tab]')].map(row => row.getAttribute('data-app-tab'))
+    expect(order()).toEqual(['workbook', 'disk-analysis', 'info-hub'])
+    fireEvent.contextMenu(navRow(panel, 'workbook'), { clientX: 20, clientY: 20 })
+    fireEvent.click(within(inDocument('[role="menu"]')).getByRole('menuitem', { name: 'Move right' }))
+    await settle()
+    expect(order()).toEqual(['disk-analysis', 'workbook', 'info-hub'])
+    fireEvent.contextMenu(navRow(panel, 'workbook'), { clientX: 20, clientY: 20 })
+    fireEvent.click(within(inDocument('[role="menu"]')).getByRole('menuitem', { name: 'Move left' }))
+    await settle()
+    expect(order()).toEqual(['workbook', 'disk-analysis', 'info-hub'])
+    await harness.runtime.dispose()
+  })
   it('re-reads the rows through the real retry the surface offers', async () => {
     const harness = await mountPanel()
     renderPanel(harness)
@@ -576,15 +787,15 @@ describe('plugin bindings', () => {
     // keyed entry when the selection moves). The request lives in the framework
     // INSTANCE, so it would outlive the component — and coming back would show
     // a modal nobody asked for again.
-    fireEvent.click(inDocument('[data-app-manage]'))
+    openManageList(panel)
     await settle()
-    expect(document.body.querySelector('[data-manage-dialog]')).not.toBeNull()
+    expect(document.body.querySelector('[data-manage-page]')).not.toBeNull()
     act(() => { panel.update({}, { entryKey: 'conversation' }) })
     await settle()
-    expect(document.body.querySelector('[data-manage-dialog]')).toBeNull()
+    expect(document.body.querySelector('[data-manage-page]')).toBeNull()
     act(() => { panel.update({}, { entryKey: APPLICATION_PANEL_KEY }) })
     await settle()
-    expect(document.body.querySelector('[data-manage-dialog]')).toBeNull()
+    expect(document.body.querySelector('[data-manage-page]')).toBeNull()
     expect(document.body.querySelector('[data-manage-list]')).toBeNull()
     await harness.runtime.dispose()
   })
@@ -594,6 +805,48 @@ describe('plugin bindings', () => {
     register(harness, 'workbook', markerPage('workbook'))
     renderPanel(harness)
     await settle()
+    fireEvent.click(inDocument('[data-app-back]'))
+    expect(harness.selectPanel).toHaveBeenCalledWith(null)
+    await harness.runtime.dispose()
+  })
+
+  it('clears the record origin when the human switches tabs directly', async () => {
+    const harness = await mountPanel()
+    register(harness, 'workbook', jumpPage('disk-analysis'))
+    register(harness, 'disk-analysis', markerPage('disk', 'Disk analysis'))
+    const panel = renderPanel(harness)
+    await settle()
+    fireEvent.click(panel.view.getByTestId('jump-page'))
+    await settle()
+    expect(inDocument('[data-app-back]').getAttribute('aria-label')).toBe('Back to workbook title')
+    // A direct tab switch is not a record back: the origin is dropped and the
+    // one back goes to the conversation again.
+    fireEvent.click(navRow(panel, 'workbook'))
+    await settle()
+    expect(panel.view.getByTestId('jump-page')).toBeDefined()
+    expect(inDocument('[data-app-back]').getAttribute('aria-label')).toBe('Back to the conversation')
+    await harness.runtime.dispose()
+  })
+
+  it('uses one contextual back for a cross-application record, then for the conversation', async () => {
+    const harness = await mountPanel()
+    register(harness, 'workbook', jumpPage('disk-analysis'))
+    register(harness, 'disk-analysis', markerPage('disk', 'Disk analysis'))
+    const panel = renderPanel(harness)
+    await settle()
+    expect(inDocument('[data-app-back]').getAttribute('aria-label')).toBe('Back to the conversation')
+    expect(document.body.querySelector('[data-app-record-back]')).toBeNull()
+    fireEvent.click(panel.view.getByTestId('jump-page'))
+    await settle()
+    expect(panel.view.getByTestId('disk-page')).toBeDefined()
+    // Still one back control; it points at the origin application.
+    expect(document.body.querySelectorAll('[data-app-header] [data-app-back]')).toHaveLength(1)
+    expect(document.body.querySelector('[data-app-record-back]')).toBeNull()
+    expect(inDocument('[data-app-back]').getAttribute('aria-label')).toBe('Back to workbook title')
+    fireEvent.click(inDocument('[data-app-back]'))
+    await settle()
+    expect(panel.view.getByTestId('jump-page')).toBeDefined()
+    expect(inDocument('[data-app-back]').getAttribute('aria-label')).toBe('Back to the conversation')
     fireEvent.click(inDocument('[data-app-back]'))
     expect(harness.selectPanel).toHaveBeenCalledWith(null)
     await harness.runtime.dispose()
@@ -615,12 +868,13 @@ describe('plugin bindings', () => {
     const panel = renderPanel(harness)
     await settle()
     expect(document.body.querySelector('[data-app-conversation-pane]')).toBeNull()
-    fireEvent.click(inDocument('[data-app-chat]'))
+    fireEvent.click(inDocument('[data-sidebar-right-expand]'))
     await settle()
     // No dedicated conversation target exists yet: the pane must NOT open on
     // the main Session. The explicit first-use setup is the only way in.
     expect(document.body.querySelector('[data-app-conversation-pane]')).toBeNull()
     expect(document.body.querySelector('[data-app-conversation-setup]')).not.toBeNull()
+    expect(document.body.querySelector('[data-app-conversation-setup-hint]')).not.toBeNull()
     // The application page stays mounted underneath the modal.
     expect(panel.view.getByTestId('workbook-page')).toBeDefined()
     fireEvent.click(inDocument('[data-app-conversation-setup-cancel]'))
@@ -629,12 +883,37 @@ describe('plugin bindings', () => {
     await harness.runtime.dispose()
   })
 
+  it('warns once when the activation table could not be read', async () => {
+    const harness = await mountPanel((remote) => {
+      remote.list.mockResolvedValue(ok<readonly AppInfo[]>([{ ...app('workbook'), activationUnavailable: true }]))
+    })
+    register(harness, 'workbook', markerPage('workbook'))
+    renderPanel(harness)
+    await settle()
+    const notice = inDocument('[data-app-activation-unavailable]')
+    expect(notice.textContent).toContain(en['activation.unavailable'])
+    // It lives behind the header status control, closed by default; it never
+    // floats over the page toolbar.
+    const status = inDocument('[data-app-status]')
+    expect(status.getAttribute('aria-expanded')).toBe('false')
+    expect(status.getAttribute('aria-controls')).toBe('app-status-panel')
+    expect(status.getAttribute('aria-haspopup')).toBeNull()
+    expect(inDocument('[data-shell-notices]').getAttribute('role')).toBe('region')
+    expect(inDocument('[data-shell-notices]').getAttribute('id')).toBe('app-status-panel')
+    expect(inDocument('[data-shell-notices]').getAttribute('data-open')).toBe('false')
+    fireEvent.click(status)
+    expect(status.getAttribute('aria-expanded')).toBe('true')
+    expect(inDocument('[data-shell-notices]').getAttribute('data-open')).toBe('true')
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(inDocument('[data-shell-notices]').getAttribute('data-open')).toBe('false')
+  })
+
   it('dismisses the first-use setup without creating anything', async () => {
     const harness = await mountPanel()
     register(harness, 'workbook', labelPage())
     renderPanel(harness)
     await settle()
-    fireEvent.click(inDocument('[data-app-chat]'))
+    fireEvent.click(inDocument('[data-sidebar-right-expand]'))
     await settle()
     // No directory-picker namespace in this host: the affordance is a no-op.
     fireEvent.click(inDocument('[data-app-conversation-setup-pick]'))
@@ -665,8 +944,21 @@ describe('plugin bindings', () => {
     expect(harness.runtime.workspaces.calls.filter(call => call.method === 'create')).toHaveLength(1)
     expect(harness.remote.registerDevelopmentSession).toHaveBeenCalledWith(sessionId, 'workbook')
     expect(inDocument('[data-develop-created]')).not.toBeNull()
+    const retain = vi.spyOn(harness.runtime.sessions, 'retain')
     fireEvent.click(inDocument('[data-develop-open]'))
     await settle()
+    // The dock renders the platform Conversation, so its reference keeps the
+    // `conversation` facet; without it the platform assembly never folds the
+    // Session's event window.
+    expect(retain).toHaveBeenCalledWith(sessionId, expect.objectContaining({ facets: { conversation: true } }))
+    retain.mockRestore()
+    // A development Session opens in the app-area dock by default: one tab,
+    // marked as a development Session, with the application page still there.
+    const devTab = inDocument('[data-app-dock-tab]')
+    expect(devTab.getAttribute('data-kind')).toBe('development')
+    expect(devTab.getAttribute('data-active')).toBe('true')
+    expect(document.body.querySelector('[data-app-conversation-pane]')).not.toBeNull()
+    expect(document.body.querySelector('[data-app-dock-empty]')).toBeNull()
     fireEvent.click(inDocument('[data-develop-done]'))
     await settle()
     expect(document.body.querySelector('[data-develop-dialog]')).toBeNull()
@@ -687,7 +979,7 @@ describe('plugin bindings', () => {
     openManageList(panel)
     fireEvent.click(inDocument('[data-manage-row="workbook"]'))
     await settle()
-    fireEvent.click(inDocument('[data-manage-tab="info"]'))
+    fireEvent.click(inDocument('[data-manage-tab="permissions"]'))
     await settle()
     const provider = inDocument('[data-model-provider]') as HTMLSelectElement
     expect(provider.tagName).toBe('SELECT')
@@ -704,7 +996,7 @@ describe('plugin bindings', () => {
   })
 
 
-  it('splits the overview, data and developer tabs without remounting the app', async () => {
+  it('keeps the four areas separate without remounting the application', async () => {
     const harness = await mountPanel()
     register(harness, 'workbook', markerPage('workbook'))
     const panel = renderPanel(harness)
@@ -712,35 +1004,39 @@ describe('plugin bindings', () => {
     openManageList(panel)
     fireEvent.click(inDocument('[data-manage-row="workbook"]'))
     await settle()
-    fireEvent.click(inDocument('[data-manage-tab="info"]'))
-    await settle()
+    // Status carries the facts and declarations; the model lives in
+    // permissions and the store facts in data.
     expect(inDocument('[data-manage-info]')).toBeTruthy()
     expect(inDocument('[data-app-ops]')).toBeTruthy()
+    expect(document.body.querySelector('[data-model-provider]')).toBeNull()
+    expect(document.body.querySelector('[data-manage-data]')).toBeNull()
+
+    fireEvent.click(inDocument('[data-manage-tab="permissions"]'))
+    await settle()
+    expect(inDocument('[data-manage-model]')).toBeTruthy()
+    expect(document.body.querySelector('[data-app-ops]')).toBeNull()
+    expect(document.body.querySelector('[data-manage-data]')).toBeNull()
 
     fireEvent.click(inDocument('[data-manage-tab="data"]'))
     await settle()
     expect(inDocument('[data-manage-data]')).toBeTruthy()
-    expect(document.body.querySelector('[data-app-ops]')).toBeNull()
     expect(document.body.querySelector('[data-model-provider]')).toBeNull()
+    expect(document.body.querySelector('[data-app-ops]')).toBeNull()
 
-    fireEvent.click(inDocument('[data-manage-tab="developer"]'))
+    fireEvent.click(inDocument('[data-manage-tab="status"]'))
     await settle()
+    expect(inDocument('[data-manage-info]')).toBeTruthy()
     expect(inDocument('[data-app-ops]')).toBeTruthy()
     expect(document.body.querySelector('[data-manage-data]')).toBeNull()
-
-    fireEvent.click(inDocument('[data-manage-tab="info"]'))
-    await settle()
-    expect(inDocument('[data-app-ops]')).toBeTruthy()
-    expect(inDocument('[data-manage-data]')).toBeTruthy()
     await harness.runtime.dispose()
   })
+
   it('falls back to text inputs when the model catalog is unavailable', async () => {
     const harness = await mountPanel((remote) => {
       remote.list.mockResolvedValue(ok<readonly AppInfo[]>([app('workbook')]))
       remote.modelCatalog.mockRejectedValueOnce(new Error('offline'))
       remote.modelUsage.mockRejectedValueOnce(new Error('offline'))
       remote.modelLimits.mockRejectedValueOnce(new Error('offline'))
-      remote.credentials.mockRejectedValueOnce(new Error('offline'))
     })
     register(harness, 'workbook', markerPage('workbook'))
     const panel = renderPanel(harness)
@@ -748,7 +1044,7 @@ describe('plugin bindings', () => {
     openManageList(panel)
     fireEvent.click(inDocument('[data-manage-row="workbook"]'))
     await settle()
-    fireEvent.click(inDocument('[data-manage-tab="info"]'))
+    fireEvent.click(inDocument('[data-manage-tab="permissions"]'))
     await settle()
     expect((inDocument('[data-model-provider]') as HTMLInputElement).tagName).toBe('INPUT')
     await harness.runtime.dispose()
@@ -771,6 +1067,7 @@ describe('plugin bindings', () => {
       await settle()
     }
     await open()
+    expect(document.body.textContent).not.toContain(`v8 ${'ignore'}`)
     fireEvent.keyDown(inDocument('[data-develop-path]'), { key: 'Enter' })
     await settle()
     expect(harness.runtime.workspaces.calls.filter(call => call.method === 'create')).toHaveLength(0)
@@ -790,6 +1087,61 @@ describe('plugin bindings', () => {
     await harness.runtime.dispose()
   })
 
+  it('binds the current page to the development session', async () => {
+    const harness = await mountPanel()
+    const sessionId = await harness.runtime.sessions.add({ id: 'dev-page-session' })
+    harness.runtime.sessions.stubCreate(async () => sessionId)
+    harness.runtime.workspaces.stub('create', async ({ path }) => ({ workspaceId: 'w-dev-page', path }) as never)
+    register(harness, 'workbook', notePage())
+    renderPanel(harness)
+    await settle()
+    fireEvent.click(inDocument('[data-app-menu]'))
+    await settle()
+    const item = [...document.body.querySelectorAll('button')].find(button => button.textContent?.includes('Develop this application') || button.textContent?.includes('开发此应用'))!
+    fireEvent.click(item)
+    await settle()
+    fireEvent.change(inDocument('[data-develop-path]'), { target: { value: '/src/application' } })
+    fireEvent.click(inDocument('[data-develop-submit]'))
+    await settle()
+    expect(harness.remote.setAppConversationContext).toHaveBeenLastCalledWith(sessionId, expect.objectContaining({
+      appId: 'workbook',
+      label: '笔记 n1',
+      view: 'list',
+      draftId: 'draft-1',
+      hasUnsavedChanges: true,
+    }))
+    harness.remote.completePageCommand.mockClear()
+    harness.stream().push({ kind: 'page-command', command: { commandId: 'pc-dev', sessionId, action: 'open', appId: 'workbook', view: 'list' } })
+    await settle()
+    expect(harness.remote.completePageCommand).toHaveBeenCalledWith('pc-dev', true)
+    await harness.runtime.dispose()
+  })
+
+  it('drops a development Session’s page pointer when the dock closes', async () => {
+    localStorage.setItem('dsh.applications.preferences.v1', JSON.stringify({
+      developmentSessions: [{ appId: 'workbook', sessionId: 'dev-close' }],
+      dockExpanded: true,
+    }))
+    const harness = await mountPanel()
+    await harness.runtime.sessions.add({ id: 'dev-close' })
+    register(harness, 'workbook', notePage())
+    renderPanel(harness)
+    await settle()
+    if (document.body.querySelector('[data-app-conversation-pane]') === null) {
+      fireEvent.click(inDocument('[data-sidebar-right-expand]'))
+      await settle()
+    }
+    fireEvent.click(inDocument('[data-app-dock-tab="dev-close"]'))
+    await settle()
+    expect(harness.remote.setAppConversationContext).toHaveBeenLastCalledWith('dev-close', expect.objectContaining({ appId: 'workbook' }))
+    harness.remote.setAppConversationContext.mockClear()
+    fireEvent.click(inDocument('[data-app-conversation-close]'))
+    await new Promise<void>(resolve => { setTimeout(() => { resolve() }, 320) })
+    await settle()
+    expect(harness.remote.setAppConversationContext).toHaveBeenLastCalledWith('dev-close', null)
+    await harness.runtime.dispose()
+  })
+
   it('creates the dedicated conversation on first use and shows the current-page chip', async () => {
     const pick = vi.fn()
       .mockResolvedValueOnce(ok('/picked-folder'))
@@ -801,10 +1153,11 @@ describe('plugin bindings', () => {
     register(harness, 'workbook', notePage())
     renderPanel(harness)
     await settle()
-    fireEvent.click(inDocument('[data-app-chat]'))
+    fireEvent.click(inDocument('[data-sidebar-right-expand]'))
     await settle()
     // A success, a cancelled pick and a throwing picker all leave the dialog
     // usable; only the first fills the field.
+    expect((inDocument('[data-app-conversation-setup-path]') as HTMLInputElement).value).toBe('/home/user/dsh-workspaces/app-conversation/default')
     const pickButton = inDocument('[data-app-conversation-setup-pick]')!
     fireEvent.click(pickButton)
     await settle()
@@ -822,8 +1175,19 @@ describe('plugin bindings', () => {
     expect(document.body.querySelector('[data-app-conversation-setup]')).toBeNull()
     expect(document.body.querySelector('[data-app-conversation-pane]')).not.toBeNull()
     expect(harness.remote.registerAppConversation).toHaveBeenCalledWith(sessionId)
-    const chip = inDocument('[data-app-conversation-context]')!
-    expect(chip.textContent).toContain('笔记 n1')
+    expect(harness.remote.setAppConversationContext).toHaveBeenLastCalledWith(sessionId, {
+      appId: 'workbook',
+      label: '笔记 n1',
+      record: { appId: 'workbook', kind: 'note', id: 'n1' },
+      view: 'list',
+      draftId: 'draft-1',
+      selection: [{ appId: 'workbook', kind: 'note', id: 'n1' }],
+      filters: { status: 'open' },
+      visibleRange: { from: '2026-01-01', to: '2026-01-31' },
+      hasUnsavedChanges: true,
+    })
+    const contextTab = inDocument('[data-app-dock-tab]')
+    expect(contextTab).toBeTruthy()
     // Host page commands are answered only by the client that owns the app
     // conversation Session.
     harness.remote.completePageCommand.mockClear()
@@ -836,21 +1200,171 @@ describe('plugin bindings', () => {
     harness.stream().push({ kind: 'page-command', command: { commandId: 'pc-record', sessionId, action: 'open', appId: 'workbook', record: { kind: 'note', id: 'n1' } } })
     await settle()
     expect(harness.remote.completePageCommand).toHaveBeenCalledWith('pc-record', true)
-    fireEvent.click(chip)
+    fireEvent.click(inDocument('[data-app-context-remove]'))
     await settle()
-    expect(chip.getAttribute('data-app-conversation-context')).toBe('off')
     expect(harness.remote.setAppConversationContext).toHaveBeenLastCalledWith(sessionId, null)
-    // Clicking the header button again closes the pane; the remembered target
-    // then reopens without a second setup.
-    fireEvent.click(inDocument('[data-app-chat]'))
+    expect(inDocument('[data-app-context-bar]').getAttribute('data-enabled')).toBe('false')
+    fireEvent.click(inDocument('[data-app-context-restore]'))
+    await settle()
+    expect(inDocument('[data-app-context-bar]').getAttribute('data-enabled')).toBe('true')
+    expect(harness.remote.setAppConversationContext).toHaveBeenLastCalledWith(sessionId, expect.objectContaining({ appId: 'workbook' }))
+    // The expand button hides while the dock is open (like the platform right
+    // Sidebar); the strip's collapse closes it; the remembered target then
+    // reopens without a second setup.
+    fireEvent.click(inDocument('[data-app-conversation-close]'))
+    await new Promise<void>(resolve => { setTimeout(() => { resolve() }, 320) })
     await settle()
     expect(document.body.querySelector('[data-app-conversation-pane]')).toBeNull()
-    fireEvent.click(inDocument('[data-app-chat]'))
+    fireEvent.click(inDocument('[data-sidebar-right-expand]'))
     await settle()
     expect(document.body.querySelector('[data-app-conversation-pane]')).not.toBeNull()
     fireEvent.click(inDocument('[data-app-conversation-close]'))
+    await new Promise<void>(resolve => { setTimeout(() => { resolve() }, 320) })
     await settle()
     expect(document.body.querySelector('[data-app-conversation-pane]')).toBeNull()
+    await harness.runtime.dispose()
+  })
+
+  it('closes a Session tab without deleting it and reopens it from the add menu', async () => {
+    const harness = await mountPanel()
+    const sessionId = await harness.runtime.sessions.add({ id: 'app-conversation' })
+    harness.runtime.sessions.stubCreate(async () => sessionId)
+    register(harness, 'workbook', markerPage('workbook'))
+    renderPanel(harness)
+    await settle()
+    fireEvent.click(inDocument('[data-sidebar-right-expand]'))
+    await settle()
+    fireEvent.click(inDocument('[data-app-conversation-setup] button[type="submit"]'))
+    await settle()
+    expect(document.querySelectorAll('[data-app-dock-tab]').length).toBe(1)
+    fireEvent.click(inDocument('[data-app-dock-close]'))
+    await settle()
+    expect(document.querySelectorAll('[data-app-dock-tab]').length).toBe(0)
+    expect(inDocument('[data-app-dock-empty]')).toBeTruthy()
+    fireEvent.click(inDocument('[data-app-dock-new]'))
+    await settle()
+    const menu = inDocument('[role="menu"]')
+    const openItem = [...menu.querySelectorAll('[role="menuitem"]')].find(item => item.textContent?.includes('Application area session'))
+    expect(openItem).toBeTruthy()
+    fireEvent.click(openItem as HTMLElement)
+    await settle()
+    expect(document.querySelectorAll('[data-app-dock-tab]').length).toBe(1)
+    expect(document.body.querySelector('[data-app-conversation-pane]')).not.toBeNull()
+    await harness.runtime.dispose()
+  })
+
+  it('opens a normal Session as a dock tab with no application context', async () => {
+    const harness = await mountPanel()
+    const appSession = await harness.runtime.sessions.add({ id: 'app-conversation' })
+    const normalSession = await harness.runtime.sessions.add({ id: 'normal-session' })
+    harness.runtime.sessions.stubCreate(async () => appSession)
+    register(harness, 'workbook', markerPage('workbook'))
+    renderPanel(harness)
+    await settle()
+    fireEvent.click(inDocument('[data-sidebar-right-expand]'))
+    await settle()
+    fireEvent.click(inDocument('[data-app-conversation-setup] button[type="submit"]'))
+    await settle()
+    fireEvent.click(inDocument('[data-app-dock-new]'))
+    await settle()
+    const items = [...inDocument('[role="menu"]').querySelectorAll('[role="menuitem"]')]
+    const normal = items.at(-1)
+    expect(normal).toBeTruthy()
+    fireEvent.click(normal as HTMLElement)
+    await settle()
+    const tab = inDocument(`[data-app-dock-tab="${normalSession}"]`)
+    expect(tab.getAttribute('data-kind')).toBe('normal')
+    expect(document.querySelectorAll('[data-app-conversation-context], [data-dock-context]').length).toBe(0)
+    fireEvent.click(inDocument(`[data-app-dock-close="${normalSession}"]`))
+    await settle()
+    expect(document.querySelector(`[data-app-dock-tab="${normalSession}"]`)).toBeNull()
+    await harness.runtime.dispose()
+  })
+
+  it('resizes the dock from its full-height edge and jumps to the active Session', async () => {
+    const opened: string[] = []
+    const harness = await mountPanel(undefined, (ctx) => {
+      ctx.provide('uiWorkspace', { openSession: (sessionId: string) => { opened.push(sessionId) } } as never)
+    })
+    const sessionId = await harness.runtime.sessions.add({ id: 'app-conversation' })
+    harness.runtime.sessions.stubCreate(async () => sessionId)
+    register(harness, 'workbook', notePage())
+    const panel = renderPanel(harness)
+    await settle()
+    await settle()
+    fireEvent.click(inDocument('[data-sidebar-right-expand]'))
+    await settle()
+    fireEvent.click(inDocument('[data-app-conversation-setup] button[type="submit"]'))
+    await settle()
+    const body = inDocument('[data-app-dock-body]')
+    expect(body.style.width).toBe('522px')
+    const handle = inDocument('[data-app-dock-resize]')
+    expect(handle.className).toContain('dockResize')
+    const capture = { has: true }
+    Object.assign(handle, {
+      setPointerCapture: () => {},
+      hasPointerCapture: () => capture.has,
+      releasePointerCapture: () => {},
+    })
+    fireEvent.pointerDown(handle, { button: 0, pointerId: 1, clientX: 1000 })
+    fireEvent.pointerMove(handle, { pointerId: 1, clientX: 900 })
+    await new Promise<void>(resolve => { requestAnimationFrame(() => { resolve() }) })
+    fireEvent.pointerUp(handle, { pointerId: 1, clientX: 900 })
+    await settle()
+    expect(inDocument('[data-app-dock-body]').style.width).toBe('622px')
+    fireEvent.click(inDocument('[data-app-dock-open-session]'))
+    await settle()
+    expect(opened).toContain(sessionId)
+    expect(panel).toBeTruthy()
+    await harness.runtime.dispose()
+  })
+
+  it('closes other dock tabs and tabs to the right from the tab menu', async () => {
+    localStorage.setItem('dsh.applications.preferences.v1', JSON.stringify({
+      developmentSessions: [{ appId: 'workbook', sessionId: 'dev-1' }],
+    }))
+    const harness = await mountPanel()
+    await harness.runtime.sessions.add({ id: 'dev-1' })
+    const appSession = await harness.runtime.sessions.add({ id: 'app-conversation' })
+    harness.runtime.sessions.stubCreate(async () => appSession)
+    register(harness, 'workbook', notePage())
+    renderPanel(harness)
+    await settle()
+    fireEvent.click(inDocument('[data-sidebar-right-expand]'))
+    await settle()
+    fireEvent.click(inDocument('[data-app-conversation-setup] button[type="submit"]'))
+    await settle()
+    expect(inDocument('[data-app-dock-tab="dev-1"]')).toBeTruthy()
+    const appTab = inDocument(`[data-app-dock-tab="${appSession}"]`)
+    fireEvent.contextMenu(appTab, { clientX: 40, clientY: 60 })
+    fireEvent.click([...inDocument('[role="menu"]').querySelectorAll('[role="menuitem"]')]
+      .find(item => item.textContent === 'Close other sessions') as HTMLElement)
+    await settle()
+    expect(document.querySelector('[data-app-dock-tab="dev-1"]')).toBeNull()
+    await harness.runtime.dispose()
+  })
+
+  it('closes dock tabs to the right from the tab menu', async () => {
+    localStorage.setItem('dsh.applications.preferences.v1', JSON.stringify({
+      developmentSessions: [{ appId: 'workbook', sessionId: 'dev-1' }],
+    }))
+    const harness = await mountPanel()
+    await harness.runtime.sessions.add({ id: 'dev-1' })
+    const appSession = await harness.runtime.sessions.add({ id: 'app-conversation' })
+    harness.runtime.sessions.stubCreate(async () => appSession)
+    register(harness, 'workbook', notePage())
+    renderPanel(harness)
+    await settle()
+    fireEvent.click(inDocument('[data-sidebar-right-expand]'))
+    await settle()
+    fireEvent.click(inDocument('[data-app-conversation-setup] button[type="submit"]'))
+    await settle()
+    const appTab = inDocument(`[data-app-dock-tab="${appSession}"]`)
+    fireEvent.contextMenu(appTab, { clientX: 40, clientY: 60 })
+    fireEvent.click([...inDocument('[role="menu"]').querySelectorAll('[role="menuitem"]')]
+      .find(item => item.textContent === 'Close sessions to the right') as HTMLElement)
+    await settle()
+    expect(document.querySelector('[data-app-dock-tab="dev-1"]')).toBeNull()
     await harness.runtime.dispose()
   })
 
@@ -866,7 +1380,7 @@ describe('plugin bindings', () => {
     register(harness, 'workbook', markerPage('workbook'))
     renderPanel(harness)
     await settle()
-    fireEvent.click(inDocument('[data-app-chat]'))
+    fireEvent.click(inDocument('[data-sidebar-right-expand]'))
     await settle()
     fireEvent.change(inDocument('[data-app-conversation-setup-path]'), { target: { value: '/tmp/ws' } })
     const form = inDocument('[data-app-conversation-setup]')!
@@ -887,7 +1401,7 @@ describe('plugin bindings', () => {
     register(harness, 'workbook', markerPage('workbook'))
     renderPanel(harness)
     await settle()
-    fireEvent.click(inDocument('[data-app-chat]'))
+    fireEvent.click(inDocument('[data-sidebar-right-expand]'))
     await settle()
     fireEvent.change(inDocument('[data-app-conversation-setup-path]'), { target: { value: '/tmp/ws' } })
     fireEvent.click(inDocument('[data-app-conversation-setup] button[type="submit"]'))
@@ -913,7 +1427,9 @@ describe('plugin bindings', () => {
     // "Not known yet" is not "nothing runs": neither the surface nor the
     // navigation claims the host has no applications.
     expect(inDocument('[data-app-loading]').textContent).toBe('Reading…')
-    expect(inDocument('[data-app-nav-empty]').textContent).toBe('Reading…')
+    expect(inDocument('[data-app-tabs-empty]').textContent).toBe('Reading…')
+    fireEvent.click(inDocument('[data-app-all]'))
+    expect(inDocument('[data-app-apps-empty]').textContent).toBe('Reading…')
     await harness.runtime.dispose()
   })
 
@@ -927,130 +1443,18 @@ describe('plugin bindings', () => {
     expect(empty.textContent).toContain('This host runs no applications')
     // Nothing to open does not mean nothing to manage: the state's own action
     // opens the management list, which says the same thing.
+    fireEvent.click(inDocument('[data-app-all]'))
+    expect(inDocument('[data-app-apps-empty]').textContent).toBe('No application provides a page yet')
+    fireEvent.keyDown(document, { key: 'Escape' })
     fireEvent.click(within(empty).getByRole('button', { name: 'Manage applications' }))
-    expect(document.body.querySelector('[data-manage-dialog]')).not.toBeNull()
+    expect(document.body.querySelector('[data-manage-page]')).not.toBeNull()
     expect(document.body.querySelector('[data-manage-row]')).toBeNull()
     await harness.runtime.dispose()
   })
 
-  it('searches, filters and keeps the navigation order stable across selections', async () => {
-    const harness = await mountPanel((remote) => {
-      remote.list.mockResolvedValue(ok<readonly AppInfo[]>([
-        app('workbook', 'available'), app('disk-analysis', 'available'), app('broken', 'failed'), app('info-hub'),
-      ]))
-    })
-    register(harness, 'workbook', markerPage('workbook'))
-    register(harness, 'disk-analysis', markerPage('disk'))
-    register(harness, 'broken', markerPage('broken'))
-    const panel = renderPanel(harness)
-    await settle()
-    const search = inDocument('[data-app-nav-search]') as HTMLInputElement
-    const filter = inDocument('[data-app-nav-filter]') as HTMLSelectElement
-    fireEvent.change(search, { target: { value: 'disk' } })
-    expect(nav(panel).querySelector('[data-app-nav="workbook"]')).toBeNull()
-    expect(nav(panel).querySelector('[data-app-nav="disk-analysis"]')).not.toBeNull()
-    fireEvent.change(search, { target: { value: 'no-such-app' } })
-    expect(inDocument('[data-app-nav-empty]').textContent).toContain('No matching')
-    fireEvent.change(search, { target: { value: '' } })
-    fireEvent.change(filter, { target: { value: 'available' } })
-    expect(nav(panel).querySelector('[data-app-nav="broken"]')).toBeNull()
-    fireEvent.change(filter, { target: { value: 'attention' } })
-    expect(nav(panel).querySelector('[data-app-nav="broken"]')).not.toBeNull()
-    expect(nav(panel).querySelector('[data-app-nav="workbook"]')).toBeNull()
-    fireEvent.change(filter, { target: { value: 'all' } })
-    fireEvent.click(navRow(panel, 'disk-analysis'))
-    fireEvent.click(navRow(panel, 'workbook'))
-    const order = [...nav(panel).querySelectorAll('[data-app-nav]')].map(row => row.getAttribute('data-app-nav'))
-    // Selecting is not ordering: the host order stays put.
-    expect(order).toEqual(['workbook', 'disk-analysis', 'broken'])
-    // The keyboard is the accessible alternative to the pointer drag. Keys
-    // without Alt, a non-arrow key, and moving the first row up all do nothing.
-    const workbookRow = navRow(panel, 'workbook')
-    workbookRow.focus()
-    fireEvent.keyDown(workbookRow, { key: 'ArrowDown' })
-    fireEvent.keyDown(workbookRow, { key: 'Enter', altKey: true })
-    fireEvent.keyDown(workbookRow, { key: 'ArrowUp', altKey: true })
-    expect([...nav(panel).querySelectorAll('[data-app-nav]')].map(row => row.getAttribute('data-app-nav')))
-      .toEqual(['workbook', 'disk-analysis', 'broken'])
-    fireEvent.keyDown(workbookRow, { key: 'ArrowDown', altKey: true })
-    expect([...nav(panel).querySelectorAll('[data-app-nav]')].map(row => row.getAttribute('data-app-nav')))
-      .toEqual(['disk-analysis', 'workbook', 'broken'])
-    expect(inDocument('[data-app-nav-announcement]').textContent).toContain('2')
-    // The order is persisted, not merely in memory.
-    expect(JSON.parse(localStorage.getItem('dsh.applications.preferences.v1') as string))
-      .toMatchObject({ navOrder: ['disk-analysis', 'workbook', 'broken'] })
-    // Filtering turns sorting off: the row still gets the keydown, but the
-    // handler refuses to reorder what the human cannot see in full.
-    fireEvent.change(inDocument('[data-app-nav-search]'), { target: { value: 'disk' } })
-    fireEvent.keyDown(navRow(panel, 'disk-analysis'), { key: 'ArrowDown', altKey: true })
-    expect([...nav(panel).querySelectorAll('[data-app-nav]')].map(row => row.getAttribute('data-app-nav')))
-      .toEqual(['disk-analysis'])
-    await harness.runtime.dispose()
-  })
-
-  it('reorders by dragging the handle, ignoring a non-left or still pointer', async () => {
-    const harness = await mountPanel((remote) => {
-      remote.list.mockResolvedValue(ok<readonly AppInfo[]>([
-        app('workbook', 'available'), app('disk-analysis', 'available'), app('info-hub', 'available'),
-      ]))
-    })
-    register(harness, 'workbook', markerPage('workbook'))
-    register(harness, 'disk-analysis', markerPage('disk'))
-    register(harness, 'info-hub', markerPage('info'))
-    const panel = renderPanel(harness)
-    await settle()
-    const order = (): Array<string | null> =>
-      [...nav(panel).querySelectorAll('[data-app-nav]')].map(row => row.getAttribute('data-app-nav'))
-    // jsdom has no PointerEvent: dispatch a plain event carrying the fields the
-    // handlers read, which is what React's synthetic event exposes.
-    const pointer = (type: string, init: { pointerId: number; clientY: number; button?: number }): Event => {
-      const event = new Event(type, { bubbles: true, cancelable: true })
-      return Object.assign(event, { button: 0, ...init })
-    }
-    const handle = nav(panel).querySelector('[data-app-nav-handle="workbook"]')!
-    // A non-primary press is not a drag.
-    fireEvent(handle, pointer('pointerdown', { pointerId: 1, clientY: 0, button: 2 }))
-    fireEvent(handle, pointer('pointermove', { pointerId: 1, clientY: 100 }))
-    fireEvent(handle, pointer('pointerup', { pointerId: 1, clientY: 100 }))
-    expect(order()).toEqual(['workbook', 'disk-analysis', 'info-hub'])
-    // A primary press that never travels 4px, or is reported for another
-    // pointer, commits nothing.
-    fireEvent(handle, pointer('pointerdown', { pointerId: 2, clientY: 10 }))
-    fireEvent(handle, pointer('pointermove', { pointerId: 3, clientY: 100 }))
-    fireEvent(handle, pointer('pointermove', { pointerId: 2, clientY: 11 }))
-    fireEvent(handle, pointer('pointerup', { pointerId: 2, clientY: 11 }))
-    expect(order()).toEqual(['workbook', 'disk-analysis', 'info-hub'])
-    // A real drag: give every row a midpoint so the pointer can name one, and
-    // let pointer capture exist so the grab path is exercised.
-    const capture = vi.fn()
-    Object.defineProperty(HTMLElement.prototype, 'setPointerCapture', { configurable: true, value: capture })
-    for (const item of nav(panel).querySelectorAll('[data-app-nav-item]')) {
-      item.getBoundingClientRect = () => ({ top: 0, height: 20 }) as DOMRect
-    }
-    const infoHandle = nav(panel).querySelector('[data-app-nav-handle="info-hub"]')!
-    fireEvent(infoHandle, pointer('pointerdown', { pointerId: 4, clientY: 0 }))
-    expect(capture).toHaveBeenCalled()
-    fireEvent(infoHandle, pointer('pointermove', { pointerId: 4, clientY: 5 }))
-    expect(nav(panel).querySelector('[data-app-nav-item="info-hub"]')?.getAttribute('data-dragging')).toBe('true')
-    expect(nav(panel).querySelector('[data-app-nav-item="workbook"]')?.getAttribute('data-drop-before')).toBe('true')
-    fireEvent(infoHandle, pointer('pointerup', { pointerId: 4, clientY: 5 }))
-    expect(order()).toEqual(['info-hub', 'workbook', 'disk-analysis'])
-    expect(JSON.parse(localStorage.getItem('dsh.applications.preferences.v1') as string))
-      .toMatchObject({ navOrder: ['info-hub', 'workbook', 'disk-analysis'] })
-    expect(inDocument('[data-app-nav-announcement]').textContent).toContain('1')
-    // Dropping a row onto its own slot is a no-op.
-    fireEvent(infoHandle, pointer('pointerdown', { pointerId: 5, clientY: 0 }))
-    fireEvent(infoHandle, pointer('pointermove', { pointerId: 5, clientY: 5 }))
-    fireEvent(infoHandle, pointer('pointerup', { pointerId: 5, clientY: 5 }))
-    expect(order()).toEqual(['info-hub', 'workbook', 'disk-analysis'])
-    delete (HTMLElement.prototype as { setPointerCapture?: unknown }).setPointerCapture
-    await harness.runtime.dispose()
-  })
-
-  it('renders a saved order, appends a new application and ignores a removed id', async () => {
+  it('renders the saved pinned order, appends a new application and ignores a removed id', async () => {
     localStorage.setItem('dsh.applications.preferences.v1', JSON.stringify({
-      navExpanded: true,
-      navOrder: ['info-hub', 'gone', 'workbook'],
+      pinned: ['info-hub', 'gone', 'workbook'],
     }))
     const harness = await mountPanel((remote) => {
       remote.list.mockResolvedValue(ok<readonly AppInfo[]>([
@@ -1062,8 +1466,8 @@ describe('plugin bindings', () => {
     register(harness, 'info-hub', markerPage('info'))
     const panel = renderPanel(harness)
     await settle()
-    expect([...nav(panel).querySelectorAll('[data-app-nav]')].map(row => row.getAttribute('data-app-nav')))
-      .toEqual(['info-hub', 'workbook', 'disk-analysis'])
+    expect([...nav(panel).querySelectorAll('[data-app-tab]')].map(row => row.getAttribute('data-app-tab')))
+      .toEqual(['info-hub', 'workbook'])
     await harness.runtime.dispose()
   })
 
@@ -1074,14 +1478,14 @@ describe('plugin bindings', () => {
     const state = inDocument('[data-app-state="no-page"]')
     expect(state.textContent).toContain('None of these applications registers a page')
     expect(within(state).getByRole('button', { name: 'Manage applications' })).toBeDefined()
-    expect(inDocument('[data-app-nav-empty]').textContent).toBe('No application provides a page yet')
+    expect(inDocument('[data-app-tabs-empty]').textContent).toBe('No application provides a page yet')
     await harness.runtime.dispose()
   })
 
   it('shows an application whose page is gone as such, with the management way in', async () => {
     // The human was on an application whose page package has not loaded (or was
     // unloaded): the place is kept, and the surface says what is missing.
-    localStorage.setItem('dsh.applications.preferences.v1', JSON.stringify({ navExpanded: true, lastAppId: 'info-hub' }))
+    localStorage.setItem('dsh.applications.preferences.v1', JSON.stringify({ lastAppId: 'info-hub' }))
     const harness = await mountPanel()
     renderPanel(harness)
     await settle()
@@ -1142,7 +1546,7 @@ describe('registered views', () => {
     // navigation (which lists pages) no longer offers a row for it.
     expect(inDocument('[data-app-state="no-view"]')).toBeDefined()
     expect(inDocument('[data-app-frame]').getAttribute('data-app-id')).toBe('workbook')
-    expect(nav(panel).querySelector('[data-app-nav="workbook"]')).toBeNull()
+    expect(nav(panel).querySelector('[data-app-tab="workbook"]')).toBeNull()
     await harness.runtime.dispose()
   })
 
@@ -1191,6 +1595,10 @@ function applicationSource(harness: Harness & { registered: InputTriggerSource[]
 
 describe('the page reference source', () => {
   it('offers the page a registered page reports, and clears it when that page unmounts', async () => {
+    localStorage.setItem('dsh.applications.preferences.v1', JSON.stringify({
+      appConversation: { workspaceId: 'workspace-1', sessionId: 'session-1' },
+      appConversations: [{ workspaceId: 'workspace-1', sessionId: 'session-1' }],
+    }))
     const harness = await mountWithTriggers()
     const panel = renderPanel(harness)
     await settle()
@@ -1228,6 +1636,10 @@ describe('the page reference source', () => {
 
 describe('the application reference source', () => {
   it('offers every available application and omits the one the page row already represents', async () => {
+    localStorage.setItem('dsh.applications.preferences.v1', JSON.stringify({
+      appConversation: { workspaceId: 'workspace-1', sessionId: 'session-1' },
+      appConversations: [{ workspaceId: 'workspace-1', sessionId: 'session-1' }],
+    }))
     const harness = await mountWithTriggers()
     register(harness, 'workbook', notePage())
     register(harness, 'disk-analysis', markerPage('disk', 'Disk analysis'))
@@ -1240,151 +1652,105 @@ describe('the application reference source', () => {
     ])
     await harness.runtime.dispose()
   })
+
+  it('keeps the current application for an ordinary Session with no page row', async () => {
+    const harness = await mountWithTriggers()
+    register(harness, 'workbook', notePage())
+    register(harness, 'disk-analysis', markerPage('disk', 'Disk analysis'))
+    renderPanel(harness)
+    await settle()
+    // The ordinary Session is not a page owner, so no page row exists.
+    expect(await rowsFor(pageSource(harness), 'ordinary-1')).toEqual([])
+    // The page's application must still be reachable through the app row.
+    expect((await rowsFor(applicationSource(harness), 'ordinary-1')).map(row => row.value)).toEqual([
+      '@app:workbook',
+      '@app:disk-analysis',
+      '@app:info-hub',
+    ])
+    await harness.runtime.dispose()
+  })
 })
 
-describe('the application navigation and the header', () => {
-  it('folds and unfolds the navigation column, remembering the preference', async () => {
+describe('the application tabs and the header', () => {
+  it('moves the selection with the keyboard and scrolls the active tab into view', async () => {
     const harness = await mountPanel()
     register(harness, 'workbook', markerPage('workbook'))
+    register(harness, 'disk-analysis', markerPage('disk', 'Disk analysis'))
+    register(harness, 'info-hub', markerPage('info'))
     const panel = renderPanel(harness)
     await settle()
-    const navigation = nav(panel)
-    // A fresh deployment starts EXPANDED: the platform sidebar has one 应用
-    // entry, not the application rows, so the column is the discoverable list.
-    expect(navigation.getAttribute('data-nav-state')).toBe('expanded')
-    fireEvent.click(within(nav(panel)).getByRole('button', { name: 'Collapse the application navigation' }))
-    await settle()
-    expect(nav(panel).getAttribute('data-nav-state')).toBe('collapsed')
-    // The fold is a preference, not a render-only flag: it outlives the render.
-    expect(JSON.parse(localStorage.getItem('dsh.applications.preferences.v1') as string))
-      .toMatchObject({ navExpanded: false })
-    // Folded again: the column's own control went with it, and the header's
-    // unfold control is the way back (one entry, never two).
-    expect(within(nav(panel)).queryByRole('button', { name: 'Collapse the application navigation' })).toBeNull()
-    expect(inDocument('[data-app-drawer-open]').getAttribute('data-nav-open')).toBe('column')
-    fireEvent.click(inDocument('[data-app-drawer-open]'))
-    await settle()
-    expect(nav(panel).getAttribute('data-nav-state')).toBe('expanded')
-    // The row is still how the page is reached.
-    fireEvent.click(navRow(panel, 'workbook'))
-    expect(panel.view.getByTestId('workbook-page')).toBeDefined()
-    expect(navRow(panel, 'workbook').getAttribute('aria-current')).toBe('page')
-    await harness.runtime.dispose()
-  })
-
-  it('opens the navigation when the entry is activated, and toggles it when already here', async () => {
-    localStorage.setItem('dsh.applications.preferences.v1', JSON.stringify({ navExpanded: false }))
-    const harness = await mountPanel()
-    register(harness, 'workbook', markerPage('workbook'))
-    const panel = renderPanel(harness)
-    await settle()
-    // Wide, folded: the entry's own activation opens the column. The panel is
-    // already selected here (the harness renders the area directly), so this is
-    // the toggle case — from elsewhere it is the same command with toggle=false.
-    const entry = harness.runtime.ctx.get('applicationsEntry') as unknown as { activate: () => void }
-    // From elsewhere (the layout names another panel) the activation only
-    // enters: the navigation stays folded — no second app list opens by itself.
-    (harness.selectPanel as unknown as (id: string) => void)('conversation')
-    act(() => { entry.activate() })
-    await settle()
-    expect(nav(panel).getAttribute('data-nav-state')).toBe('collapsed')
-    // The human is here now, so the next activation is a toggle.
-    act(() => { entry.activate() })
-    await settle()
-    expect(nav(panel).getAttribute('data-nav-state')).toBe('expanded')
-    // The same activation again folds it: the second click on the entry the
-    // human is already on means "toggle", never "reopen the last application".
-    act(() => { entry.activate() })
-    await settle()
-    expect(nav(panel).getAttribute('data-nav-state')).toBe('collapsed')
-    // The request is consumed: nothing happens twice for one activation.
-    act(() => { entry.activate() })
-    await settle()
-    expect(nav(panel).getAttribute('data-nav-state')).toBe('expanded')
-    await harness.runtime.dispose()
-  })
-
-  it('turns the navigation into a temporary drawer in a narrow area', async () => {
-    // jsdom computes no layout, so the area's own box is measured here.
-    const original = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
-    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => 640 })
+    const scroll = vi.fn()
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: scroll })
     try {
-      const harness = await mountPanel()
-      register(harness, 'workbook', markerPage('workbook'))
-      register(harness, 'disk-analysis', markerPage('disk', 'Disk analysis'))
-      const panel = renderPanel(harness)
+      fireEvent.keyDown(navRow(panel, 'workbook'), { key: 'ArrowRight' })
       await settle()
-      expect(inDocument('[data-applications-area]').getAttribute('data-narrow')).toBe('true')
-      // Closed, the drawer is not in the layout at all: a hidden column would
-      // still take the width it was given.
-      expect(panel.container.querySelector('[data-app-nav-root]')).toBeNull()
-
-      const opener = inDocument('[data-app-drawer-open]')
-      opener.focus()
-      fireEvent.click(opener)
-      const navigation = nav(panel)
-      expect(navigation.getAttribute('data-nav-state')).toBe('drawer')
-      // The column's own fold control is gone: the way in is the header's.
-      expect(within(navigation).queryByRole('button', { name: 'Collapse the application navigation' })).toBeNull()
-      expect(document.body.querySelector('[data-app-drawer-backdrop]')).not.toBeNull()
-      // It is a real modal layer: dialogs and screen readers get the same
-      // statement the platform's own modal makes, and focus enters it.
-      expect(navigation.getAttribute('role')).toBe('dialog')
-      expect(navigation.getAttribute('aria-modal')).toBe('true')
-      expect(navigation.contains(document.activeElement)).toBe(true)
-      // Escape is owned by the layer (not a second document listener): the
-      // layer closes it and hands focus back to the opener.
-      fireEvent.keyDown(document, { key: 'Escape' })
-      expect(document.body.querySelector('[data-app-drawer-backdrop]')).toBeNull()
-      expect(document.activeElement).toBe(opener)
-      // Closing it through its own control gives the surface back too.
-      fireEvent.click(opener)
-      fireEvent.click(within(nav(panel)).getByRole('button', { name: 'Close the application navigation' }))
-      expect(document.body.querySelector('[data-app-drawer-backdrop]')).toBeNull()
-      expect(document.activeElement).toBe(opener)
-      // Picking an application closes the drawer, and the page shows.
-      fireEvent.click(inDocument('[data-app-drawer-open]'))
-      fireEvent.click(navRow(panel, 'disk-analysis'))
-      expect(document.body.querySelector('[data-app-drawer-backdrop]')).toBeNull()
-      expect(panel.view.getByTestId('disk-page')).toBeDefined()
-      // The entry answers narrow activation the same way it does wide: entering
-      // leaves the drawer closed (the sidebar lists the applications), and only
-      // a repeat activation — the human is already here — opens it.
-      const entry = harness.runtime.ctx.get('applicationsEntry') as unknown as { activate: () => void }
-      (harness.selectPanel as unknown as (id: string) => void)('conversation')
-      act(() => { entry.activate() })
-      expect(panel.container.querySelector('[data-app-nav-root]')).toBeNull()
-      act(() => { entry.activate() })
-      expect(nav(panel).getAttribute('data-nav-state')).toBe('drawer')
-      act(() => { entry.activate() })
-      expect(panel.container.querySelector('[data-app-nav-root]')).toBeNull()
-      expect(panel.view.getByTestId('disk-page')).toBeDefined()
-      // Escape closes the temporary surface too (the drawer owns it while open).
-      fireEvent.click(inDocument('[data-app-drawer-open]'))
-      expect(nav(panel).getAttribute('data-nav-state')).toBe('drawer')
-      fireEvent.keyDown(document, { key: 'Escape' })
-      expect(document.body.querySelector('[data-app-drawer-backdrop]')).toBeNull()
-      expect(panel.container.querySelector('[data-app-nav-root]')).toBeNull()
-      expect(panel.view.getByTestId('disk-page')).toBeDefined()
-
-      // A close whose opener is GONE (a widened window takes the drawer's
-      // button with it) must still leave focus somewhere usable — never the
-      // document body, which is a dead end for a keyboard user. Last in the
-      // case on purpose: the opener is taken out of the DOM for good.
-      const doomed = inDocument('[data-app-drawer-open]')
-      fireEvent.click(doomed)
-      expect(nav(panel).getAttribute('data-nav-state')).toBe('drawer')
-      doomed.remove()
-      fireEvent.keyDown(document, { key: 'Escape' })
-      expect(panel.container.querySelector('[data-app-nav-root]')).toBeNull()
-      expect(document.activeElement).not.toBe(document.body)
-      // The header's own controls are the fallback (the quick switcher here).
-      expect(panel.container.querySelector('[data-app-switcher]')).toBe(document.activeElement)
-      await harness.runtime.dispose()
+      expect(navRow(panel, 'disk-analysis').getAttribute('aria-selected')).toBe('true')
+      expect(document.activeElement).toBe(navRow(panel, 'disk-analysis'))
+      expect(navRow(panel, 'disk-analysis').getAttribute('tabindex')).toBe('0')
+      fireEvent.keyDown(navRow(panel, 'disk-analysis'), { key: 'End' })
+      await settle()
+      expect(navRow(panel, 'info-hub').getAttribute('aria-selected')).toBe('true')
+      fireEvent.keyDown(navRow(panel, 'info-hub'), { key: 'Home' })
+      await settle()
+      expect(navRow(panel, 'workbook').getAttribute('aria-selected')).toBe('true')
+      expect(scroll).toHaveBeenCalled()
     } finally {
-      if (original === undefined) delete (HTMLElement.prototype as { clientWidth?: unknown }).clientWidth
-      else Object.defineProperty(HTMLElement.prototype, 'clientWidth', original)
+      delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView
     }
+    await harness.runtime.dispose()
+  })
+
+  it('opens the complete application list from the header and pins management at its footer', async () => {
+    const harness = await mountPanel()
+    register(harness, 'workbook', markerPage('workbook'))
+    register(harness, 'disk-analysis', markerPage('disk', 'Disk analysis'))
+    const panel = renderPanel(harness)
+    await settle()
+    fireEvent.click(inDocument('[data-app-all]'))
+    const list = inDocument('[data-app-apps-panel]')
+    // Every page application is present, fixed or not, plus management.
+    expect(within(list).getByRole('button', { name: 'workbook title' })).toBeDefined()
+    expect(within(list).getByRole('button', { name: 'Disk analysis' })).toBeDefined()
+    expect(within(list).getByRole('button', { name: 'Manage applications' })).toBeDefined()
+    expect(inDocument('[data-app-pin-toggle="workbook"]').getAttribute('aria-pressed')).toBe('true')
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await settle()
+    expect(document.body.querySelector('[data-app-apps-panel]')).toBeNull()
+    expect(document.activeElement).toBe(inDocument('[data-app-all]'))
+    openManageList(panel)
+    await settle()
+    expect(inDocument('[data-manage-row="workbook"]')).not.toBeNull()
+    await harness.runtime.dispose()
+  })
+
+  it('closes the application list on an outside press or a second trigger click', async () => {
+    const harness = await mountPanel()
+    register(harness, 'workbook', markerPage('workbook'))
+    const panel = renderPanel(harness)
+    await settle()
+    fireEvent.click(inDocument('[data-app-all]'))
+    expect(inDocument('[data-app-apps-panel]')).not.toBeNull()
+    // A press inside the panel and an unrelated key must not close it.
+    fireEvent.pointerDown(inDocument('[data-app-apps-panel]'))
+    fireEvent.keyDown(document, { key: 'Enter' })
+    await settle()
+    expect(inDocument('[data-app-apps-panel]')).not.toBeNull()
+    fireEvent.pointerDown(document.body)
+    await settle()
+    expect(document.body.querySelector('[data-app-apps-panel]')).toBeNull()
+    // The current application's row closes the panel without switching.
+    fireEvent.click(inDocument('[data-app-all]'))
+    fireEvent.click(inDocument('[data-app-apps-row="workbook"]'))
+    await settle()
+    expect(document.body.querySelector('[data-app-apps-panel]')).toBeNull()
+    expect(navRow(panel, 'workbook').getAttribute('aria-selected')).toBe('true')
+    // The trigger toggles closed too.
+    fireEvent.click(inDocument('[data-app-all]'))
+    expect(inDocument('[data-app-apps-panel]')).not.toBeNull()
+    fireEvent.click(inDocument('[data-app-all]'))
+    await settle()
+    expect(document.body.querySelector('[data-app-apps-panel]')).toBeNull()
+    await harness.runtime.dispose()
   })
 })
 
@@ -1394,13 +1760,13 @@ describe('the management dialog', () => {
     const harness = await mountPanel((remote) => {
       remote.dataInfo.mockResolvedValue(ok({
         appId: 'workbook', path: '/tmp/app-data.sqlite', byteSize: 1024, schemaVersion: 2, documentCount: 1, collections: { notes: 3 },
-        backups: [{ path: backupPath, byteSize: 2048, modifiedAt: 1 }], backupCount: 1, legacyImports: {},
+        backups: [{ path: backupPath, byteSize: 2048, modifiedAt: 1 }], backupCount: 1,
       }))
       remote.dataRestorePreview.mockResolvedValue(ok<AppDataRestorePreview>({
         appId: 'workbook', backupPath, backupModifiedAt: 1, backupByteSize: 2048,
         documents: { backupOnly: 1, currentOnly: 1, modified: 1, unchanged: 0 },
         collections: { backupOnly: 0, currentOnly: 0, modified: 0, unchanged: 0 },
-        conflicts: [{ kind: 'document', name: 'notes' }], conflictCount: 1, truncated: false, metaChanged: [], previewFingerprint: 'fingerprint',
+        conflicts: [{ kind: 'document', name: 'notes' }], conflictCount: 1, truncated: false, metaChanged: [], previewFingerprint: 'fingerprint', planId: 'plan_restore', expiresAt: Date.now() + 60_000,
       }))
     })
     register(harness, 'workbook', markerPage('workbook'))
@@ -1408,17 +1774,24 @@ describe('the management dialog', () => {
     await settle()
     openManageList(panel)
     fireEvent.click(inDocument('[data-manage-row="workbook"]'))
-    fireEvent.click(inDocument('[data-manage-tab="info"]'))
+    fireEvent.click(inDocument('[data-manage-tab="data"]'))
     await waitFor(() => expect(inDocument('[data-manage-data]')).toBeDefined())
     fireEvent.click(inDocument(`[data-manage-data-restore="${backupPath}"]`))
     await waitFor(() => expect(inDocument('[data-manage-data-restore-preview]')).toBeDefined())
     expect(harness.remote.dataRestorePreview).toHaveBeenCalledWith('workbook', backupPath)
     expect(inDocument('[data-manage-data-restore-conflicts]').textContent).toContain('notes')
     fireEvent.click(inDocument('[data-manage-data-restore-confirm]'))
+    await waitFor(() => expect(document.body.querySelector('[data-data-confirm-dialog]')).not.toBeNull())
+    expect(document.body.querySelector('[role="dialog"]')?.textContent).toContain('Restore this backup?')
+    await waitFor(() => expect(document.activeElement).toBe(document.body.querySelector('[data-data-confirm-no]')))
+    fireEvent.keyDown(document.body.querySelector('[data-data-confirm-no]')!, { key: 'Escape' })
+    await waitFor(() => expect(document.body.querySelector('[data-data-confirm-dialog]')).toBeNull())
+    expect(harness.remote.dataRestore).not.toHaveBeenCalled()
+    await confirmDataAction(inDocument('[data-manage-data-restore-confirm]'))
     await waitFor(() => expect(inDocument('[data-manage-data-restore-result]').textContent).toContain('/tmp/pre-restore.sqlite'))
     const restoreArgs = harness.remote.dataRestore.mock.calls[0]!
-    expect(restoreArgs.slice(0, 3)).toEqual(['workbook', backupPath, 'fingerprint'])
-    expect(restoreArgs[4]).toEqual(expect.any(String))
+    expect(restoreArgs.slice(0, 2)).toEqual(['workbook', 'plan_restore'])
+    expect(restoreArgs[2]).toEqual(expect.any(String))
     await harness.runtime.dispose()
   })
 
@@ -1427,7 +1800,7 @@ describe('the management dialog', () => {
     const harness = await mountPanel((remote) => {
       remote.dataInfo.mockResolvedValue(ok({
         appId: 'workbook', path: '/tmp/app-data.sqlite', byteSize: 1024, schemaVersion: 2, documentCount: 1, collections: { notes: 3 },
-        backups: [{ path: backupPath, byteSize: 2048, modifiedAt: 1 }], backupCount: 1, legacyImports: {},
+        backups: [{ path: backupPath, byteSize: 2048, modifiedAt: 1 }], backupCount: 1,
       }))
       remote.dataRestorePreview
         .mockRejectedValueOnce(new Error('preview down'))
@@ -1436,7 +1809,7 @@ describe('the management dialog', () => {
           documents: { backupOnly: 0, currentOnly: 1, modified: 1, unchanged: 0 },
           collections: { backupOnly: 0, currentOnly: 0, modified: 0, unchanged: 0 },
           conflicts: [{ kind: 'document', name: 'notes' }], conflictCount: 51, truncated: true, metaChanged: ['legacy'],
-          previewFingerprint: 'fingerprint',
+          previewFingerprint: 'fingerprint', planId: 'plan_restore', expiresAt: Date.now() + 60_000,
         }))
       remote.dataRestore.mockResolvedValue(ok<AppDataRestoreResult>({
         appId: 'workbook', restoredFrom: backupPath, backupPath: '/tmp/pre-restore.sqlite', documents: 1, collections: 0,
@@ -1448,7 +1821,7 @@ describe('the management dialog', () => {
     await settle()
     openManageList(panel)
     fireEvent.click(inDocument('[data-manage-row="workbook"]'))
-    fireEvent.click(inDocument('[data-manage-tab="info"]'))
+    fireEvent.click(inDocument('[data-manage-tab="data"]'))
     await waitFor(() => expect(inDocument('[data-manage-data]')).toBeDefined())
     fireEvent.click(inDocument(`[data-manage-data-restore="${backupPath}"]`))
     await waitFor(() => expect(inDocument('[data-manage-data-restore-error]').textContent).toContain('preview down'))
@@ -1461,48 +1834,46 @@ describe('the management dialog', () => {
     fireEvent.click(inDocument(`[data-manage-data-restore="${backupPath}"]`))
     await waitFor(() => expect(inDocument('[data-manage-data-restore-preview]')).toBeDefined())
     harness.remote.dataRestore.mockRejectedValueOnce(new Error('restore down'))
-    fireEvent.click(inDocument('[data-manage-data-restore-confirm]'))
+    await confirmDataAction(inDocument('[data-manage-data-restore-confirm]'))
     await waitFor(() => expect(inDocument('[data-manage-data-restore-error]').textContent).toContain('restore down'))
-    fireEvent.click(inDocument('[data-manage-data-restore-confirm]'))
+    expect(inDocument('[data-manage-data-restore-error]').textContent).toContain('Restore failed')
+    await confirmDataAction(inDocument('[data-manage-data-restore-confirm]'))
     await waitFor(() => expect(inDocument('[data-manage-data-restore-reload-failed]')).toBeDefined())
     fireEvent.click(inDocument('[data-manage-data-restore-reload-retry]'))
     await settle()
     await harness.runtime.dispose()
   })
 
-  it('lists every application the host runs, including the view-less ones, and returns from a detail', async () => {
+  it('lists every application the host runs, including the view-less ones, beside the detail', async () => {
     const harness = await mountPanel()
     register(harness, 'workbook', markerPage('workbook'))
     const panel = renderPanel(harness)
     await settle()
     openManageList(panel)
     expect(document.body.querySelector('[data-manage-list]')).not.toBeNull()
-    // The list is the whole host, in host order: applications without a page are
-    // manageable even though the daily navigation does not show them.
     const ids = [...document.body.querySelectorAll('[data-manage-row]')].map(row => row.getAttribute('data-manage-row'))
     expect(ids).toEqual(['workbook', 'disk-analysis', 'info-hub'])
-    // The row carries the real description and status; only the application
-    // with no page needs to say so (the daily navigation already lists pages).
     expect(inDocument('[data-manage-row="workbook"]').textContent).toContain('workbook description')
     expect(inDocument('[data-manage-row="workbook"]').textContent).toContain('ready')
+    // The row's content is its accessible name; no aria-label hides the status.
+    expect(inDocument('[data-manage-row="workbook"]').getAttribute('aria-label')).toBeNull()
     expect(inDocument('[data-manage-row="workbook"]').textContent).not.toContain('no page')
     expect(inDocument('[data-manage-row="info-hub"]').textContent).toContain('info-hub description')
     expect(inDocument('[data-manage-row="info-hub"]').textContent).toContain('no page')
-    // Detail, then back to the list.
+    // The list is persistent; selecting a row changes the subject of the
+    // detail, not the application the area will return to.
     fireEvent.click(inDocument('[data-manage-row="workbook"]'))
-    expect(document.body.querySelector('[data-manage-list]')).toBeNull()
-    expect(document.body.querySelector('[data-manage-row="workbook"]')).toBeNull()
-    expect(document.body.querySelector('[data-manage-back]')).not.toBeNull()
-    expect(document.body.querySelector('[data-manage-tab="permissions"]')).not.toBeNull()
-    fireEvent.click(inDocument('[data-manage-back]'))
-    expect(document.body.querySelector('[data-manage-list]')).not.toBeNull()
+    await settle()
+    expect(inDocument('[data-manage-list]')).not.toBeNull()
+    expect(inDocument('[data-manage-detail]').getAttribute('data-app-id')).toBe('workbook')
+    expect(inDocument('[data-manage-row="workbook"]').getAttribute('aria-current')).toBe('true')
+    expect(inDocument('[data-manage-tab="status"]')).not.toBeNull()
     // Closing gives the page back exactly as it was.
-    fireEvent.click(inDocument('[data-manage-close]'))
-    expect(document.body.querySelector('[data-manage-dialog]')).toBeNull()
+    fireEvent.click(inDocument('[data-manage-return]'))
+    expect(document.body.querySelector('[data-manage-page]')).toBeNull()
     expect(panel.view.getByTestId('workbook-page')).toBeDefined()
     await harness.runtime.dispose()
   })
-
   it('lists durable background tasks and cancels one from the tasks tab', async () => {
     const task: TaskSnapshot = {
       taskId: 'task-1', traceId: 'task-1', appId: 'workbook', kind: 'scan', title: 'Scan', origin: { kind: 'background' },
@@ -1517,13 +1888,15 @@ describe('the management dialog', () => {
     await settle()
     openManageList(panel)
     await settle()
-    // The cross-application list shows the live background task too.
+    // The cross-application queue shows the live background task too.
+    fireEvent.click(inDocument('[data-manage-queue="running"]'))
+    await settle()
     expect(inDocument('[data-manage-background-task="task-1"]').textContent).toContain('Scan')
     fireEvent.click(inDocument('[data-manage-background-task="task-1"] [data-manage-background-task-cancel]'))
     await settle()
     expect(harness.remote.cancelTask).toHaveBeenCalledWith('workbook', 'task-1')
     fireEvent.click(inDocument('[data-manage-row="workbook"]'))
-    fireEvent.click(inDocument('[data-manage-tab="tasks"]'))
+    fireEvent.click(inDocument('[data-manage-tab="data"]'))
     await settle()
     expect(inDocument('[data-manage-background-task="task-1"]').textContent).toContain('half')
     fireEvent.click(inDocument('[data-manage-background-task-cancel]'))
@@ -1541,6 +1914,8 @@ describe('the management dialog', () => {
     await settle()
     openManageList(panel)
     await settle()
+    fireEvent.click(inDocument('[data-manage-queue="running"]'))
+    await settle()
     fireEvent.click(inDocument('[data-manage-tasks-retry]'))
     await settle()
     expect(harness.remote.tasks).toHaveBeenCalledTimes(2)
@@ -1551,11 +1926,11 @@ describe('the management dialog', () => {
     let activation: 'enabled' | 'disabled' = 'enabled'
     const harness = await mountPanel((remote) => {
       remote.list.mockImplementation(async () => ok<readonly AppInfo[]>([
-        { ...app('workbook'), activation, ...(activation === 'disabled' ? { status: 'stopped' } : {}) },
+        { ...app('workbook'), activation },
       ]))
       remote.setActivation.mockImplementation(async (_appId, next) => {
         activation = next
-        return ok<readonly AppInfo[]>([{ ...app('workbook'), activation, status: 'stopped' }])
+        return ok<readonly AppInfo[]>([{ ...app('workbook'), activation }])
       })
     })
     register(harness, 'workbook', markerPage('workbook'))
@@ -1564,13 +1939,141 @@ describe('the management dialog', () => {
     openManageList(panel)
     fireEvent.click(inDocument('[data-manage-row="workbook"]'))
     await settle()
-    fireEvent.click(inDocument('[data-manage-tab="info"]'))
+    fireEvent.click(inDocument('[data-manage-tab="status"]'))
     expect(inDocument('[data-manage-activation]').getAttribute('data-activation')).toBe('enabled')
     fireEvent.click(inDocument('[data-manage-activation] button'))
     await settle()
     expect(harness.remote.setActivation).toHaveBeenCalledWith('workbook', 'disabled')
     expect(inDocument('[data-manage-activation]').getAttribute('data-activation')).toBe('disabled')
     expect(inDocument('[data-manage-activation] button')).toBeDefined()
+    await harness.runtime.dispose()
+  })
+
+  it('shows the runtime/health/reason/detail projection and runs the explicit health check', async () => {
+    let checked = false
+    const degraded = {
+      ...app('workbook'),
+      health: 'degraded' as const,
+      detail: 'the model is not configured',
+    }
+    const harness = await mountPanel((remote) => {
+      remote.list.mockImplementation(async () => ok<readonly AppInfo[]>([checked ? degraded : app('workbook')]))
+      remote.checkHealth.mockImplementation(async () => {
+        checked = true
+        return ok<readonly AppInfo[]>([degraded])
+      })
+    })
+    register(harness, 'workbook', markerPage('workbook'))
+    const panel = renderPanel(harness)
+    await settle()
+    openManageList(panel)
+    fireEvent.click(inDocument('[data-manage-row="workbook"]'))
+    await settle()
+    const health = inDocument('[data-manage-health]')
+    expect(health.getAttribute('data-runtime')).toBe('ready')
+    expect(health.getAttribute('data-health')).toBe('ok')
+    expect(health.getAttribute('data-activation')).toBe('enabled')
+    expect(document.body.querySelector('[data-health-detail]')).toBeNull()
+    fireEvent.click(inDocument('[data-health-check]'))
+    await settle()
+    expect(harness.remote.checkHealth).toHaveBeenCalledWith('workbook')
+    expect(inDocument('[data-manage-health]').getAttribute('data-health')).toBe('degraded')
+    expect(inDocument('[data-health-detail]').textContent).toContain('the model is not configured')
+    await harness.runtime.dispose()
+  })
+
+  it('shows the check as running and reports a failed check on the header', async () => {
+    const harness = await mountPanel()
+    register(harness, 'workbook', markerPage('workbook'))
+    const panel = renderPanel(harness)
+    await settle()
+    openManageList(panel)
+    fireEvent.click(inDocument('[data-manage-row="workbook"]'))
+    await settle()
+    const pending = Promise.withResolvers<Awaited<ReturnType<typeof harness.remote.checkHealth>>>()
+    harness.remote.checkHealth.mockReturnValueOnce(pending.promise)
+    fireEvent.click(inDocument('[data-health-check]'))
+    await settle()
+    expect((inDocument('[data-health-check]') as HTMLButtonElement).disabled).toBe(true)
+    pending.resolve(carrierFailure<readonly AppInfo[]>())
+    await settle()
+    expect(inDocument('[data-health-error]')).toBeDefined()
+    expect((inDocument('[data-health-check]') as HTMLButtonElement).disabled).toBe(false)
+    await harness.runtime.dispose()
+  })
+
+  it('omits the health row while an application is not ready', async () => {
+    const stopped = app('workbook', 'stopped')
+    delete (stopped as { health?: 'ok' | 'degraded' }).health
+    const harness = await mountPanel((remote) => {
+      remote.list.mockResolvedValueOnce(ok([{ ...stopped, activation: 'disabled', reason: 'platform.start-failed' }]))
+    })
+    register(harness, 'workbook', markerPage('workbook'))
+    const panel = renderPanel(harness)
+    await settle()
+    openManageList(panel)
+    fireEvent.click(inDocument('[data-manage-row="workbook"]'))
+    await settle()
+    expect(inDocument('[data-manage-info]').textContent).not.toContain('info.health')
+    await harness.runtime.dispose()
+  })
+
+  it('lists runtime, health, reason and detail in the overview instead of a legacy status', async () => {
+    const row = {
+      ...app('workbook'),
+      health: 'degraded' as const,
+      reason: 'platform.updating' as const,
+      detail: 'application data is being updated',
+    }
+    const harness = await mountPanel((remote) => {
+      remote.list.mockResolvedValue(ok<readonly AppInfo[]>([row]))
+    })
+    register(harness, 'workbook', markerPage('workbook'))
+    const panel = renderPanel(harness)
+    await settle()
+    openManageList(panel)
+    fireEvent.click(inDocument('[data-manage-row="workbook"]'))
+    await settle()
+    fireEvent.click(inDocument('[data-manage-tab="status"]'))
+    await settle()
+    const info = inDocument('[data-manage-info]')
+    expect(info.textContent).toContain('Runtime')
+    expect(info.textContent).toContain('Health')
+    expect(info.textContent).toContain('Platform updating')
+    expect(inDocument('[data-health-reason-code]').textContent).toBe('platform.updating')
+    expect(inDocument('[data-health-detail]').textContent).toContain('application data is being updated')
+    await harness.runtime.dispose()
+  })
+
+  it('treats an explicit enable of a health-failed application as its restart', async () => {
+    const failed = {
+      ...app('workbook'),
+      runtime: 'stopped' as const,
+      activation: 'enabled' as const,
+      health: 'degraded' as const,
+      reason: 'platform.health-failed' as const,
+      detail: 'git is missing',
+    }
+    const harness = await mountPanel((remote) => {
+      remote.list.mockResolvedValue(ok<readonly AppInfo[]>([failed]))
+      remote.setActivation.mockResolvedValue(ok<readonly AppInfo[]>([app('workbook')]))
+    })
+    register(harness, 'workbook', markerPage('workbook'))
+    const panel = renderPanel(harness)
+    await settle()
+    openManageList(panel)
+    fireEvent.click(inDocument('[data-manage-row="workbook"]'))
+    await settle()
+    // The header says why it is down; the app is still enabled.
+    expect(inDocument('[data-manage-health]').getAttribute('data-reason')).toBe('platform.health-failed')
+    expect(inDocument('[data-health-detail]').textContent).toContain('git is missing')
+    fireEvent.click(inDocument('[data-manage-tab="status"]'))
+    await settle()
+    const activation = inDocument('[data-manage-activation]')
+    expect(activation.getAttribute('data-activation')).toBe('enabled')
+    fireEvent.click(within(activation).getByRole('button'))
+    await settle()
+    expect(harness.remote.setActivation).toHaveBeenCalledWith('workbook', 'enabled')
     await harness.runtime.dispose()
   })
 
@@ -1583,16 +2086,16 @@ describe('the management dialog', () => {
     fireEvent.click(inDocument('[data-manage-row="workbook"]'))
     await settle()
     // An idle application says so instead of showing an empty card list.
-    fireEvent.click(inDocument('[data-manage-tab="tasks"]'))
+    fireEvent.click(inDocument('[data-manage-tab="data"]'))
     expect(inDocument('[data-manage-tasks-empty]')).toBeDefined()
     // Start a call from the debug form and hold it on the wire.
-    fireEvent.click(inDocument('[data-manage-tab="info"]'))
+    fireEvent.click(inDocument('[data-manage-tab="status"]'))
     fireEvent.click(inDocument('[data-manage-debug-toggle]'))
     let finish: ((value: RemoteResult<CallOutcome>) => void) | undefined
     harness.remote.call.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
     fireEvent.click(inDialog().getByRole('button', { name: 'Call' }))
     await settle()
-    fireEvent.click(inDocument('[data-manage-tab="tasks"]'))
+    fireEvent.click(inDocument('[data-manage-tab="data"]'))
     await settle()
     const requestId = harness.remote.call.mock.calls.at(-1)?.[3]
     expect(typeof requestId).toBe('string')
@@ -1624,18 +2127,14 @@ describe('the management dialog', () => {
     openManageList(panel)
     fireEvent.click(inDocument('[data-manage-row="workbook"]'))
     await settle()
-    fireEvent.click(inDocument('[data-manage-tab="info"]'))
+    fireEvent.click(inDocument('[data-manage-tab="status"]'))
     fireEvent.click(inDocument('[data-manage-debug-toggle]'))
     let finish: ((value: RemoteResult<CallOutcome>) => void) | undefined
     harness.remote.call.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
     fireEvent.click(inDialog().getByRole('button', { name: 'Call' }))
     await settle()
-    fireEvent.click(inDocument('[data-manage-tab="tasks"]'))
+    fireEvent.click(inDocument('[data-manage-queue="running"]'))
     await settle()
-    console.log('DEBUG before back', harness.remote.call.mock.calls.length, Boolean(document.body.querySelector('[data-manage-task]')))
-    fireEvent.click(inDocument('[data-manage-back]'))
-    await settle()
-    expect(document.body.querySelector('[data-manage-list]')).not.toBeNull()
     expect(document.body.querySelector('[data-manage-active-task]')).not.toBeNull()
     expect(inDocument('[data-manage-active-tasks]').textContent).toContain('workbook')
     const requestId = harness.remote.call.mock.calls.at(-1)?.[3]
@@ -1671,8 +2170,13 @@ describe('the management dialog', () => {
     await settle()
     expect(panel.view.getByTestId('workbook-page')).toBeDefined()
     openManageList(panel)
-    // An application with settings opens on its settings tab.
+    // An application with settings offers the settings area; the page opens on
+    // its status area like every other application.
     fireEvent.click(inDocument('[data-manage-row="info-hub"]'))
+    await settle()
+    expect(inDocument('[data-manage-tab="settings"]')).not.toBeNull()
+    fireEvent.click(inDocument('[data-manage-tab="settings"]'))
+    await settle()
     expect(document.body.querySelector('[data-manage-settings]')).not.toBeNull()
     expect(inDialog().getByTestId('info-settings').textContent).toBe('info-hub settings')
     const infoProps = settingsSeen.at(-1)
@@ -1685,15 +2189,17 @@ describe('the management dialog', () => {
     // …and managing another application never switches the page underneath.
     expect(panel.view.getByTestId('workbook-page')).toBeDefined()
     expect(inDocument('[data-app-frame]').getAttribute('data-app-id')).toBe('workbook')
-    // An application without settings has no settings tab; its detail opens
-    // where its own tabs start.
-    fireEvent.click(inDocument('[data-manage-back]'))
+    // An application without settings has no settings tab; its detail keeps
+    // the status area, and the list is still there to switch back.
     fireEvent.click(inDocument('[data-manage-row="disk-analysis"]'))
+    await settle()
     expect(document.body.querySelector('[data-manage-tab="settings"]')).toBeNull()
-    expect(inDocument('[data-manage-tab="permissions"]').getAttribute('aria-selected')).toBe('true')
+    expect(inDocument('[data-manage-tab="status"]').getAttribute('aria-selected')).toBe('true')
     // The workbook's settings see the workbook's own state, not the other's.
-    fireEvent.click(inDocument('[data-manage-back]'))
     fireEvent.click(inDocument('[data-manage-row="workbook"]'))
+    await settle()
+    fireEvent.click(inDocument('[data-manage-tab="settings"]'))
+    await settle()
     expect(inDialog().getByTestId('workbook-settings').textContent).toBe('workbook settings')
     expect(settingsSeen.at(-1)?.ui).toBe(registry.state('workbook'))
     expect(settingsSeen.at(-1)?.ui.getSnapshot()).toEqual({ tab: 'calendar' })
@@ -1823,12 +2329,15 @@ describe('the management dialog', () => {
     fireEvent.click(inDocument('[data-app-menu]'))
     // Escape closes the manage menu without opening anything.
     fireEvent.keyDown(document, { key: 'Escape' })
-    expect(document.body.querySelector('[data-manage-dialog]')).toBeNull()
+    expect(document.body.querySelector('[data-manage-page]')).toBeNull()
     fireEvent.click(inDocument('[data-app-menu]'))
     fireEvent.click(panel.view.getByRole('menuitem', { name: 'Settings' }))
     expect(document.body.querySelector('[data-manage-settings]')).not.toBeNull()
     expect(inDialog().getByTestId('workbook-settings').textContent).toBe('workbook')
-    fireEvent.click(inDocument('[data-manage-close]'))
+    fireEvent.click(inDocument('[data-manage-return]'))
+    // The header's own management trigger is hidden while the page shows, so
+    // the page gives focus back to the application it returns to: its tab.
+    await waitFor(() => expect(document.activeElement).toBe(inDocument('[data-app-tab-active]')))
     // The same menu's debug entry opens THIS application's info tab, where the
     // explicit debug form lives.
     fireEvent.click(inDocument('[data-app-menu]'))
@@ -1839,7 +2348,7 @@ describe('the management dialog', () => {
     await waitFor(() => expect(document.body.querySelector('[data-manage-data]')).not.toBeNull())
     const data = document.body.querySelector('[data-manage-data]')!
     expect(data.textContent).toContain('/tmp/app-data.sqlite')
-    expect(data.textContent).toContain('1024 B')
+    expect(data.textContent).toContain('1.00 KiB')
     expect(data.textContent).toContain('notes: 3')
     const create = vi.fn(() => 'blob:data')
     const revoke = vi.fn()
@@ -1855,23 +2364,25 @@ describe('the management dialog', () => {
     harness.remote.dataExport.mockRejectedValueOnce(new Error('export down'))
     fireEvent.click(document.body.querySelector('[data-manage-data-export]')!)
     await waitFor(() => expect(document.body.querySelector('[data-manage-data-error]')?.textContent ?? '').toContain('export down'))
-    // Pruning old backups is a second-confirm action, never a silent delete.
+    expect(document.body.querySelector('[data-manage-data-error]')?.textContent).toContain('Data operation failed')
+    expect(document.body.querySelector('[data-manage-data-error] details summary')?.textContent).toBe('Diagnostics')
+    // Pruning old backups is a warning dialog, never a silent delete.
     fireEvent.click(document.body.querySelector('[data-manage-data-prune]')!)
-    expect(document.body.querySelector('[data-manage-data-prune-confirm]')).not.toBeNull()
-    fireEvent.click(document.body.querySelector('[data-manage-data-prune-cancel]')!)
-    expect(document.body.querySelector('[data-manage-data-prune-confirm]')).toBeNull()
-    fireEvent.click(document.body.querySelector('[data-manage-data-prune]')!)
-    fireEvent.click(document.body.querySelector('[data-manage-data-prune-yes]')!)
+    await waitFor(() => expect(document.body.querySelector('[data-data-confirm-dialog]')).not.toBeNull())
+    expect(document.body.querySelector('[role="dialog"]')?.textContent).toContain('Prune old backups?')
+    expect(document.activeElement).toBe(document.body.querySelector('[data-data-confirm-no]'))
+    fireEvent.click(document.body.querySelector('[data-data-confirm-no]')!)
+    expect(document.body.querySelector('[data-data-confirm-dialog]')).toBeNull()
+    expect(harness.remote.dataPruneBackups).not.toHaveBeenCalled()
+    await confirmDataAction(document.body.querySelector('[data-manage-data-prune]'))
     await waitFor(() => expect(harness.remote.dataPruneBackups).toHaveBeenCalledWith(5))
     await waitFor(() => expect(document.body.querySelector('[data-manage-data-pruned]')?.textContent ?? '').toContain('2'))
     // The post-prune re-read can fail without discarding the prune answer.
     harness.remote.dataInfo.mockRejectedValueOnce(new Error('reload down'))
-    fireEvent.click(document.body.querySelector('[data-manage-data-prune]')!)
-    fireEvent.click(document.body.querySelector('[data-manage-data-prune-yes]')!)
+    await confirmDataAction(document.body.querySelector('[data-manage-data-prune]'))
     await waitFor(() => expect(document.body.querySelector('[data-manage-data-error]')?.textContent ?? '').toContain('reload down'))
     harness.remote.dataPruneBackups.mockRejectedValueOnce(new Error('prune down'))
-    fireEvent.click(document.body.querySelector('[data-manage-data-prune]')!)
-    fireEvent.click(document.body.querySelector('[data-manage-data-prune-yes]')!)
+    await confirmDataAction(document.body.querySelector('[data-manage-data-prune]'))
     await waitFor(() => expect(document.body.querySelector('[data-manage-data-error]')?.textContent ?? '').toContain('prune down'))
     // Preview, then confirm a JSON import; the result names the backup.
     const file = { text: async () => '{"version":1,"apps":{"workbook":{}}}' } as File
@@ -1880,6 +2391,13 @@ describe('the management dialog', () => {
     fireEvent.change(fileInput)
     await waitFor(() => expect(document.body.querySelector('[data-manage-data-preview]')).not.toBeNull())
     fireEvent.click(document.body.querySelector('[data-manage-data-confirm]')!)
+    await waitFor(() => expect(document.body.querySelector('[data-data-confirm-dialog]')).not.toBeNull())
+    expect(document.body.querySelector('[role="dialog"]')?.textContent).toContain('Import data?')
+    await waitFor(() => expect(document.activeElement).toBe(document.body.querySelector('[data-data-confirm-no]')))
+    fireEvent.keyDown(document.body.querySelector('[data-data-confirm-no]')!, { key: 'Escape' })
+    await waitFor(() => expect(document.body.querySelector('[data-data-confirm-dialog]')).toBeNull())
+    expect(harness.remote.dataImport).not.toHaveBeenCalled()
+    await confirmDataAction(document.body.querySelector('[data-manage-data-confirm]'))
     await waitFor(() => expect(document.body.querySelector('[data-manage-data-result]')?.textContent).toContain('/tmp/app-data.before-import.sqlite'))
     expect(document.body.querySelector('[data-manage-data-result]')?.getAttribute('role')).toBe('status')
     // Cancelling a preview abandons the file and returns the import to idle.
@@ -1893,7 +2411,7 @@ describe('the management dialog', () => {
     // them the host has no baseline to compare and the merge could overwrite a
     // write the preview never showed (the import path used to drop both).
     expect(harness.remote.dataImport).toHaveBeenCalledWith(
-      'workbook', '{"version":1,"apps":{"workbook":{}}}', 'plan_import_1', expect.any(String),
+      'workbook', 'plan_import_1', expect.any(String),
     )
     // A committed import whose reload failed keeps the application held: the
     // result names the failure and offers the reload retry.
@@ -1905,7 +2423,7 @@ describe('the management dialog', () => {
     Object.defineProperty(fileInput, 'files', { configurable: true, value: [file] })
     fireEvent.change(fileInput)
     await waitFor(() => expect(document.body.querySelector('[data-manage-data-preview]')).not.toBeNull())
-    fireEvent.click(document.body.querySelector('[data-manage-data-confirm]')!)
+    await confirmDataAction(document.body.querySelector('[data-manage-data-confirm]'))
     await waitFor(() => expect(document.body.querySelector('[data-manage-data-reload-failed]')?.textContent ?? '').toContain('reload hook down'))
     fireEvent.click(document.body.querySelector('[data-manage-data-reload-retry]')!)
     await waitFor(() => expect(harness.remote.dataReload).toHaveBeenCalledWith('workbook'))
@@ -1920,7 +2438,7 @@ describe('the management dialog', () => {
     Object.defineProperty(fileInput, 'files', { configurable: true, value: [file] })
     fireEvent.change(fileInput)
     await waitFor(() => expect(document.body.querySelector('[data-manage-data-preview]')).not.toBeNull())
-    fireEvent.click(document.body.querySelector('[data-manage-data-confirm]')!)
+    await confirmDataAction(document.body.querySelector('[data-manage-data-confirm]'))
     await waitFor(() => expect(document.body.querySelector('[data-manage-data-reload-failed]')).not.toBeNull())
     fireEvent.click(document.body.querySelector('[data-manage-data-reload-retry]')!)
     await waitFor(() => expect(document.body.querySelector('[data-manage-data-error]')?.textContent ?? '').toContain('retry down'))
@@ -1929,7 +2447,7 @@ describe('the management dialog', () => {
     Object.defineProperty(fileInput, 'files', { configurable: true, value: [file] })
     fireEvent.change(fileInput)
     await waitFor(() => expect(document.body.querySelector('[data-manage-data-preview]')).not.toBeNull())
-    fireEvent.click(document.body.querySelector('[data-manage-data-confirm]')!)
+    await confirmDataAction(document.body.querySelector('[data-manage-data-confirm]'))
     await waitFor(() => expect(document.body.querySelector('[data-manage-data-error]')?.textContent ?? '').toContain('reload down'))
     expect(document.body.querySelector('[data-manage-data-error]')?.getAttribute('role')).toBe('alert')
     // An empty chooser is a no-op; a refused preview and a refused import surface their error.
@@ -1943,7 +2461,7 @@ describe('the management dialog', () => {
     fireEvent.change(fileInput)
     await waitFor(() => expect(document.body.querySelector('[data-manage-data-preview]')).not.toBeNull())
     harness.remote.dataImportPreview.mockClear()
-    fireEvent.click(document.body.querySelector('[data-manage-data-confirm]')!)
+    await confirmDataAction(document.body.querySelector('[data-manage-data-confirm]'))
     await waitFor(() => expect(document.body.querySelector('[data-manage-data-error]')?.textContent ?? '').toContain('import down'))
     // A refused commit has spent its one-shot plan: the dialog re-reads the
     // preview so the next confirm compares against the CURRENT data instead of
@@ -1954,24 +2472,26 @@ describe('the management dialog', () => {
     // instead of leaving a dead plan on screen.
     harness.remote.dataImport.mockRejectedValueOnce(new Error('import down twice'))
     harness.remote.dataImportPreview.mockRejectedValueOnce(new Error('refresh down'))
-    fireEvent.click(document.body.querySelector('[data-manage-data-confirm]')!)
+    await confirmDataAction(document.body.querySelector('[data-manage-data-confirm]'))
     await waitFor(() => expect(document.body.querySelector('[data-manage-data-error]')?.textContent ?? '').toContain('import down twice'))
     await waitFor(() => expect(document.body.querySelector('[data-manage-data-preview]')).toBeNull())
     // A failed info read and a failed export stay in the data section.
     harness.remote.dataInfo.mockRejectedValueOnce(new Error('data down'))
     fireEvent.click(document.body.querySelector('[data-manage-tab="permissions"]')!)
-    fireEvent.click(document.body.querySelector('[data-manage-tab="info"]')!)
+    fireEvent.click(document.body.querySelector('[data-manage-tab="data"]')!)
     await waitFor(() => expect(document.body.querySelector('[data-manage-data-error]')?.textContent ?? '').toContain('data down'))
     fireEvent.click(document.body.querySelector('[data-manage-tab="permissions"]')!)
-    fireEvent.click(document.body.querySelector('[data-manage-tab="info"]')!)
+    fireEvent.click(document.body.querySelector('[data-manage-tab="data"]')!)
     await waitFor(() => expect(document.body.querySelector('[data-manage-data]')).not.toBeNull())
     harness.remote.dataExport.mockRejectedValueOnce(new Error('export down'))
     fireEvent.click(document.body.querySelector('[data-manage-data-export]')!)
     await waitFor(() => expect(document.body.querySelector('[data-manage-data-error]')?.textContent ?? '').toContain('export down'))
+    expect(document.body.querySelector('[data-manage-data-error]')?.textContent).toContain('Data operation failed')
+    expect(document.body.querySelector('[data-manage-data-error] details summary')?.textContent).toBe('Diagnostics')
     await harness.runtime.dispose()
   })
 
-  it('shows recent pre-import backups and legacy migration markers', async () => {
+  it('shows recent pre-import backups', async () => {
     const harness = await mountPanel()
     register(harness, 'workbook', markerPage('workbook'))
     harness.remote.dataInfo.mockResolvedValue(ok({
@@ -1981,7 +2501,6 @@ describe('the management dialog', () => {
         { path: '/tmp/app-data.sqlite.before-import-old', byteSize: 1024, modifiedAt: Date.parse('2026-10-27T12:00:00Z') },
       ],
       backupCount: 3,
-      legacyImports: { 'legacy-workbook-imported': '2026-10-20T00:00:00.000Z', 'legacy-unknown': '2026-10-19T00:00:00.000Z' },
     }))
     const panel = renderPanel(harness)
     await settle()
@@ -1994,11 +2513,6 @@ describe('the management dialog', () => {
     expect(backups.textContent).toContain('/tmp/app-data.sqlite.before-import-new')
     expect(backups.textContent).toContain('Pre-import database snapshots')
     expect(document.body.querySelector('[data-manage-data-backup-more]')?.textContent).toContain('1')
-    const migrations = document.body.querySelector('[data-manage-data-migrations]')!
-    expect(migrations.textContent).toContain('workbook')
-    expect(migrations.textContent).toContain('2026-10-20T00:00:00.000Z')
-    expect(migrations.textContent).toContain('legacy-unknown')
-    expect(document.body.querySelector('[data-manage-data-rollback]')?.textContent).toContain('app-data.sqlite')
     await harness.runtime.dispose()
   })
 
@@ -2012,16 +2526,16 @@ describe('the management dialog', () => {
     await settle()
     expect(inDocument('[data-manage-tab="permissions"]').getAttribute('aria-selected')).toBe('true')
     // The tablist model: the arrows move the selection, wrapping at the ends.
-    fireEvent.click(inDocument('[data-manage-tab="history"]'))
-    expect(inDocument('[data-manage-tab="history"]').getAttribute('aria-selected')).toBe('true')
+    fireEvent.click(inDocument('[data-manage-tab="data"]'))
+    expect(inDocument('[data-manage-tab="data"]').getAttribute('aria-selected')).toBe('true')
     await settle()
     // The history tab read the calls targeting this application.
     expect(harness.remote.history).toHaveBeenCalledWith(50, 'workbook')
-    fireEvent.keyDown(inDocument('[data-manage-tab="history"]'), { key: 'ArrowLeft' })
-    expect(inDocument('[data-manage-tab="tasks"]').getAttribute('aria-selected')).toBe('true')
+    fireEvent.keyDown(inDocument('[data-manage-tab="data"]'), { key: 'ArrowLeft' })
+    expect(inDocument('[data-manage-tab="permissions"]').getAttribute('aria-selected')).toBe('true')
     // Any other key is the tablist's own business, not this handler's.
-    fireEvent.keyDown(inDocument('[data-manage-tab="tasks"]'), { key: 'Enter' })
-    expect(inDocument('[data-manage-tab="tasks"]').getAttribute('aria-selected')).toBe('true')
+    fireEvent.keyDown(inDocument('[data-manage-tab="permissions"]'), { key: 'Enter' })
+    expect(inDocument('[data-manage-tab="permissions"]').getAttribute('aria-selected')).toBe('true')
     await harness.runtime.dispose()
   })
 
@@ -2039,19 +2553,18 @@ describe('the management dialog', () => {
     // moved the selection would strand the keyboard user on a tab it no longer
     // owns (the shared TabBar's rule).
     fireEvent.keyDown(tab('permissions'), { key: 'ArrowRight' })
-    expect(tab('info').getAttribute('aria-selected')).toBe('true')
-    expect(document.activeElement).toBe(tab('info'))
-    fireEvent.keyDown(tab('info'), { key: 'End' })
-    expect(tab('developer').getAttribute('aria-selected')).toBe('true')
-    expect(document.activeElement).toBe(tab('developer'))
-    fireEvent.keyDown(tab('developer'), { key: 'Home' })
-    expect(tab('permissions').getAttribute('aria-selected')).toBe('true')
-    expect(document.activeElement).toBe(tab('permissions'))
+    expect(tab('data').getAttribute('aria-selected')).toBe('true')
+    expect(document.activeElement).toBe(tab('data'))
+    fireEvent.keyDown(tab('data'), { key: 'End' })
+    expect(tab('data').getAttribute('aria-selected')).toBe('true')
+    fireEvent.keyDown(tab('data'), { key: 'Home' })
+    expect(tab('status').getAttribute('aria-selected')).toBe('true')
+    expect(document.activeElement).toBe(tab('status'))
     // The pane is the tablist's labelled panel, and the tab points at it.
     const body = inDocument('[data-manage-body]')
     expect(body.getAttribute('role')).toBe('tabpanel')
-    expect(body.getAttribute('aria-labelledby')).toBe(tab('permissions').id)
-    expect(tab('permissions').getAttribute('aria-controls')).toBe(body.id)
+    expect(body.getAttribute('aria-labelledby')).toBe(tab('status').id)
+    expect(tab('status').getAttribute('aria-controls')).toBe(body.id)
     await harness.runtime.dispose()
   })
 
@@ -2069,8 +2582,6 @@ describe('the management dialog', () => {
     const row = navRow(panel, 'workbook')
     expect(row.textContent).toContain('Notebook')
     expect(within(row).getByTestId('workbook-icon')).toBeDefined()
-    // The same glyph in the header's quick switcher…
-    expect(within(inDocument('[data-app-switcher]')).getByTestId('workbook-icon')).toBeDefined()
     // …and in the management list, which also says what the application is.
     openManageList(panel)
     const manageRow = inDocument('[data-manage-row="workbook"]')
@@ -2080,15 +2591,18 @@ describe('the management dialog', () => {
     // A language switch renames it in place: the getter runs per render, so
     // the name was never fixed to the language the registration happened in.
     act(() => { harness.runtime.ctx.locale.setLocale('zh') })
-    expect(navRow(panel, 'workbook').textContent).toContain('工作簿')
+    // The tab strip is hidden while the management page shows, so read the
+    // page's own row here; the tab is checked after going back to the page.
     expect(inDocument('[data-manage-row="workbook"]').textContent).toContain('工作簿')
     // An application with no declared icon gets the framework's neutral glyph.
     expect(inDocument('[data-manage-row="disk-analysis"]').querySelector('[data-app-icon]')).not.toBeNull()
+    fireEvent.click(inDocument('[data-manage-return]'))
+    expect(navRow(panel, 'workbook').textContent).toContain('工作簿')
     await harness.runtime.dispose()
   })
 
   it('opens the debug surface of an application that draws no page', async () => {
-    localStorage.setItem('dsh.applications.preferences.v1', JSON.stringify({ navExpanded: true, lastAppId: 'info-hub' }))
+    localStorage.setItem('dsh.applications.preferences.v1', JSON.stringify({ lastAppId: 'info-hub' }))
     const harness = await mountPanel()
     renderPanel(harness)
     await settle()
@@ -2098,7 +2612,9 @@ describe('the management dialog', () => {
     expect(within(state).getByRole('button', { name: 'Manage applications' })).toBeDefined()
     fireEvent.click(within(state).getByRole('button', { name: 'Debug call' }))
     expect(document.body.querySelector('[data-manage-info]')).not.toBeNull()
-    expect(document.body.querySelector('[data-manage-row]')).toBeNull()
+    // The list is the page's persistent navigation, so it stays beside the
+    // detail; the detail is the application without a page.
+    expect(inDocument('[data-manage-detail]').getAttribute('data-app-id')).toBe('info-hub')
     expect(inDocument('[data-manage-debug-toggle]')).toBeDefined()
     await harness.runtime.dispose()
   })
@@ -2123,9 +2639,8 @@ describe('the management dialog', () => {
     // A record targeting another application is not this application's history.
     expect(inDialog().queryByText('scan')).toBeNull()
     // The next application's history names IT on the wire, and shows its own.
-    fireEvent.click(inDocument('[data-manage-back]'))
     fireEvent.click(inDocument('[data-manage-row="disk-analysis"]'))
-    fireEvent.click(inDocument('[data-manage-tab="history"]'))
+    fireEvent.click(inDocument('[data-manage-tab="data"]'))
     await settle()
     expect(harness.remote.history).toHaveBeenLastCalledWith(50, 'disk-analysis')
     expect(inDialog().getByText('scan')).toBeDefined()
@@ -2159,13 +2674,14 @@ describe('the management dialog', () => {
     await settle()
     // A parked caller is visible the moment the area is, without a tab of its
     // own on the business page.
-    expect(inDocument('[data-app-nav-root] [data-app-pending-count]').textContent).toBe('1')
-    expect(inDocument('[data-app-header] [data-app-pending-count]')).not.toBeNull()
+    expect(inDocument('[data-app-header] [data-app-pending-count]').textContent).toBe('1')
     openManageList(panel)
     // `start` read the pending list once; opening the surface reads it again
     // (the human is looking at it now).
     await settle()
     expect(harness.remote.pendingConfirmations).toHaveBeenCalledTimes(2)
+    fireEvent.click(inDocument('[data-manage-queue="confirmations"]'))
+    await settle()
     expect(document.body.querySelector('[data-manage-confirmations]')).not.toBeNull()
     expect(inDialog().getByText('the agent wants to delete a task')).toBeDefined()
     expect(inDocument('[data-confirm-waiting]').textContent).toContain('Waiting')
@@ -2211,7 +2727,7 @@ describe('the management dialog', () => {
     await settle()
     openManageList(panel)
     fireEvent.click(inDocument('[data-manage-row="workbook"]'))
-    fireEvent.click(inDocument('[data-manage-tab="info"]'))
+    fireEvent.click(inDocument('[data-manage-tab="status"]'))
     fireEvent.click(inDocument('[data-manage-debug-toggle]'))
     const form = inDialog()
     fireEvent.change(form.getByLabelText('Operation'), { target: { value: 'shape' } })
@@ -2262,17 +2778,13 @@ describe('the management dialog', () => {
     await harness.runtime.dispose()
   })
 
-  it('approves and revokes declared needs, and revokes who reaches the application', async () => {
+  it('approves and revokes declared needs', async () => {
     const harness = await mountPanel((remote) => {
       remote.list.mockResolvedValue(ok<readonly AppInfo[]>([
-        { ...app('workbook'), needs: ['capability:model', 'workbook#write'] },
+        { ...app('workbook'), needs: ['capability:model'] },
       ]))
       remote.grants.mockResolvedValue(ok<readonly CapabilityGrant[]>([
-        // The application's own approval of one declared need…
         grant({ kind: 'app', appId: 'workbook' }, ['capability:model']),
-        // …and another caller's access INTO it (with an unrelated capability
-        // that is not this application's business).
-        grant({ kind: 'ai', sessionId: 'session-1' }, ['workbook#write', 'disk-analysis#scan']),
       ]))
     })
     register(harness, 'workbook', markerPage('workbook'))
@@ -2281,21 +2793,14 @@ describe('the management dialog', () => {
     openManageList(panel)
     fireEvent.click(inDocument('[data-manage-row="workbook"]'))
     await settle()
-    // Each need is its own switch, showing the effective state the grants say.
+    fireEvent.click(inDocument('[data-manage-tab="permissions"]'))
+    await settle()
     const needSwitch = (need: string): HTMLElement =>
       inDocument(`[data-app-need="${need}"] [role="switch"]`)
     expect(needSwitch('capability:model').getAttribute('aria-checked')).toBe('true')
     fireEvent.click(needSwitch('capability:model'))
     await settle()
     expect(harness.remote.revoke).toHaveBeenCalledWith({ kind: 'app', appId: 'workbook' }, 'capability:model')
-    // Who may reach this application: only the capabilities naming it, and only
-    // the caller that holds them.
-    expect(inDialog().getByText('ai · session-1')).toBeDefined()
-    expect(document.body.querySelectorAll('[data-grant-revoke]')).toHaveLength(1)
-    expect(document.body.querySelector('[data-grant-revoke="disk-analysis#scan"]')).toBeNull()
-    fireEvent.click(inDocument('[data-grant-revoke="workbook#write"]'))
-    await settle()
-    expect(harness.remote.revoke).toHaveBeenLastCalledWith({ kind: 'ai', sessionId: 'session-1' }, 'workbook#write')
     await harness.runtime.dispose()
   })
 
@@ -2313,7 +2818,7 @@ describe('the management dialog', () => {
     await settle()
     expect(harness.remote.shareDraft).not.toHaveBeenCalled()
     expect(harness.remote.revokeDraftShare).not.toHaveBeenCalled()
-    fireEvent.click(inDocument('[data-app-chat]'))
+    fireEvent.click(inDocument('[data-sidebar-right-expand]'))
     await settle()
     fireEvent.change(inDocument('[data-app-conversation-setup-path]'), { target: { value: '/tmp/ws' } })
     fireEvent.click(inDocument('[data-app-conversation-setup] button[type="submit"]'))
@@ -2380,7 +2885,7 @@ describe('the management dialog', () => {
     register(harness, 'workbook', actionPage(received))
     renderPanel(harness)
     await settle()
-    fireEvent.click(inDocument('[data-app-chat]'))
+    fireEvent.click(inDocument('[data-sidebar-right-expand]'))
     await settle()
     fireEvent.change(inDocument('[data-app-conversation-setup-path]'), { target: { value: '/tmp/ws' } })
     fireEvent.click(inDocument('[data-app-conversation-setup] button[type="submit"]'))
@@ -2423,18 +2928,16 @@ describe('the management dialog', () => {
     await harness.runtime.dispose()
   })
 
-  it('shows declared process commands in the info tab', async () => {
+  it('shows declared connections, capabilities and object types in the info tab', async () => {
     const harness = await mountPanel((remote) => {
       remote.list.mockResolvedValue(ok<readonly AppInfo[]>([{
         ...app('workbook'),
-        process: [{ name: 'status', description: 'show status', argv: ['git', 'status'] }],
         needs: ['capability:network', 'capability:process'],
         connections: [
           { kind: 'call', target: 'notes', ops: ['list'], available: true },
           { kind: 'subscription', publisher: 'notes', event: 'changed', open: true, available: true },
         ],
         objectTypes: [{ type: 'task', description: 'a task', resolveOperation: 'resolve' }],
-        pages: [{ view: 'list', description: 'task list', actions: ['navigate'] }],
         model: { provider: 'provider', model: 'model-name' },
         events: [{ type: 'changed', description: 'a change', subscription: 'open' }],
       }]))
@@ -2445,17 +2948,17 @@ describe('the management dialog', () => {
     openManageList(panel)
     fireEvent.click(inDocument('[data-manage-row="workbook"]'))
     await settle()
-    fireEvent.click(inDocument('[data-manage-tab="info"]'))
+    fireEvent.click(inDocument('[data-manage-tab="status"]'))
     await settle()
     expect(inDocument('[data-connection="notes"]').textContent).toContain('list')
     expect(inDocument('[data-connection="notes#changed"]').textContent).toContain('open')
     expect(inDocument('[data-capability="capability:network"]').textContent).toContain('network')
-    expect(inDocument('[data-process-summary="status"]').textContent).toContain('show status')
-    expect(inDocument('[data-process-command="status"]').textContent).toContain('show status')
-    expect(inDocument('[data-process-command="status"]').textContent).toContain('git status')
     expect(inDocument('[data-object-type="task"]').textContent).toContain('resolve')
-    expect(inDocument('[data-app-page="list"]').textContent).toContain('navigate')
+    fireEvent.click(inDocument('[data-manage-tab="permissions"]'))
+    await settle()
     expect(inDocument('[data-model-usage]').textContent).toContain('2')
+    expect(inDocument('[data-model-usage]').getAttribute('data-model-tokens')).toBe('30')
+    expect(document.body.querySelector('[data-model-last]')).toBeNull()
     expect((inDocument('[data-limits-background]') as HTMLInputElement).checked).toBe(true)
     expect((inDocument('[data-model-provider]') as HTMLInputElement).value).toBe('provider')
     fireEvent.change(inDocument('[data-model-provider]'), { target: { value: 'next-provider' } })
@@ -2484,31 +2987,27 @@ describe('the management dialog', () => {
     fireEvent.click(inDocument('[data-limits-save]'))
     await settle()
     expect(inDocument('[data-model-limits] [role="alert"]')).not.toBeNull()
+    await harness.runtime.dispose()
+  })
+
+  it('shows unknown token usage instead of zero and names the last model and status', async () => {
+    const harness = await mountPanel((remote) => {
+      remote.modelUsage.mockResolvedValueOnce(ok({
+        calls: 1, succeeded: 1, failed: 0, cancelled: 0, usageMissing: 1, totalDurationMs: 7,
+        lastModel: { provider: 'provider', model: 'model-name' }, lastStatus: 'success',
+      }))
+    })
+    register(harness, 'workbook', markerPage('workbook'))
+    const panel = renderPanel(harness)
     await settle()
-    expect(inDocument('[data-credential="token"]').textContent).toContain('Set')
-    fireEvent.change(inDocument('[data-credential-input="token"]'), { target: { value: 'secret' } })
-    fireEvent.click(inDocument('[data-credential-save="token"]'))
+    openManageList(panel)
+    fireEvent.click(inDocument('[data-manage-row="workbook"]'))
     await settle()
-    expect(harness.remote.setCredential).toHaveBeenCalledWith('workbook', 'token', 'secret')
-    fireEvent.click(inDocument('[data-credential-delete="token"]'))
+    fireEvent.click(inDocument('[data-manage-tab="permissions"]'))
     await settle()
-    expect(harness.remote.deleteCredential).toHaveBeenCalledWith('workbook', 'token')
-    harness.remote.setCredential.mockClear()
-    fireEvent.click(inDocument('[data-credential-save="token"]'))
-    await settle()
-    expect(harness.remote.setCredential).not.toHaveBeenCalled()
-    harness.remote.setCredential.mockResolvedValueOnce(ok(false))
-    fireEvent.change(inDocument('[data-credential-input="token"]'), { target: { value: 'again' } })
-    fireEvent.click(inDocument('[data-credential-save="token"]'))
-    await settle()
-    expect(inDocument('[data-credentials] [role="alert"]')).not.toBeNull()
-    fireEvent.change(inDocument('[data-credential-input="token"]'), { target: { value: 'again' } })
-    fireEvent.click(inDocument('[data-credential-save="token"]'))
-    await settle()
-    harness.remote.deleteCredential.mockResolvedValueOnce(ok(false))
-    fireEvent.click(inDocument('[data-credential-delete="token"]'))
-    await settle()
-    expect(inDocument('[data-credentials] [role="alert"]')).not.toBeNull()
+    expect(inDocument('[data-model-usage]').getAttribute('data-model-tokens')).toBe('unknown')
+    expect(inDocument('[data-model-last]').getAttribute('data-model-last-model')).toBe('provider/model-name')
+    expect(inDocument('[data-model-last]').getAttribute('data-model-last-status')).toBe('success')
     await harness.runtime.dispose()
   })
 
@@ -2531,15 +3030,14 @@ describe('the management dialog', () => {
     openManageList(panel)
     fireEvent.click(inDocument('[data-manage-row="workbook"]'))
     await settle()
+    fireEvent.click(inDocument('[data-manage-tab="permissions"]'))
+    await settle()
 
     // The first policy read failed, so the table offers the same loadPolicies
     // prop the shell start uses; retrying it succeeds and renders the selectors.
     const retry = inDocument('[data-policies-retry]')
     fireEvent.click(retry)
     await settle()
-    expect(document.body.querySelectorAll('[data-app-event]')).toHaveLength(2)
-    expect(inDocument('[data-app-event="changed"]').textContent).toContain('Subscribable')
-    expect(inDocument('[data-app-event="private"]').textContent).toContain('Not subscribable')
     const select = inDocument('[data-app-policy="write"] select') as HTMLSelectElement
     expect(select.value).toBe('default')
     fireEvent.change(select, { target: { value: 'allow' } })
@@ -2563,7 +3061,7 @@ describe('the management dialog', () => {
     await settle()
     openManageList(panel)
     fireEvent.click(inDocument('[data-manage-row="workbook"]'))
-    fireEvent.click(inDocument('[data-manage-tab="info"]'))
+    fireEvent.click(inDocument('[data-manage-tab="status"]'))
     fireEvent.click(inDocument('[data-manage-debug-toggle]'))
     const form = inDialog()
     fireEvent.change(form.getByLabelText('Operation'), { target: { value: 'write' } })
@@ -2631,7 +3129,7 @@ describe('the management dialog', () => {
     await settle()
     openManageList(panel)
     fireEvent.click(inDocument('[data-manage-row="info-hub"]'))
-    fireEvent.click(inDocument('[data-manage-tab="info"]'))
+    fireEvent.click(inDocument('[data-manage-tab="status"]'))
     fireEvent.click(inDocument('[data-manage-debug-toggle]'))
     const form = inDialog()
     expect(form.getByLabelText('Operation')).toBeDefined()
@@ -2658,12 +3156,32 @@ describe('live state', () => {
     const state = inDocument('[data-app-state="failed"]')
     expect(state.textContent).toContain('failed')
     expect(state.textContent).toContain('workbook failed to start')
-    expect(navRow(panel, 'workbook').textContent).toContain('failed')
+    expect(navRow(panel, 'workbook').getAttribute('aria-label')).toContain('failed')
     // The state's retry is the shell's ordinary re-read.
     const reads = harness.remote.list.mock.calls.length
     fireEvent.click(within(state).getByRole('button', { name: en['state.retry'] }))
     await settle()
     expect(harness.remote.list.mock.calls.length).toBeGreaterThan(reads)
+    await harness.runtime.dispose()
+  })
+
+  it('shows a degraded application’s readable detail beside its page', async () => {
+    const harness = await mountPanel((remote) => {
+      remote.list.mockResolvedValue(ok<readonly AppInfo[]>([{
+        ...app('workbook'),
+        health: 'degraded',
+        detail: 'the model is not configured',
+      }]))
+    })
+    register(harness, 'workbook', markerPage('workbook'))
+    renderPanel(harness)
+    await settle()
+    // The health line moves into the header status control; the page itself
+    // keeps its content and does not spend a row on shell-level status.
+    const notice = inDocument('[data-app-health-degraded]')
+    expect(notice.textContent).toContain(en['status.degraded'])
+    expect(notice.textContent).toContain('the model is not configured')
+    expect(document.body.querySelector('[data-app-state="degraded"]')).toBeNull()
     await harness.runtime.dispose()
   })
 
@@ -2706,15 +3224,19 @@ describe('live state', () => {
     // here parses it, and no capability is guessed into a selector.
     expect(notice.textContent).not.toContain('storage capability')
 
-    // The retry re-mounts the page: its own read runs again.
+    // The retry re-mounts the page: its own read runs again. The actions live
+    // in the header status panel; opening it is how a reader reaches them.
+    fireEvent.click(inDocument('[data-app-status]'))
+    expect(inDocument('[data-shell-notices]').getAttribute('data-open')).toBe('true')
     fireEvent.click(panel.container.querySelector('[data-app-refusal-retry]')!)
     await settle()
     expect(mounts).toBe(2)
 
     // The way out is THIS application's permission page, in the one dialog.
+    fireEvent.click(inDocument('[data-app-status]'))
     fireEvent.click(panel.container.querySelector('[data-app-refusal-manage]')!)
     await settle()
-    const dialog = document.body.querySelector('[data-manage-dialog]')!
+    const dialog = document.body.querySelector('[data-manage-page]')!
     expect(dialog.querySelector('[data-manage-tab="permissions"]')?.getAttribute('aria-selected')).toBe('true')
     // The detail is the application the refusal belongs to (its row's own
     // name — this case registers no display name).
@@ -2751,7 +3273,7 @@ describe('live state', () => {
     // Adjustment opens the application's permission page ON TOP of the prompt.
     fireEvent.click(document.body.querySelector('[data-onboarding-action="adjust"]')!)
     await settle()
-    const dialog = document.body.querySelector('[data-manage-dialog]')!
+    const dialog = document.body.querySelector('[data-manage-page]')!
     expect(dialog.querySelector('[data-manage-tab="permissions"]')?.getAttribute('aria-selected')).toBe('true')
     fireEvent.keyDown(document, { key: 'Escape' })
     await settle()
@@ -2932,12 +3454,12 @@ describe('live state', () => {
       .toContain('The last action failed: gateway/internal: the carrier is gone')
     // The first read failed: the rows are still unknown, and nothing pretends
     // they were empty.
-    expect(inDocument('[data-app-nav-empty]').textContent).toBe('Reading…')
+    expect(inDocument('[data-app-tabs-empty]').textContent).toBe('Reading…')
     // The reconnect re-reads the rows, and they come back — a read that worked
     // says nothing about the action that did not, so the failure stays visible.
     await act(async () => { harness.runtime.ctx.emit('connection/reset') })
     await settle()
-    expect(nav(panel).querySelector('[data-app-nav="workbook"]')).not.toBeNull()
+    expect(nav(panel).querySelector('[data-app-tab="workbook"]')).not.toBeNull()
     expect(inDocument('[data-app-error]').textContent).toContain('gateway/internal: the carrier is gone')
     await harness.runtime.dispose()
   })
@@ -2950,120 +3472,6 @@ describe('live state', () => {
     expect(panel.view.getByTestId('workbook-page')).toBeDefined()
     await harness.runtime.dispose()
     expect(harness.runtime.ctx.get('applicationViews')).toBeUndefined()
-  })
-})
-
-describe('progress take-over', () => {
-  it('draws the claimed call’s row nowhere while the page shows its own feedback', async () => {
-    const harness = await mountPanel()
-    register(harness, 'workbook', claimingPage('call-1'))
-    const panel = renderPanel(harness)
-    await settle()
-    const stream = harness.stream()
-    stream.push({ kind: 'progress', notice: { appId: 'workbook', op: 'refresh', callId: 'call-1', message: 'refreshing sources' } })
-    stream.push({ kind: 'progress', notice: { appId: 'workbook', op: 'write', callId: 'call-2', message: 'writing the note' } })
-    await settle()
-    // Nothing is taken over yet: both calls say what they are doing.
-    expect(inDocument('[data-app-progress]').textContent).toContain('refreshing sources')
-    fireEvent.click(panel.view.getByRole('button', { name: 'take over' }))
-    const taken = inDocument('[data-app-progress]')
-    expect(taken.textContent).not.toContain('refreshing sources')
-    // The take-over is the CALL’s, not the page’s: the other call still says
-    // what it is doing.
-    expect(taken.textContent).toContain('writing the note')
-    // Handing it back puts the ordinary row where it was.
-    fireEvent.click(panel.view.getByRole('button', { name: 'hand back' }))
-    expect(inDocument('[data-app-progress]').textContent).toContain('refreshing sources')
-    await harness.runtime.dispose()
-  })
-
-  it('gives the ordinary row back when the page that took it over goes away', async () => {
-    const harness = await mountPanel()
-    register(harness, 'workbook', claimingPage('call-1'))
-    register(harness, 'disk-analysis', markerPage('disk'))
-    const panel = renderPanel(harness)
-    await settle()
-    harness.stream().push({
-      kind: 'progress',
-      notice: { appId: 'workbook', op: 'refresh', callId: 'call-1', message: 'refreshing sources' },
-    })
-    await settle()
-    fireEvent.click(panel.view.getByRole('button', { name: 'take over' }))
-    expect(document.body.querySelector('[data-app-progress]')).toBeNull()
-    // The page is gone (the human moved to another application) and nobody
-    // released anything: the take-over goes with the page it belonged to, so a
-    // call still running is not hidden — its ordinary row is there again, and
-    // so is what the framework offers with it.
-    fireEvent.click(navRow(panel, 'disk-analysis'))
-    fireEvent.click(navRow(panel, 'workbook'))
-    await settle()
-    expect(inDocument('[data-app-progress]').textContent).toContain('refreshing sources')
-    await harness.runtime.dispose()
-  })
-
-  it('shows every ordinary row when no page takes anything over', async () => {
-    const harness = await mountPanel()
-    register(harness, 'workbook', markerPage('workbook'))
-    register(harness, 'disk-analysis', markerPage('disk'))
-    const panel = renderPanel(harness)
-    await settle()
-    const stream = harness.stream()
-    // Two applications may use the same call id; neither claimed anything.
-    stream.push({ kind: 'progress', notice: { appId: 'workbook', op: 'refresh', callId: 'call-1', message: 'refreshing sources' } })
-    stream.push({ kind: 'progress', notice: { appId: 'disk-analysis', op: 'scan', callId: 'call-1', message: 'scanning the disk' } })
-    await settle()
-    expect(inDocument('[data-app-progress]').textContent).toContain('refreshing sources')
-    fireEvent.click(navRow(panel, 'disk-analysis'))
-    expect(inDocument('[data-app-progress]').textContent).toContain('scanning the disk')
-    await harness.runtime.dispose()
-  })
-
-  it('never filters the connection or error notices', async () => {
-    const harness = await mountPanel()
-    register(harness, 'workbook', claimingPage('call-1'))
-    const panel = renderPanel(harness)
-    await settle()
-    harness.stream().push({
-      kind: 'progress',
-      notice: { appId: 'workbook', op: 'refresh', callId: 'call-1', message: 'refreshing sources' },
-    })
-    await settle()
-    fireEvent.click(panel.view.getByRole('button', { name: 'take over' }))
-    expect(document.body.querySelector('[data-app-progress]')).toBeNull()
-    // The carrier drops and a read fails: what the human must see is never the
-    // take-over’s to hide.
-    harness.stream().end()
-    await settle()
-    const banner = inDocument('[data-app-connection]')
-    harness.remote.list.mockResolvedValue(carrierFailure<readonly AppInfo[]>())
-    fireEvent.click(within(banner).getByRole('button', { name: 'Read again' }))
-    await settle()
-    expect(inDocument('[data-app-error]').textContent).toContain('gateway/internal: the carrier is gone')
-    expect(inDocument('[data-app-connection]')).toBeDefined()
-    expect(document.body.querySelector('[data-app-progress]')).toBeNull()
-    await harness.runtime.dispose()
-  })
-
-  it('never filters a permission refusal', async () => {
-    const harness = await mountPanel((remote) => {
-      remote.call.mockResolvedValue(ok<CallOutcome>({
-        callId: 'runtime-1', status: 'failed', error: { code: 'capability-not-approved', message: 'the user has not approved the storage capability for this application' },
-      }))
-    })
-    register(harness, 'workbook', claimingReaderPage('call-1'))
-    renderPanel(harness)
-    await settle()
-    harness.stream().push({
-      kind: 'progress',
-      notice: { appId: 'workbook', op: 'read', callId: 'call-1', message: 'reading' },
-    })
-    await settle()
-    // The take-over hides the ordinary progress row…
-    expect(document.body.querySelector('[data-app-progress]')).toBeNull()
-    // …and nothing else: the refusal the runtime answered stays the human’s to
-    // see, with its own way out.
-    await waitFor(() => expect(inDocument('[data-app-refusal]').textContent).toContain('permission'))
-    await harness.runtime.dispose()
   })
 })
 
@@ -3165,14 +3573,14 @@ describe('the management dialog declared data', () => {
     const harness = await mountPanel((remote) => {
       remote.list.mockResolvedValue(ok([{
         ...app('disk-space'),
-        data: { kind: 'own-sqlite', path: 'disk-space/index.db', schemaVersion: 1, backup: 'exclude' },
+        data: { kind: 'own-sqlite', path: 'disk-space/index.db', schemaVersion: 1 },
       }]))
     })
     const panel = renderPanel(harness)
     await settle()
     openManageList(panel)
     fireEvent.click(inDocument('[data-manage-row="disk-space"]'))
-    fireEvent.click(inDocument('[data-manage-tab="info"]'))
+    fireEvent.click(inDocument('[data-manage-tab="data"]'))
     await waitFor(() => expect(inDocument('[data-manage-data]')).toBeDefined())
     expect(inDocument('[data-manage-data-declared]').textContent).toContain('own-sqlite')
     expect(inDocument('[data-manage-data-declared]').textContent).toContain('disk-space/index.db')
@@ -3188,10 +3596,551 @@ describe('the management dialog declared data', () => {
     openManageList(panel)
     fireEvent.click(inDocument('[data-manage-row="workbook"]'))
     await settle()
-    fireEvent.click(inDocument('[data-manage-tab="info"]'))
+    fireEvent.click(inDocument('[data-manage-tab="status"]'))
     fireEvent.click(inDocument('[data-manage-activation] button'))
     await settle()
     expect(inDocument('[data-manage-activation-error]').textContent).toContain('not saved')
+    await harness.runtime.dispose()
+  })
+})
+
+it('switches application-area sessions and offers a pending delegation for the human to send', async () => {
+  const harness = await mountPanel()
+  const first = await harness.runtime.sessions.add({ id: 'area-1' })
+  const second = await harness.runtime.sessions.add({ id: 'area-2' })
+  let created = 0
+  harness.runtime.sessions.stubCreate(async () => (created++ === 0 ? first : second))
+  harness.runtime.workspaces.stub('create', async ({ path }) => ({ workspaceId: 'w-area', path }) as never)
+  register(harness, 'workbook', {
+    Component: (props) => (
+      <div>
+        <button type="button" data-delegate-request onClick={() => { void props.delegation?.requestSend('delegation-1') }}>delegate</button>
+        <button type="button" data-area-page onClick={() => { props.pageContext.report({ label: 'Area page' }) }}>page</button>
+      </div>
+    ),
+  })
+  renderPanel(harness)
+  await settle()
+  fireEvent.click(inDocument('[data-sidebar-right-expand]'))
+  await settle()
+  fireEvent.click(inDocument('[data-app-conversation-setup] button[type="submit"]'))
+  await settle()
+  expect(inDocument('[data-app-dock-tab]')).toBeTruthy()
+  fireEvent.click(inDocument('[data-app-dock-new]'))
+  await settle()
+  const menu = inDocument('[role="menu"]')
+  fireEvent.click(within(menu).getByRole('menuitem', { name: 'New application-area conversation' }))
+  await settle()
+  expect(document.querySelectorAll('[data-app-dock-tab]').length).toBe(2)
+  fireEvent.click(inDocument(`${'[data-app-dock-tab="'}${first}"]`))
+  await settle()
+  fireEvent.click(inDocument('[data-delegate-request]'))
+  await settle()
+  expect(harness.remote.delegation).toHaveBeenCalledWith('delegation-1', 'workbook')
+  const dialog = inDocument('[data-delegate-dialog]')
+  expect(dialog).toBeTruthy()
+  // The application instructions are shown read-only; the supplement is the human's own.
+  expect(dialog.querySelector('[data-delegate-instructions]')?.textContent).toContain('Review the prepared draft')
+  fireEvent.change(inDocument('[data-delegate-target]'), { target: { value: first } })
+  fireEvent.change(inDocument('[data-delegate-supplement]'), { target: { value: '补充上下文' } })
+  fireEvent.click(inDocument('[data-delegate-send]'))
+  await settle()
+  expect(harness.remote.sendDelegation).toHaveBeenCalledWith('delegation-1', first, '补充上下文', 'workbook')
+  expect(document.body.querySelector('[data-delegate-dialog]')).toBeNull()
+  await harness.runtime.dispose()
+})
+
+it('tells the human to set up an application-area session when a delegation has no target', async () => {
+  const harness = await mountPanel()
+  register(harness, 'workbook', {
+    Component: (props) => (
+      <button type="button" data-delegate-request onClick={() => { void props.delegation?.requestSend('delegation-1') }}>delegate</button>
+    ),
+  })
+  renderPanel(harness)
+  await settle()
+  fireEvent.click(inDocument('[data-delegate-request]'))
+  await settle()
+  expect(inDocument('[data-delegate-dialog]')).toBeTruthy()
+  expect(inDocument('[data-delegate-no-target]').textContent).toContain('application-area session')
+  expect((inDocument('[data-delegate-send]') as HTMLButtonElement).disabled).toBe(true)
+  await harness.runtime.dispose()
+})
+
+it('refuses a delegation record owned by another application', async () => {
+  const harness = await mountPanel()
+  harness.remote.delegation.mockResolvedValueOnce(ok(delegationRecord({ id: 'foreign', appId: 'other' })))
+  register(harness, 'workbook', {
+    Component: (props) => (
+      <button
+        type="button"
+        data-foreign-delegation
+        onClick={() => { void props.delegation?.requestSend('foreign').catch(() => {}) }}
+      >foreign</button>
+    ),
+  })
+  renderPanel(harness)
+  await settle()
+  fireEvent.click(inDocument('[data-foreign-delegation]'))
+  await settle()
+  expect(harness.remote.delegation).toHaveBeenCalledWith('foreign', 'workbook')
+  expect(document.body.querySelector('[data-delegate-dialog]')).toBeNull()
+  await harness.runtime.dispose()
+})
+
+describe('the management process commands', () => {
+  it('shows the declared executables and commands in the permissions area', async () => {
+    const harness = await mountPanel((remote) => {
+      remote.list.mockResolvedValueOnce(ok([{
+        ...app('workbook'),
+        needs: ['capability:process'],
+        process: [{ executable: 'git', commands: ['status', 'diff'], purpose: 'read a repository' }],
+      }]))
+    })
+    register(harness, 'workbook', markerPage('workbook'))
+    const panel = renderPanel(harness)
+    await settle()
+    openManageList(panel)
+    fireEvent.click(inDocument('[data-manage-row="workbook"]'))
+    fireEvent.click(inDocument('[data-manage-tab="permissions"]'))
+    await settle()
+    expect(inDocument('[data-app-process-entry="git"]')).toBeTruthy()
+    expect(inDocument('[data-app-process-entry="git"]').textContent).toContain('status, diff')
+    expect(inDocument('[data-app-process-entry="git"]').textContent).toContain('read a repository')
+    await harness.runtime.dispose()
+  })
+})
+
+describe('the management delegation records', () => {
+  /** The delegation states the host can persist; each maps to one list label. */
+  function delegationRows(): readonly DelegationInfo[] {
+    return [
+      delegationRecord({ id: 'd-pending', status: 'pending' }),
+      delegationRecord({
+        id: 'd-active', status: 'active', sessionId: 'area-1',
+        latestReport: { outcome: 'blocked', summary: '等待答复', question: '选哪个？' },
+      }),
+      delegationRecord({
+        id: 'd-needs', status: 'needs-person', sessionId: 'area-2',
+        latestReport: { outcome: 'blocked', summary: '需要人', question: '怎么继续？' },
+      }),
+      delegationRecord({ id: 'd-done', status: 'ended', outcome: 'completed', latestReport: { outcome: 'completed', summary: '已完成' } }),
+      delegationRecord({ id: 'd-failed', status: 'ended', outcome: 'failed' }),
+      delegationRecord({ id: 'd-cancelled', status: 'ended', outcome: 'cancelled' }),
+      delegationRecord({ id: 'd-interrupted', status: 'ended', outcome: 'interrupted' }),
+      // The host never writes an ended record without an outcome; the list still
+      // has a truthful fallback label instead of inventing a state.
+      { ...delegationRecord({ id: 'd-unknown', status: 'ended' }), outcome: undefined } as unknown as DelegationInfo,
+    ]
+  }
+
+  it('lists every delegation state for this application and opens the bound session', async () => {
+    const opened: string[] = []
+    const harness = await mountPanel(
+      (remote) => {
+        remote.delegations.mockResolvedValue(ok<readonly DelegationInfo[]>(delegationRows()))
+        remote.delegation.mockImplementation(async (id: string) => ok(
+          id === 'd-active' ? delegationRecord({ id, status: 'active', sessionId: 'area-1' }) : delegationRecord({ id }),
+        ))
+      },
+      (ctx) => { ctx.provide('uiWorkspace', { openSession: (sessionId: string) => { opened.push(sessionId) } } as never) },
+    )
+    register(harness, 'workbook', markerPage('workbook'))
+    const panel = renderPanel(harness)
+    await settle()
+    openManageList(panel)
+    fireEvent.click(inDocument('[data-manage-row="workbook"]'))
+    fireEvent.click(inDocument('[data-manage-tab="permissions"]'))
+    await settle()
+
+    const label = (id: string): string => inDocument(`[data-manage-delegation="${id}"] [data-manage-delegation-state]`).textContent ?? ''
+    expect(label('d-pending')).toContain('Awaiting send')
+    expect(label('d-active')).toContain('Running')
+    expect(label('d-active')).toContain('等待答复')
+    expect(label('d-needs')).toContain('Needs a person')
+    expect(label('d-done')).toContain('Completed')
+    expect(label('d-failed')).toContain('Failed')
+    expect(label('d-cancelled')).toContain('Cancelled')
+    expect(label('d-interrupted')).toContain('Interrupted')
+    expect(label('d-unknown')).toContain('Unavailable')
+    // Only a pending record explains the human's next step.
+    expect(inDocument('[data-manage-delegation="d-pending"] [data-manage-delegation-pending]')).toBeDefined()
+    // The bound Session is the platform's identity, never the transcript.
+    expect(inDocument('[data-manage-delegation="d-active"] [data-manage-delegation-session]').textContent).toBe('area-1')
+    expect(document.body.querySelector('[data-manage-delegation="d-pending"] [data-manage-delegation-session]')).toBeNull()
+
+    // Opening the execution goes through the host record and the area's own
+    // Session opener, not an id the page supplied.
+    fireEvent.click(inDocument('[data-manage-delegation="d-active"] [data-manage-delegation-open]'))
+    await settle()
+    expect(harness.remote.delegation).toHaveBeenCalledWith('d-active', 'workbook')
+    expect(opened).toEqual(['area-1'])
+    // A pending row gets no "open" action (nothing executes yet), and ended
+    // rows get no cancel action.
+    expect(document.body.querySelector('[data-manage-delegation="d-pending"] [data-manage-delegation-open]')).toBeNull()
+    expect(document.body.querySelector('[data-manage-delegation="d-done"] [data-manage-delegation-cancel]')).toBeNull()
+    await harness.runtime.dispose()
+  })
+
+  it('shows loading, retries a failed read and reports an empty list', async () => {
+    const pending = Promise.withResolvers<RemoteResult<readonly DelegationInfo[]>>()
+    const harness = await mountPanel((remote) => {
+      remote.delegations.mockReturnValueOnce(pending.promise)
+    })
+    register(harness, 'workbook', markerPage('workbook'))
+    const panel = renderPanel(harness)
+    await settle()
+    openManageList(panel)
+    fireEvent.click(inDocument('[data-manage-row="workbook"]'))
+    fireEvent.click(inDocument('[data-manage-tab="permissions"]'))
+    expect(inDocument('[data-manage-delegations-loading]')).toBeDefined()
+    pending.resolve(carrierFailure<readonly DelegationInfo[]>())
+    await settle()
+    // A failed read is a retry, not a silently empty list.
+    expect(inDocument('[data-manage-delegations-retry]')).toBeDefined()
+    harness.remote.delegations.mockResolvedValue(ok<readonly DelegationInfo[]>([]))
+    fireEvent.click(inDocument('[data-manage-delegations-retry]'))
+    await settle()
+    expect(inDocument('[data-manage-delegations-empty]')).toBeDefined()
+    await harness.runtime.dispose()
+  })
+
+  it('cancels a live delegation, refreshes the list and reports a refused action', async () => {
+    const harness = await mountPanel((remote) => {
+      remote.delegations.mockResolvedValue(ok<readonly DelegationInfo[]>([
+        delegationRecord({ id: 'd-live', status: 'active', sessionId: 'area-1' }),
+      ]))
+      // The first cancel is refused by the host, the retry lands.
+      remote.cancelDelegation.mockResolvedValueOnce({ ok: false, error: new Error('the host refused the cancel') as never })
+      remote.cancelDelegation.mockRejectedValueOnce('raw cancel failure')
+    })
+    register(harness, 'workbook', markerPage('workbook'))
+    const panel = renderPanel(harness)
+    await settle()
+    openManageList(panel)
+    fireEvent.click(inDocument('[data-manage-row="workbook"]'))
+    fireEvent.click(inDocument('[data-manage-tab="permissions"]'))
+    await settle()
+
+    fireEvent.click(inDocument('[data-manage-delegation="d-live"] [data-manage-delegation-cancel]'))
+    await settle()
+    expect(harness.remote.cancelDelegation).toHaveBeenCalledWith('d-live', 'workbook')
+    expect(inDocument('[data-manage-delegations-error]').textContent).toContain('the host refused the cancel')
+
+    fireEvent.click(inDocument('[data-manage-delegation="d-live"] [data-manage-delegation-cancel]'))
+    await settle()
+    // A non-Error rejection is rendered as its raw text, never swallowed.
+    expect(inDocument('[data-manage-delegations-error]').textContent).toContain('raw cancel failure')
+
+    fireEvent.click(inDocument('[data-manage-delegation="d-live"] [data-manage-delegation-cancel]'))
+    await settle()
+    expect(document.body.querySelector('[data-manage-delegations-error]')).toBeNull()
+    // A committed action re-reads the host record instead of patching a cache.
+    expect(harness.remote.delegations.mock.calls.length).toBeGreaterThan(1)
+    await harness.runtime.dispose()
+  })
+})
+
+describe('the delegation send dialog', () => {
+  /** A page whose one button asks the shell to offer a pending delegation. */
+  function delegationPage(): ApplicationView {
+    return {
+      name: 'Delegating page',
+      Component: (props) => (
+        <button
+          type="button"
+          data-delegate-request
+          onClick={() => { void props.delegation?.requestSend('delegation-1') }}
+        >delegate</button>
+      ),
+    }
+  }
+
+  /** Open the send dialog for the page's request. */
+  async function requestSend(): Promise<void> {
+    fireEvent.click(inDocument('[data-delegate-request]'))
+    await settle()
+  }
+
+  it('cancels through the buttons and the mask, and refuses to send without a set-up target', async () => {
+    const harness = await mountPanel()
+    register(harness, 'workbook', delegationPage())
+    const panel = renderPanel(harness)
+    await settle()
+    fireEvent.click(navRow(panel, 'workbook'))
+    await settle()
+
+    // Without a remembered conversation the dialog targets a NEW Session.
+    await requestSend()
+    expect((inDocument('[data-delegate-target]') as HTMLSelectElement).value).toBe('new')
+    fireEvent.click(inDocument('[data-delegate-cancel]'))
+    await settle()
+    expect(document.body.querySelector('[data-delegate-dialog]')).toBeNull()
+
+    // The header's close button resolves the request as cancelled too.
+    await requestSend()
+    fireEvent.click(inDocument('[data-delegate-dialog] button[aria-label]'))
+    await settle()
+    expect(document.body.querySelector('[data-delegate-dialog]')).toBeNull()
+
+    // The modal mask owns the same close; it must not leave the request parked.
+    await requestSend()
+    const mask = inDocument('[data-delegate-dialog]').closest('[role="presentation"]')!
+      .querySelector('[aria-hidden="true"]') as HTMLElement
+    fireEvent.click(mask)
+    await settle()
+    expect(document.body.querySelector('[data-delegate-dialog]')).toBeNull()
+
+    // Sending to "new" when the area has no set-up conversation is blocked with
+    // a first-use hint instead of a failed host round trip.
+    await requestSend()
+    expect(inDocument('[data-delegate-no-target]').textContent).toContain('application-area session')
+    expect((inDocument('[data-delegate-send]') as HTMLButtonElement).disabled).toBe(true)
+    await harness.runtime.dispose()
+  })
+
+  it('refuses a new target whose created conversation carries no Session id', async () => {
+    const harness = await mountPanel()
+    const first = await harness.runtime.sessions.add({ id: 'area-1' })
+    harness.runtime.sessions.stubCreate(async () => first)
+    harness.runtime.workspaces.stub('create', async ({ path }) => ({ workspaceId: 'w-area', path }) as never)
+    register(harness, 'workbook', delegationPage())
+    renderPanel(harness)
+    await settle()
+    fireEvent.click(inDocument('[data-sidebar-right-expand]'))
+    await settle()
+    fireEvent.click(inDocument('[data-app-conversation-setup] button[type="submit"]'))
+    await settle()
+    // A conversation reference without a Session identity cannot be sent to.
+    const sessions = harness.runtime.sessions as unknown as { retain: (...args: never[]) => unknown }
+    const originalRetain = sessions.retain
+    sessions.retain = (() => ({})) as never
+    try {
+      await requestSend()
+      fireEvent.change(inDocument('[data-delegate-target]'), { target: { value: 'new' } })
+      fireEvent.click(inDocument('[data-delegate-send]'))
+      await settle()
+      expect(inDocument('[data-delegate-error]').textContent).toContain('A new application-area session could not be created.')
+      expect(harness.remote.sendDelegation).not.toHaveBeenCalled()
+    } finally {
+      sessions.retain = originalRetain as never
+    }
+    await harness.runtime.dispose()
+  })
+
+  it('offers first-use setup from the send dialog when no target exists', async () => {
+    const harness = await mountPanel()
+    register(harness, 'workbook', delegationPage())
+    const panel = renderPanel(harness)
+    await settle()
+    fireEvent.click(navRow(panel, 'workbook'))
+    await settle()
+    await requestSend()
+    expect(inDocument('[data-delegate-no-target]')).toBeTruthy()
+    expect((inDocument('[data-delegate-send]') as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(inDocument('[data-delegate-setup]'))
+    await settle()
+    expect(inDocument('[data-app-conversation-setup]')).toBeTruthy()
+    await harness.runtime.dispose()
+  })
+
+  it('shows the supplement counter and the setup entry in the send dialog', async () => {
+    const harness = await mountPanel()
+    const first = await harness.runtime.sessions.add({ id: 'area-1' })
+    harness.runtime.sessions.stubCreate(async () => first)
+    harness.runtime.workspaces.stub('create', async ({ path }) => ({ workspaceId: 'w-area', path }) as never)
+    register(harness, 'workbook', delegationPage())
+    renderPanel(harness)
+    await settle()
+    fireEvent.click(inDocument('[data-sidebar-right-expand]'))
+    await settle()
+    fireEvent.click(inDocument('[data-app-conversation-setup] button[type="submit"]'))
+    await settle()
+    await requestSend()
+    expect(inDocument('[data-delegate-supplement-count]').textContent).toBe('0/4000')
+    fireEvent.change(inDocument('[data-delegate-supplement]'), { target: { value: 'hello' } })
+    expect(inDocument('[data-delegate-supplement-count]').textContent).toBe('5/4000')
+    fireEvent.click(inDocument('[data-delegate-cancel]'))
+    await settle()
+    await harness.runtime.dispose()
+  })
+
+  it('maps an unavailable target to a localized send error and keeps the dialog open', async () => {
+    const harness = await mountPanel()
+    const first = await harness.runtime.sessions.add({ id: 'area-1' })
+    harness.runtime.sessions.stubCreate(async () => first)
+    harness.runtime.workspaces.stub('create', async ({ path }) => ({ workspaceId: 'w-area', path }) as never)
+    harness.remote.sendDelegation.mockRejectedValueOnce(new Error('the target session is not running; open it in the application area and try again'))
+    register(harness, 'workbook', delegationPage())
+    renderPanel(harness)
+    await settle()
+    fireEvent.click(inDocument('[data-sidebar-right-expand]'))
+    await settle()
+    fireEvent.click(inDocument('[data-app-conversation-setup] button[type="submit"]'))
+    await settle()
+    await requestSend()
+    fireEvent.click(inDocument('[data-delegate-send]'))
+    await settle()
+    expect(inDocument('[data-delegate-error]').textContent).toContain('not available right now')
+    expect(document.body.querySelector('[data-delegate-dialog]')).not.toBeNull()
+    await harness.runtime.dispose()
+  })
+
+  it('creates a new application-area conversation for a new target before sending', async () => {
+    const harness = await mountPanel()
+    const first = await harness.runtime.sessions.add({ id: 'area-1' })
+    const second = await harness.runtime.sessions.add({ id: 'area-2' })
+    let created = 0
+    harness.runtime.sessions.stubCreate(async () => (created++ === 0 ? first : second))
+    harness.runtime.workspaces.stub('create', async ({ path }) => ({ workspaceId: 'w-area', path }) as never)
+    register(harness, 'workbook', delegationPage())
+    renderPanel(harness)
+    await settle()
+    fireEvent.click(inDocument('[data-sidebar-right-expand]'))
+    await settle()
+    fireEvent.click(inDocument('[data-app-conversation-setup] button[type="submit"]'))
+    await settle()
+    expect(inDocument('[data-app-dock-tab]')).toBeTruthy()
+
+    await requestSend()
+    fireEvent.change(inDocument('[data-delegate-target]'), { target: { value: 'new' } })
+    fireEvent.click(inDocument('[data-delegate-send]'))
+    await settle()
+    // The human's chosen target is the NEW conversation the shell created.
+    expect(harness.remote.sendDelegation).toHaveBeenCalledWith('delegation-1', second, '', 'workbook')
+    expect(document.body.querySelector('[data-delegate-dialog]')).toBeNull()
+    await harness.runtime.dispose()
+  })
+})
+
+describe('dock context and add-menu states', () => {
+  async function openAreaConversation(): Promise<Harness> {
+    const harness = await mountPanel()
+    const sessionId = await harness.runtime.sessions.add({ id: 'area-context' })
+    harness.runtime.sessions.stubCreate(async () => sessionId)
+    harness.runtime.workspaces.stub('create', async ({ path }) => ({ workspaceId: 'w-area', path }) as never)
+    register(harness, 'workbook', { name: 'workbook', Component: () => <p data-testid="view-body">workbook</p> })
+    renderPanel(harness)
+    await settle()
+    fireEvent.click(inDocument('[data-sidebar-right-expand]'))
+    await settle()
+    fireEvent.click(inDocument('[data-app-conversation-setup] button[type="submit"]'))
+    await settle()
+    return harness
+  }
+
+  it('shows a no-page context bar without a remove control', async () => {
+    const harness = await openAreaConversation()
+    expect(inDocument('[data-app-context-bar]').textContent).toContain('No current page')
+    expect(document.body.querySelector('[data-app-context-remove]')).toBeNull()
+    await harness.runtime.dispose()
+  })
+
+  it('closes the dock add menu on Escape', async () => {
+    const harness = await openAreaConversation()
+    fireEvent.click(inDocument('[data-app-dock-new]'))
+    await settle()
+    expect(document.body.querySelector('[role="menu"]')).not.toBeNull()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await settle()
+    expect(document.body.querySelector('[role="menu"]')).toBeNull()
+    await harness.runtime.dispose()
+  })
+})
+
+describe('development tab folding', () => {
+  it('folds a development tab back to the area conversation when switching applications', async () => {
+    const harness = await mountPanel()
+    const area = await harness.runtime.sessions.add({ id: 'area-1' })
+    const dev = await harness.runtime.sessions.add({ id: 'dev-fold' })
+    let created = 0
+    harness.runtime.sessions.stubCreate(async () => (created++ === 0 ? area : dev))
+    harness.runtime.workspaces.stub('create', async ({ path }) => ({ workspaceId: 'w-area', path }) as never)
+    const page = (appId: string): ApplicationView => ({ name: appId, Component: () => <p data-testid="view-body">{appId}</p> })
+    register(harness, 'workbook', page('workbook'))
+    register(harness, 'info-hub', page('info-hub'))
+    renderPanel(harness)
+    await settle()
+
+    // First use: create the area conversation workspace.
+    fireEvent.click(inDocument('[data-sidebar-right-expand]'))
+    await settle()
+    fireEvent.click(inDocument('[data-app-conversation-setup] button[type="submit"]'))
+    await settle()
+    // Create and open a development Session for workbook.
+    fireEvent.click(inDocument('[data-app-menu]'))
+    await settle()
+    const develop = [...document.body.querySelectorAll('button')].find(button => button.textContent?.includes('Develop this application') || button.textContent?.includes('开发此应用'))!
+    fireEvent.click(develop)
+    await settle()
+    fireEvent.change(inDocument('[data-develop-path]'), { target: { value: '/src/application' } })
+    fireEvent.click(inDocument('[data-develop-submit]'))
+    await settle()
+    // The dialog's result step closes; the development Session is in the dock.
+    fireEvent.click(inDocument('[data-develop-done]'))
+    await settle()
+    fireEvent.click(inDocument('[data-app-dock-tab="dev-fold"]'))
+    await settle()
+    // Switching to another application folds the development tab into the group
+    // and selects the area conversation again.
+    fireEvent.click(inDocument('[data-app-tab="info-hub"]'))
+    await settle()
+    const active = document.body.querySelector('[data-app-dock-tab][data-active="true"]')
+    expect(active?.getAttribute('data-app-dock-tab')).toBe('area-1')
+    await harness.runtime.dispose()
+  })
+})
+
+describe('host session list reconciliation', () => {
+  it('leaves remembered development sessions alone when the host list fails', async () => {
+    localStorage.setItem('dsh.applications.preferences.v1', JSON.stringify({
+      developmentSessions: [{ appId: 'todo', sessionId: 's-remembered' }],
+    }))
+    const harness = await mountPanel((remote) => {
+      ;(remote as unknown as Record<string, unknown>).developmentBindings = vi.fn(async () => ({ ok: false as const }))
+    })
+    renderPanel(harness)
+    await settle()
+    const stored = JSON.parse(localStorage.getItem('dsh.applications.preferences.v1')!) as {
+      readonly developmentSessions?: readonly { readonly sessionId: string; readonly appId: string }[]
+    }
+    expect(stored.developmentSessions).toContainEqual({ appId: 'todo', sessionId: 's-remembered' })
+    await harness.runtime.dispose()
+  })
+
+  it('clears a host development binding whose Session is gone', async () => {
+    const clearDevelopmentSession = vi.fn(async () => ({ ok: true as const, value: true }))
+    const harness = await mountPanel((remote) => {
+      ;(remote as unknown as Record<string, unknown>).developmentBindings = vi.fn(async () => ({
+        ok: true as const,
+        value: [{ sessionId: 'dev-gone', appId: 'workbook' }],
+      }))
+      ;(remote as unknown as Record<string, unknown>).clearDevelopmentSession = clearDevelopmentSession
+    })
+    renderPanel(harness)
+    await settle()
+    expect(clearDevelopmentSession).toHaveBeenCalledWith('dev-gone')
+    await harness.runtime.dispose()
+  })
+
+  it('merges host development bindings when the area mounts', async () => {
+    const harness = await mountPanel(
+      (remote) => {
+        ;(remote as unknown as Record<string, unknown>).developmentBindings = vi.fn(async () => ({
+          ok: true as const,
+          value: [{ sessionId: 'dev-host', appId: 'workbook' }],
+        }))
+      },
+      undefined,
+      undefined,
+      async (runtime) => { await runtime.sessions.add({ id: 'dev-host' }) },
+    )
+    renderPanel(harness)
+    await settle()
+    const stored = JSON.parse(localStorage.getItem('dsh.applications.preferences.v1')!) as {
+      readonly developmentSessions?: readonly { readonly sessionId: string; readonly appId: string }[]
+    }
+    expect(stored.developmentSessions).toContainEqual({ sessionId: 'dev-host', appId: 'workbook' })
     await harness.runtime.dispose()
   })
 })

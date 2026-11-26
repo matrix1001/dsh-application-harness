@@ -39,6 +39,8 @@ declare module '@deepseek-ai/cordis' {
 export interface ApplicationRuntimeConfig {
   /** Stop wait budget in milliseconds (work outliving it reports stop-incomplete). */
   stopBudgetMs?: number
+  /** How long one platform-run application health check may take (default 5000ms). */
+  healthTimeoutMs?: number
 }
 
 /** The plugin name (the row id in a composition). */
@@ -47,6 +49,7 @@ export const name = 'application-runtime'
 /** The row config schema: validated before the plugin starts (fail loud). */
 export const Config = Schema.object({
   stopBudgetMs: Schema.number(),
+  healthTimeoutMs: Schema.number(),
 })
 
 /**
@@ -59,6 +62,7 @@ export const Config = Schema.object({
 export function apply(ctx: Context, config: ApplicationRuntimeConfig): void {
   const runtime = new ApplicationRuntime({
     ...(config.stopBudgetMs === undefined ? {} : { stopBudgetMs: config.stopBudgetMs }),
+    ...(config.healthTimeoutMs === undefined ? {} : { healthTimeoutMs: config.healthTimeoutMs }),
     onProblem: (problem) => { ctx.logger.warn(problem) },
   })
   // Basic operation history is part of what this row mounts: the runtime alone
@@ -95,9 +99,45 @@ export function apply(ctx: Context, config: ApplicationRuntimeConfig): void {
  * @param declaration - the application declaration.
  * @returns the registration handle, once the application is mounted.
  */
-export async function mountApplication(ctx: Context, declaration: AppDeclaration): Promise<AppRegistration> {
+/** The only storage face an application row may receive at mount time. */
+export interface MountableStore {
+  /** Bind the application's capability door in its start hook. */
+  attach(access: { use<T>(name: 'storage', work: () => T | Promise<T>): Promise<T> }): void
+}
+
+/** A namespace-scoped handle factory handed to an application's mount factory. */
+export type ApplicationStoreFactory<TStore extends MountableStore = MountableStore> = (namespace: string) => TStore
+
+export async function mountApplication<TStore extends MountableStore = MountableStore>(
+  ctx: Context,
+  declarationOrFactory: AppDeclaration | ((store: ApplicationStoreFactory<TStore>) => AppDeclaration),
+): Promise<AppRegistration> {
+  const service = typeof declarationOrFactory === 'function'
+    ? (ctx as unknown as { get(name: string): unknown }).get('applicationStore') as { openForMount?: (namespace: string) => unknown } | undefined
+    : undefined
+  if (typeof declarationOrFactory === 'function' && service?.openForMount === undefined) {
+    throw new Error('an application with a store requires the application store (ctx.applicationStore)')
+  }
   const runtime = ctx.applications
-  if (runtime === undefined) throw new Error(`application ${declaration.id} requires the application runtime (ctx.applications)`)
+  if (runtime === undefined) throw new Error('an application requires the application runtime (ctx.applications)')
+  let declaration: AppDeclaration
+  if (typeof declarationOrFactory === 'function') {
+    const requested: Array<{ namespace: string; handle: unknown }> = []
+    const openForMount = service!.openForMount!.bind(service)
+    declaration = declarationOrFactory((namespace) => {
+      const handle = openForMount(namespace)
+      requested.push({ namespace, handle })
+      return handle as TStore
+    })
+    const unified = declaration.data?.kind === 'unified' ? declaration.data.namespace : undefined
+    for (const { namespace } of requested) {
+      if (namespace !== unified || namespace !== declaration.id) {
+        throw new Error(`application ${declaration.id} requested store namespace ${namespace}; only its own declared unified namespace is allowed`)
+      }
+    }
+  } else {
+    declaration = declarationOrFactory
+  }
   const registration = runtime.mount(declaration)
   ctx.effect(() => async () => {
     const status = await runtime.stop(declaration.id)
@@ -109,7 +149,7 @@ export async function mountApplication(ctx: Context, declaration: AppDeclaration
   return registration
 }
 
-export { ApplicationRuntime, AppError, assertDeclarable, declaredCallOps, DEFAULT_RECENT_HISTORY, DEFAULT_STOP_BUDGET_MS } from './runtime.ts'
+export { ApplicationRuntime, AppError, assertDeclarable, declaredCallOps, DEFAULT_HEALTH_TIMEOUT_MS, DEFAULT_RECENT_HISTORY, DEFAULT_STOP_BUDGET_MS } from './runtime.ts'
 export { defineOperation } from './define.ts'
 export type { DefinedOperation } from './define.ts'
 export { eventCapability, opCapability, platformCapability } from './types.ts'
@@ -117,8 +157,8 @@ export { eventCapability, opCapability, platformCapability } from './types.ts'
 // application author imports it from here, next to the declaration types.
 export type { ParameterSchemaSpec, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
 export type {
-  AppRegistration, ConfirmationAnswer, ConfirmationPort, ConfirmationRequest, ChangeListener,
-  GrantStorePort, HistoryRecord, HistorySink, MaintenanceLease, RuntimeOptions, SecretStorePort,
+  AppRegistration, ConfirmationAnswer, ConfirmationPort, ConfirmationPreview, ConfirmationRequest, ChangeListener,
+  GrantStorePort, HistoryRecord, HistorySink, MaintenanceLease, RuntimeOptions,
 } from './runtime.ts'
 export type {
   TaskCancelResult, TaskContext, TaskDescriptor, TaskError, TaskHandle, TaskId, TaskNotice, TaskOrigin,
@@ -129,7 +169,9 @@ export { ProgressReporter, SingleFlight, TaskReceipts, runPeriodically } from '.
 export type { PendingProgress, PeriodicOptions } from './task-helpers.ts'
 export type { HistoryQueueOptions, HistoryReader, HistoryStore } from './history.ts'
 export type {
-  Activation, AppCall, AppChangeNotice, AppContext, AppDataDeclaration, AppDataKind, AppDeclaration, AppHealth, AppId, AppReason, AppSecretAccess, AppStatus, CallOutcome, Caller, CapabilityAccess,
+  Activation, AppCall, AppChangeNotice, AppContext, AppDataDeclaration, AppDataKind, AppDeclaration, AppHealth, AppHealthCheck, AppHealthCheckContext, AppHealthCheckResult, AppHealthCheckStatus, AppId, AppReason, AppStatus, CallOutcome, Caller, CapabilityAccess,
   CapabilityGrant, CapabilityVerdict, Exposure, FailureCode, OpExposure, OpName,
-  AppEvent, AppEventDeclaration, AppEventListener, EventSubscription, RuntimeState, ProcessCommandDeclaration, PageActionName, PageDeclaration, ObjectRef, ObjectResolution, ObjectTypeDeclaration, OperationContext, OperationDeclaration, OperationEffect, OperationPolicy, OperationPolicyEntry, OutcomeError, PermissionRequest, PermissionVerdict, PolicyStorePort, ProgressNotice, RejectionCode,
+  AppEvent, AppEventDeclaration, AppEventListener, EventSubscription, RuntimeState, ObjectRef, ObjectResolution, ObjectResolutionResult, ObjectTypeDeclaration, OperationContext, OperationDeclaration, OperationEffect, OperationPolicy, OperationPolicyEntry, OutcomeError, PolicyStorePort, ProgressNotice, RejectionCode,
+  AppDelegation, AppDelegationAccess, DelegationCreateInput, DelegationOutcome, DelegationPort, DelegationReport, DelegationStatus,
+  ProcessAccess, ProcessDeclaration, ProcessDescriptor,
 } from './types.ts'

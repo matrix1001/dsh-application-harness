@@ -14,7 +14,7 @@
  * @module @matrix1001/dsh-application-harness-client-applications/client
  */
 
-import type { CallOutcome, JsonValue, ObjectRef, ObjectResolution } from '@matrix1001/dsh-application-harness-host-bridge/client'
+import type { CallOutcome, JsonValue, ObjectRef, ObjectResolutionResult } from '@matrix1001/dsh-application-harness-host-bridge/client'
 import type { ReactNode } from 'react'
 
 /**
@@ -26,12 +26,8 @@ export type PageRecordKind = string
 
 /** One record inside one application, as a page cites it. */
 export interface PageRecordRef {
-  /**
-   * The application that owns the record. Optional for legacy reports, where
-   * the kind names exactly one application; new pages set it explicitly so a
-   * record can be opened or cited across applications.
-   */
-  readonly appId?: string
+  /** The application that owns the record. */
+  readonly appId: string
   /** Which family the record belongs to. */
   readonly kind: PageRecordKind
   /** The record's id inside that family. */
@@ -216,9 +212,11 @@ export interface ApplicationViewData {
   drafts?: PageDraftsFace
   /**
    * Resolve one object reference through its owning application's declared
-   * resolver. It is optional for embedded/test pages; production views get it.
+   * resolver. An unresolvable reference is a VALUE: `app.not-found` means the
+   * object is gone, any other code means the reference could not be checked.
+   * It is optional for embedded/test pages; production views get it.
    */
-  resolveObject?: (ref: ObjectRef) => Promise<ObjectResolution>
+  resolveObject?: (ref: ObjectRef) => Promise<ObjectResolutionResult>
   /** Ask the host to cancel one background task; the watch frame reports the state. */
   cancelTask?: (taskId: string) => void
   /**
@@ -238,7 +236,6 @@ export interface ApplicationViewData {
    * @param requestId - the id this application called (or is about to call) the operation with.
    * @returns the function that hands the display back (idempotent).
    */
-  claimProgress: (requestId: string) => () => void
   /**
    * Subscribe to this application's data changes (the shell filters the watch
    * stream's `changed` frames to this appId, and fires on reconnect so a view
@@ -247,6 +244,24 @@ export interface ApplicationViewData {
   onChanged: (listener: () => void) => () => void
   /** Whether a call of this application is in flight right now (disable interactions while true). */
   running: boolean
+  /**
+   * The delegation faces of THIS application's records. A page may ask the
+   * human to send a pending delegation, cancel one, or show the Session that
+   * executes one — it can never send by itself, name another application's
+   * delegation, or open an arbitrary Session (the shell resolves the record
+   * through the host, which checks ownership).
+   */
+  delegation?: ApplicationDelegationFace
+}
+
+/** The delegation actions one application page may ask the shell for. */
+export interface ApplicationDelegationFace {
+  /** Offer one pending delegation to the human; the shell opens the send dialog. */
+  requestSend: (id: string) => Promise<void>
+  /** End one delegation on the human's request; true when the record ended. */
+  cancel: (id: string) => Promise<boolean>
+  /** Show the delegation's bound application-area Session; false when none is bound. */
+  open: (id: string) => Promise<boolean>
 }
 
 /**
@@ -265,8 +280,8 @@ export interface ApplicationViewData {
  * page has to re-validate anyway.
  *
  * What may be stored is JSON DATA the application defines and namespaces: a
- * form draft (credentials included — nothing here is persisted or echoed
- * anywhere), a filter, a selection. What may NOT is anything alive: a
+ * form draft (values the human typed included — nothing here is persisted or
+ * echoed anywhere), a filter, a selection. What may NOT is anything alive: a
  * component, a service, a DOM node, a Promise, a subscription handle. A field
  * only has meaning for the registration that wrote it.
  */
@@ -371,7 +386,7 @@ export interface ApplicationSettingsProps extends ApplicationViewData {
   /** That application's own view state (see {@link ApplicationUiStore}). */
   readonly ui: ApplicationUiStore
   /**
-   * Open this application's management page at one tab — the settings page's
+   * Open this application's management page at one area — the settings page's
    * own way to a permission the host refused, bound to this application (see
    * {@link ApplicationViewProps.openManagement}).
    */
@@ -384,14 +399,26 @@ export interface ApplicationSettingsProps extends ApplicationViewData {
  * callback it was handed, and a public prop must not depend on a React
  * component module.
  */
-export type ManageTab = 'settings' | 'permissions' | 'history' | 'info' | 'data' | 'developer' | 'tasks'
+export type ManageTab = 'status' | 'permissions' | 'data' | 'settings'
 
-/** What the management dialog is showing: the list (no appId) or one application's detail. */
+/** What the management page is showing: one application's detail, the list, or the area's own settings. */
 export interface ManageRequest {
-  /** The application being managed; absent shows the list. */
+  /** The application being managed; absent opens the page without an explicit subject. */
   readonly appId?: string | undefined
-  /** The detail tab; ignored for the list. */
-  readonly tab: ManageTab
+  /** The detail area; omitted for the list and for an area-level settings page. */
+  readonly tab?: ManageTab | undefined
+  /**
+   * A section inside the area that the entry asked for: the header's
+   * history shortcut lands on the data area's history section, and its debug
+   * shortcut opens the status area's developer fold.
+   */
+  readonly focus?: 'history' | 'debug' | undefined
+  /**
+   * The application area's own settings page instead of an application detail.
+   * `network` is the application network proxy: one harness-level egress
+   * setting, not a property of any application.
+   */
+  readonly setting?: 'network' | undefined
 }
 
 /**
@@ -461,7 +488,7 @@ export interface ApplicationView {
   /** The application's page; the framework renders it as the business surface. */
   Component?: (props: ApplicationViewProps) => ReactNode
   /**
-   * The application's settings content, rendered inside the management dialog's
+   * The application's settings content, rendered inside the management page's
    * settings tab (the tab is hidden when the application provides none). The
    * application reads, validates, saves and applies its own settings through
    * the same call face as its page.

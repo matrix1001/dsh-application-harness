@@ -15,7 +15,7 @@ import type { CallOutcome } from '@matrix1001/dsh-application-harness-host-bridg
 import type { AppInfo } from '@matrix1001/dsh-application-harness-host-bridge/client'
 import { CallOutcomeView } from '../src/client/CallOutcomeView.tsx'
 import { StatusBadge } from '../src/client/StatusBadge.tsx'
-import { ConfirmationsList, GrantsIntoList, HistoryList, NeedsList, PoliciesList } from '../src/client/Lists.tsx'
+import { ConfirmationsList, HistoryList, NeedsList, PoliciesList, ProcessList } from '../src/client/Lists.tsx'
 import { describeNeed, type NeedDescription } from '../src/client/model.ts'
 
 /** The dictionary key, as the panel's own `t` seat would resolve it. */
@@ -28,10 +28,10 @@ function app(id: string, ops: Array<{ name: string; description: string }> = [])
     name: `${id} title`,
     description: `${id} description`,
     version: '1.0.0',
-    status: 'available',
     health: 'ok', activation: 'enabled', runtime: 'ready',
     needs: [],
     ops: ops.map(entry => ({ ...entry, params: {}, exposure: {} })),
+    events: [{ type: 'changed', description: 'a task changed', subscription: 'open' }],
   }
 }
 
@@ -125,41 +125,25 @@ describe('HistoryList', () => {
     expect(view.getAllByText('success')).toHaveLength(3)
   })
 
+  it('shows a process command label when the record carries one', () => {
+    const view = render(<HistoryList records={[record('process', { op: 'process', command: 'git status' })]} t={t} />)
+    expect(view.getByText('git status')).toBeDefined()
+  })
+
   it('shows the empty hint when nothing was recorded', () => {
     const view = render(<HistoryList records={[]} t={t} />)
     expect(view.getByText('history.empty')).toBeDefined()
   })
 })
 
-describe('GrantsIntoList', () => {
-  it('revokes exactly the capability shown, of the caller shown', async () => {
-    const caller: Caller = { kind: 'app', appId: 'git-read' }
-    const revoke = vi.fn()
-    const view = render(
-      <GrantsIntoList
-        title="perm.into"
-        empty="perm.noInto"
-        entries={[{ caller, capabilities: ['workbook#write', 'workbook#read'] }]}
-        describe={describeOf}
-        revoke={revoke}
-        t={t}
-      />,
-    )
-    expect(view.getByText('perm.into')).toBeDefined()
-    expect(view.getByText('app · git-read')).toBeDefined()
-    expect(view.getByText('workbook#read')).toBeDefined()
-    // The revoke names the capability AND the caller it came from: revoking here
-    // must take away what is shown, never the caller's unrelated grants.
-    fireEvent.click(view.container.querySelector('[data-grant-revoke="workbook#read"]') as HTMLElement)
-    expect(revoke).toHaveBeenCalledWith(caller, 'workbook#read')
-    await waitFor(() => expect(view.getAllByText('grants.revoke')).toHaveLength(2))
-  })
-
-  it('shows the caller’s own empty hint with nobody reaching in', () => {
-    const view = render(<GrantsIntoList title="perm.into" empty="perm.noInto" entries={[]} describe={describeOf} revoke={vi.fn(async () => true)} t={t} />)
-    expect(view.getByText('perm.noInto')).toBeDefined()
-    // The section title belongs to the list; an empty list is only the hint.
-    expect(view.queryByText('perm.into')).toBeNull()
+describe('ProcessList', () => {
+  it('shows each executable, its command names and its declared purpose', () => {
+    const view = render(<ProcessList process={[{ executable: 'git', commands: ['status', 'diff'], purpose: 'read a repository' }]} t={t} />)
+    expect(view.getByText('process.title')).toBeDefined()
+    expect(view.container.querySelector('[data-app-process-entry="git"]')).not.toBeNull()
+    expect(view.getByText('git')).toBeDefined()
+    expect(view.getByText('process.commands')).toBeDefined()
+    expect(view.getByText('read a repository')).toBeDefined()
   })
 })
 
@@ -200,8 +184,8 @@ describe('NeedsList', () => {
         title="perm.capabilities"
         empty="perm.noCapabilities"
         caller={caller}
-        needs={['capability:model', 'workbook#write']}
-        grants={[{ caller, capabilities: ['workbook#write'], grantedAt: '2026-01-01T00:00:03.000Z' }]}
+        needs={['capability:model', 'event:workbook#changed']}
+        grants={[{ caller, capabilities: ['event:workbook#changed'], grantedAt: '2026-01-01T00:00:03.000Z' }]}
         describe={describeOf}
         grant={grant}
         revoke={revoke}
@@ -211,12 +195,12 @@ describe('NeedsList', () => {
     const switchOf = (need: string): HTMLElement =>
       view.container.querySelector(`[data-app-need="${need}"] [role="switch"]`) as HTMLElement
     expect(switchOf('capability:model').getAttribute('aria-checked')).toBe('false')
-    expect(switchOf('workbook#write').getAttribute('aria-checked')).toBe('true')
+    expect(switchOf('event:workbook#changed').getAttribute('aria-checked')).toBe('true')
     // The write is the EXACT selector, whatever the row reads in words.
     fireEvent.click(switchOf('capability:model'))
     await waitFor(() => expect(grant).toHaveBeenCalledWith(caller, ['capability:model']))
-    fireEvent.click(switchOf('workbook#write'))
-    await waitFor(() => expect(revoke).toHaveBeenCalledWith(caller, 'workbook#write'))
+    fireEvent.click(switchOf('event:workbook#changed'))
+    await waitFor(() => expect(revoke).toHaveBeenCalledWith(caller, 'event:workbook#changed'))
   })
 
   it('keeps the row’s own pending and failure state, and follows the read-back truth', async () => {
@@ -273,13 +257,13 @@ describe('NeedsList', () => {
     expect(container.querySelector('[data-need-error="capability:model"]')).toBeNull()
   })
 
-  it('describes a peer need by its target application and the operation’s own words', () => {
+  it('describes an event need by its target application and the event’s own words', () => {
     const view = render(
       <NeedsList
         title="perm.peers"
         empty="perm.noPeers"
         caller={{ kind: 'app', appId: 'info-hub' }}
-        needs={['workbook#write']}
+        needs={['event:workbook#changed']}
         grants={[]}
         describe={describeOf}
         grant={vi.fn(async () => true)}
@@ -287,10 +271,10 @@ describe('NeedsList', () => {
         t={t}
       />,
     )
-    expect(view.getByText('workbook title · write')).toBeDefined()
-    // The operation's description is the host's text, shown verbatim.
-    expect(view.getByText('write a task')).toBeDefined()
-    expect(view.container.querySelector('[data-need-details="workbook#write"] code')?.textContent).toBe('workbook#write')
+    expect(view.getByText('workbook title · changed')).toBeDefined()
+    // The event's description is the host's text, shown verbatim.
+    expect(view.getByText('a task changed')).toBeDefined()
+    expect(view.container.querySelector('[data-need-details="event:workbook#changed"] code')?.textContent).toBe('event:workbook#changed')
   })
 
   it('counts a background grant of the same application (one principal), not another application’s', () => {
@@ -496,26 +480,6 @@ describe('list read states', () => {
     )
     expect(view.getByText('reads.failed')).toBeDefined()
     fireEvent.click(view.container.querySelector('[data-needs-retry]')!)
-    expect(onRetry).toHaveBeenCalledOnce()
-  })
-
-  it('disables revoke while a grants read failed and retries from the list', () => {
-    const onRetry = vi.fn()
-    const view = render(
-      <GrantsIntoList
-        title="perm.into"
-        empty="perm.noInto"
-        entries={[{ caller: { kind: 'app', appId: 'git-read' }, capabilities: ['workbook#write'] }]}
-        describe={describeOf}
-        revoke={vi.fn(async () => true)}
-        loaded
-        failed
-        onRetry={onRetry}
-        t={t}
-      />,
-    )
-    expect((view.container.querySelector('[data-grant-revoke="workbook#write"]') as HTMLButtonElement).disabled).toBe(true)
-    fireEvent.click(view.container.querySelector('[data-into-retry]')!)
     expect(onRetry).toHaveBeenCalledOnce()
   })
 

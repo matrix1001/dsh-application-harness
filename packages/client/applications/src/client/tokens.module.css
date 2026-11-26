@@ -4,7 +4,7 @@
  * Why it sits at `:root` instead of on the area element the scale used to hang
  * from (`[data-applications-area]`):
  *
- * - the management dialog and the Toasts are portalled to `document.body`;
+ * - the management page itself is not portalled, but dialogs and the Toasts are to `document.body`;
  * - the platform sidebar is a different plugin slot, outside the area;
  * - both used to be unable to reach `--app-*` at all, which is why every
  *   dialog, drawer and sidebar title carried its own literal size (the eight
@@ -36,13 +36,11 @@
   /* display — the single KPI number of a card */
   --app-font-display: 24px;
 
-  /* ── line height: three ratios ─────────────────────────────────────────────
-     Unitless on purpose: they inherit and resolve against each element's own
+  /* ── line height ───────────────────────────────────────────────────────────
+     Unitless on purpose: it inherits and resolves against each element's own
      font size, so text that never declared a line height stops falling back to
      the browser's ~1.2 (which is what made 13px Chinese read cramped). */
   --app-line-normal: 1.5;
-  --app-line-tight: 1.4;
-  --app-line-reading: 1.85;
 
   /* ── space: seven steps ────────────────────────────────────────────────────
      A 2px grid: 267 of the old 282 gap declarations were already even, so this
@@ -55,12 +53,10 @@
   --app-space-section: 16px;
   --app-space-page: 24px;
 
-  /* ── density: two levels plus a touch floor ────────────────────────────────
+  /* ── density: standard plus a touch floor ──────────────────────────────────
      A row's height is its vertical padding plus the inherited 1.5 line box, so
      these are padding tokens, not fixed heights. */
-  --app-pad-compact: 4px;
   --app-pad-standard: 8px;
-  --app-row-compact: 28px;
   --app-row-standard: 36px;
   --app-row-touch: 44px;
 
@@ -112,35 +108,16 @@
   --app-radius-control: 6px;
 
   /* ── page frame ────────────────────────────────────────────────────────────
-     The shell supplies the padding; an application page never adds its own.
-     Width tiers: fill (no cap) / content / reading. */
+     The shell supplies the padding; an application page never adds its own. */
   --app-page-inline: 24px;
   --app-page-block: 16px;
   --app-page-bottom: 24px;
-  --app-content-width: 1200px;
-  --app-reading-width: 720px;
 
   /* ── the shell's two rows ────────────────────────────────────────────────
      Fixed heights: an application page never adds a row above its content and
      never changes these, so the first-screen budget stays predictable. */
   --app-header-height: 48px;
   --app-tab-row-height: 44px;
-  --app-header-height-narrow: 44px;
-
-  /* ── form field widths (management dialog and application settings) ────── */
-  --app-field-number: 96px;
-  --app-field-short: 240px;
-  --app-field-long: 480px;
-
-  /* ── overlays (detail panels, drawers) ──────────────────────────────────── */
-  --app-overlay-width: clamp(360px, 32vw, 480px);
-
-  /* ── breakpoints ──────────────────────────────────────────────────────────
-     Documentation only: CSS custom properties cannot be used inside a media or
-     container query, so the two numbers below live as literals in the rules and
-     are enforced by `scripts/verify-app-scale.mjs`. */
-  --app-breakpoint-narrow: 720px;
-  --app-breakpoint-wide: 1040px;
 }
 
 /* The shell narrows its own page insets at the same breakpoint; keep the two
@@ -190,9 +167,17 @@ body {
 }
 
 /* The page language's base line height: every application page, the sidebar and
- * the management dialog inherit it, and each title/number overrides it with
- * `--app-line-tight` where the rhythm calls for it. */
+ * the management page inherit it; each title/number overrides it in its own
+ * rule where the rhythm calls for a tighter line. */
 [data-applications-area],
 [data-sidebar-shell] {
   line-height: var(--app-line-normal);
+}
+
+/* Every application page gets the same visible keyboard ring, including pages
+ * that do not define their own (git-browser) and inputs that reset the UA
+ * outline. A page may still override the colour, never the visibility. */
+[data-applications-area] :focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 1px;
 }

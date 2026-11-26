@@ -176,7 +176,7 @@
   margin-left: 6px;
   vertical-align: middle;
   border-radius: 50%;
-  background: #f7b32b;
+  background: var(--dsw-alias-state-warn-primary);
 }
 
 .tabActive {

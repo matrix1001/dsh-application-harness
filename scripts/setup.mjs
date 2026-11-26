@@ -3,17 +3,18 @@
  * One-time bootstrap for dsh-application-harness.
  *
  * Builds the workspace and creates the dedicated dsh profile (`application-harness`)
- * with the harness machinery + the four example applications link:-linked from
- * this checkout (official bundle-layer channel: the bundle patch carries the
+ * with the harness machinery + the example applications link:-linked from
+ * this repository (the set comes from packages/bundle/app-harness/deployment.yml;
+ * official bundle-layer channel: the bundle patch carries the
  * machinery + generated application rows; the profile patch is a pure user
  * layer). It does NOT boot the UI — the daily launch is `pnpm start`
- * (scripts/start.mjs), which hands off to the platform checkout wrapper after
+ * (scripts/start.mjs), which hands off to the launch wrapper after
  * its preflight:
  *
  *     pnpm start
  *
  * (`--launch` remains as a deprecated registry/PATH boot path; it is not the
- * checkout execution line.)
+ * installed-platform execution line.)
  *
  * The booted child's cwd is the workspace ($DSH_WORKSPACE, otherwise
  * ~/dsh-workspaces/<profile>), never this repository. Application data lives
@@ -36,7 +37,7 @@
  *     DSH_WORKSPACE         the workspace the booted world belongs to
  *                           (default: ~/dsh-workspaces/<profile>; a relative value resolves against the invocation cwd)
  *     DSH_WORKSPACE_LEGACY  `path.delimiter`-separated directories a legacy `.dsh-applications/` may live in
- *                           (default: this repo + $DSH_CHECKOUT; empty = no legacy world)
+ *                           (default: this repo; empty = no legacy world)
  * @module
  */
 
@@ -45,15 +46,14 @@ import { spawnSync } from 'node:child_process'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { load as parseYaml } from 'js-yaml'
+import semver from 'semver'
 // The deployment set and the profile path resolve in ONE place
 // (scripts/deployment-packages.mjs), shared with dev-apps.mjs / launch-apps.mjs
 // — T1: the set follows the package areas + the naming rule, never `private`
 // or "a lib/ exists".
 import { deploymentPackages, resolveLaunchSource, resolveProfileDir, PROFILE_DEFAULT } from './deployment-packages.mjs'
-// The workspace resolver is the SAME module the checkout wrapper uses (D1): one
-// entry booting the repo root and the other the checkout is exactly the
-// two-worlds defect this shares a fix with.
-import { defaultCheckout } from './launch-apps.mjs'
+// The workspace resolver is the SAME module the launch wrapper uses (D1): one
+// entry for the world, so setup and the launcher cannot disagree.
 import { prepareWorkspace, resolveWorkspace, worldDirOf } from './workspace.mjs'
 import { pnpmInstallArgs } from './pnpm-store.mjs'
 
@@ -92,9 +92,9 @@ function usage() {
     + `  DSH_WORKSPACE   workspace directory (default ~/dsh-workspaces/<profile>;\n`
     + `                  a relative value resolves against the invocation cwd)\n`
     + `  DSH_WORKSPACE_LEGACY  PATH-style separated ('${delimiter}') legacy .dsh-applications/ candidates\n`
-    + `                  (default: this repo + $DSH_CHECKOUT; empty = none)\n`
+    + `                  (default: this repo; empty = none)\n`
     + `\nDaily launch:  pnpm start\n`
-    + `Direct boot:   (cd <workspace> && dsh --profile ${PROFILE_DEFAULT} --no-open)   # cwd = the workspace, not the checkout\n`)
+    + `Direct boot:   (cd <workspace> && dsh --profile ${PROFILE_DEFAULT} --no-open)   # cwd = the workspace, not the repository\n`)
 }
 parseArgs(process.argv.slice(2))
 
@@ -123,11 +123,15 @@ function run(cmd, args, cwd) {
 /** Ensure a directory exists. */
 function ensureDir(dir) { mkdirSync(dir, { recursive: true }) }
 
-/** Verify Node satisfies the repo engine range. */
+/** Verify Node satisfies the engine range the repo manifest declares (the platform's own floor). */
 function checkNode() {
-  const [major, minor] = process.versions.node.split('.').map(Number)
-  if (major < 24 || (major === 24 && minor < 9)) {
-    fail(`Node ${process.version} is too old — this repo needs Node >= 24.9.0 (engines)`)
+  const manifest = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+  const range = manifest.engines?.node
+  if (typeof range !== 'string' || range === '') {
+    fail('package.json has no engines.node; cannot check the Node version this repo requires')
+  }
+  if (!semver.satisfies(process.versions.node, range, { includePrerelease: true })) {
+    fail(`Node ${process.version} is not supported — this repo needs Node ${range} (engines.node; see .nvmrc)`)
   }
 }
 
@@ -344,7 +348,7 @@ function hasOnPath(name) {
 /**
  * Resolve the dsh launch argv AND report what that resolution actually
  * verified (T2): `--launch` goes through the registry/PATH execution line, not
- * the platform checkout, so the wrapper's checkout preflight does not cover it —
+ * the installed npm line, so the wrapper's launch preflight does not cover it —
  * say so instead of implying a check that did not happen. The resolution itself
  * lives in the shared helper so it is testable (`resolveLaunchSource`).
  *
@@ -367,11 +371,12 @@ function launchPlan() {
 
 function main() {
   checkNode()
-  // The world's home, resolved once and printed on every run — this is the
-  // path the booted child runs in, and the same one the checkout wrapper
-  // resolves (D1/D2). `--launch` adopts a legacy world into it before booting.
+  // The workspace and its legacy world directory, resolved once and printed on
+  // every run — this is the path the booted child runs in, and the same one the
+  // launch wrapper resolves (D1/D2). `--launch` adopts a legacy world into it
+  // before booting; application documents live in the harness-home SQLite store.
   const plan = launchPlan()
-  log(`workspace: ${plan.workspaceCwd} (the world lives in ${worldDirOf(plan.workspaceCwd)})`)
+  log(`workspace: ${plan.workspaceCwd} (legacy world directory: ${worldDirOf(plan.workspaceCwd)}; application documents live in the harness-home SQLite store)`)
   if (opts.dryRun) {
     const packages = deploymentPackages(ROOT)
     const realDir = profileDir()
@@ -421,22 +426,22 @@ function main() {
   if (status !== 0) fail(`profile pnpm install failed (exit ${status})`)
 
   if (process.env.DEEPSEEK_API_KEY === undefined || process.env.DEEPSEEK_API_KEY === '') {
-    warn('DEEPSEEK_API_KEY is not set — the inbox/usage apps and the web chat need it; export it or add a .env')
+    warn('DEEPSEEK_API_KEY is not set — the inbox app and the web chat need it; export it or add a .env')
   }
 
   if (opts.launch) {
-    warn('--launch is deprecated; use `pnpm start` for the checkout launch line')
+    warn('--launch is deprecated; use `pnpm start` for the daily launch line')
     // T2: report what the resolution verified (or did not) before booting. The
-    // checkout lane's artifact preflight lives in scripts/launch-apps.mjs; this
-    // path (DSH_BIN → PATH → npx) has no checkout to preflight.
+    // launch wrapper's artifact preflight lives in scripts/launch-apps.mjs; this
+    // path (DSH_BIN → PATH → npx) has no wrapper preflight.
     log(`launch source: ${plan.runtimeSource.source} — ${plan.runtimeSource.note}`)
-    if (!plan.runtimeSource.verified) warn(`${plan.runtimeSource.source} could not be verified locally: the checkout-lane preflight (scripts/launch-apps.mjs) does not cover this execution source`)
+    if (!plan.runtimeSource.verified) warn(`${plan.runtimeSource.source} could not be verified locally: the launch wrapper (scripts/launch-apps.mjs) does not cover this execution source`)
     // The world's fail-closed adoption (D4), the same module the wrapper uses:
-    // the legacy candidates are this repo ($DSH_CHECKOUT's checkout) and the
-    // checkout, and nothing boots until the adoption is complete.
+    // the legacy candidate is this repo, and nothing boots until the adoption
+    // is complete.
     let world
     try {
-      world = prepareWorkspace({ workspace: plan.workspaceCwd, repoRoot: ROOT, checkout: defaultCheckout(process.env) })
+      world = prepareWorkspace({ workspace: plan.workspaceCwd, repoRoot: ROOT })
     } catch (error) {
       fail(String(error.message ?? error))
     }
@@ -445,9 +450,9 @@ function main() {
     const exit = run(plan.runtimeSource.cmd, plan.runtimeSource.args, plan.workspaceCwd)
     process.exit(exit === 0 ? 0 : exit)
   }
-  log(`\nprofile ${opts.profile} is ready. The daily checkout launch goes through the wrapper (T2: client-artifact preflight first):`)
-  log(`\n  node scripts/launch-apps.mjs --checkout ~/deepseek-harness\n`)
-  log(`Direct boot (no preflight) — this exact source, ${plan.runtimeSource.source}: ${plan.runtimeSource.note}`)
+  log(`\nprofile ${opts.profile} is ready. The daily launch goes through the wrapper (T2: client-artifact preflight first):`)
+  log(`\n  pnpm start\n`)
+  log(`Direct boot (no preflight) — this resolved binary, ${plan.runtimeSource.source}: ${plan.runtimeSource.note}`)
   log(`Run it IN the workspace above: ${[plan.runtimeSource.cmd, ...plan.runtimeSource.args].join(' ')}\n`)
 }
 

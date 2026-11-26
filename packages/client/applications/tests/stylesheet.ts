@@ -45,24 +45,34 @@ function declarationsOf(css: string, selector: string): Map<string, string> {
  * Read the installed platform theme's token maps.
  *
  * The theme package is a platform module (not a dependency of this package),
- * so it is located through the pnpm store layout the repository pins.
+ * so it is located through the pnpm store layout the repository pins — at the
+ * EXACT version `deployment.yml` declares. The store keeps every earlier line
+ * after an upgrade, so a name-only lookup could measure last release's palette.
  * @param root - the repository root (vitest runs from it).
  * @returns the light and dark token maps, alias and static namespaces merged
  *   (a later declaration wins, exactly as the cascade resolves them).
- * @throws when the theme package is not installed — a missing palette must
- *   fail loudly, never silently skip the measurement.
+ * @throws when the declared theme package is not installed — a missing palette
+ *   must fail loudly, never silently skip the measurement.
  */
 export function readPlatformTheme(root = process.cwd()): Theme {
+  const declared = /declaredLine:\s*(\S+)/u.exec(
+    readFileSync(join(root, 'packages', 'bundle', 'app-harness', 'deployment.yml'), 'utf8'),
+  )?.[1]
+  if (declared === undefined) throw new Error('deployment.yml carries no platform.declaredLine')
   const store = join(root, 'node_modules', '.pnpm')
-  const directory = readdirSync(store).find(entry => entry.startsWith('@deepseek-ai+dsh-client-ui-theme@'))
-  if (directory === undefined) throw new Error(`the platform theme package is not installed under ${store}`)
-  const bundle = readFileSync(
-    join(store, directory, 'node_modules', '@deepseek-ai', 'dsh-client-ui-theme', 'lib', 'client.js'),
-    'utf8',
-  )
+  const prefix = `@deepseek-ai+dsh-client-ui-theme@${declared}_`
+  const directory = readdirSync(store).find(entry => entry.startsWith(prefix))
+  if (directory === undefined) {
+    throw new Error(`the platform theme package ${declared} is not installed under ${store} — run: node scripts/deps.mjs`)
+  }
+  const styles = join(store, directory, 'node_modules', '@deepseek-ai', 'dsh-client-ui-theme', 'src', 'styles')
+  // The package's own import order: base.css first, design-platform.css later;
+  // `declarationsOf` merges matches in order, so the later block wins exactly
+  // as the cascade resolves it.
+  const css = `${readFileSync(join(styles, 'base.css'), 'utf8')}\n${readFileSync(join(styles, 'design-platform.css'), 'utf8')}`
   return {
-    light: declarationsOf(bundle, 'body'),
-    dark: declarationsOf(bundle, 'body[data-ds-dark-theme]'),
+    light: declarationsOf(css, 'body'),
+    dark: declarationsOf(css, 'body[data-ds-dark-theme]'),
   }
 }
 
@@ -85,22 +95,29 @@ export function resolveToken(theme: ReadonlyMap<string, string>, name: string): 
       current = nested[1]!
       continue
     }
-    return /^#[0-9a-fA-F]{3,8}$/u.test(raw) ? raw : undefined
+    // Source-theme values are rgb() literals; the compiled bundle uses hex.
+    // Accept both so the reader can measure the declared version's source.
+    return /^#[0-9a-fA-F]{3,8}$/u.test(raw) || /^rgba?\(/u.test(raw) ? raw : undefined
   }
   return undefined
 }
 
-/** One `#rgb`/`#rrggbb` colour as its three 0-255 channels. */
-function channelsOf(hex: string): [number, number, number] {
-  const body = hex.slice(1)
+/** One `#rgb`/`#rrggbb` or opaque `rgb()` colour as its three 0-255 channels. */
+function channelsOf(color: string): [number, number, number] {
+  if (color.startsWith('rgb')) {
+    const match = /^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)\s*(?:[,/]\s*[\d.]+\s*)?\)$/u.exec(color)
+    if (match === null) throw new Error(`unsupported colour literal: ${color}`)
+    return [Number(match[1]), Number(match[2]), Number(match[3])]
+  }
+  const body = color.slice(1)
   const full = body.length === 3 ? [...body].map(character => `${character}${character}`).join('') : body
-  if (full.length !== 6) throw new Error(`unsupported colour literal: ${hex}`)
+  if (full.length !== 6) throw new Error(`unsupported colour literal: ${color}`)
   return [0, 2, 4].map(at => Number.parseInt(full.slice(at, at + 2), 16)) as [number, number, number]
 }
 
 /** WCAG relative luminance of one sRGB colour. */
-function luminance(hex: string): number {
-  const [r, g, b] = channelsOf(hex).map((channel) => {
+function luminance(color: string): number {
+  const [r, g, b] = channelsOf(color).map((channel) => {
     const value = channel / 255
     return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4
   }) as [number, number, number]

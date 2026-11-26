@@ -11,19 +11,19 @@
  * and the raw JSON that came with it. A business page reports its own results
  * where the human acted (the workbook's form, the info-hub's failure line), and
  * a successful read is not an announcement. The outcome renderer stays for the
- * explicit debug surface (the management dialog's 调试调用 tab), which is the
+ * explicit debug surface (the management page's developer area), which is the
  * one place whose whole purpose is looking at raw answers.
  * @module @matrix1001/dsh-application-harness-client-applications/client/AppSurface
  */
-import { useEffect, useRef, type ReactNode } from 'react'
-import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
+import { useRef, type ReactNode } from 'react'
+import { Button } from '@matrix1001/dsh-application-harness-client-chrome'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { AppInfo } from '@matrix1001/dsh-application-harness-host-bridge/client'
 import type { ApplicationView, ApplicationViewProps } from './contract.ts'
 import type { ApplicationsState } from './shell.ts'
 import type { ViewportReport } from './viewport.ts'
 import { useSurfaceScroll } from './surface-scroll.ts'
-import { STATUS_KEYS } from './model.ts'
+import { STATUS_KEYS, statusOf } from './model.ts'
 import { PermissionOnboarding } from './PermissionOnboarding.tsx'
 import css from './ApplicationsArea.module.css'
 
@@ -43,6 +43,8 @@ export interface AppSurfaceProps {
   readonly onAllowOnboarding: (appId: string, capabilities: readonly string[], fingerprint: string) => Promise<boolean>
   /** Record the first-run card's "later" answer. */
   readonly onLaterOnboarding: (appId: string, fingerprint: string) => Promise<boolean>
+  /** The management page is showing above the surface; do not also trap focus in the onboarding Modal. */
+  readonly onboardingSuppressed?: boolean
   /** The application whose page is showing. */
   readonly app: AppInfo | undefined
   /** Its registration. */
@@ -64,14 +66,7 @@ export interface AppSurfaceProps {
   readonly onManage: () => void
   /** Open the debug call surface of the CURRENT application. */
   readonly onDebug: (appId: string) => void
-  /**
-   * The page of one application is gone (the human left it, or a re-read
-   * re-keyed it): the framework drops that application's progress take-overs, so
-   * an unfinished call is not hidden by a page that is no longer there and a
-   * remount never inherits a claim it did not make.
-   */
-  readonly onReleaseClaims: (appId: string) => void
-  readonly t: TranslateNS<'applications'>
+    readonly t: TranslateNS<'applications'>
 }
 
 /**
@@ -80,7 +75,7 @@ export interface AppSurfaceProps {
  * @returns the surface element.
  */
 export function AppSurface(props: AppSurfaceProps): ReactNode {
-  const { state, app, view, viewport, anyPage, viewProps, onRetry, onRetryRead, onManage, onManagePermissions, onAllowOnboarding, onLaterOnboarding, onDebug, onReleaseClaims, t } = props
+  const { state, app, view, viewport, anyPage, readEpoch, viewProps, onRetry, onRetryRead, onManage, onManagePermissions, onAllowOnboarding, onLaterOnboarding, onDebug, onboardingSuppressed = false, t } = props
   const apps = state.apps
   // The refusal still has ONE job here: the onboarding card's own approval path
   // re-runs the page's read when it clears a capability refusal. The notice
@@ -105,19 +100,6 @@ export function AppSurface(props: AppSurfaceProps): ReactNode {
       : `${app.id}:${viewport.key}`,
     ready: viewport?.ready === true,
   })
-
-  // A progress take-over belongs to the page that made it, so its lifetime ends
-  // with that page: when the page for this application goes away — the human
-  // left it, or the re-read re-keyed it — the shell drops its claims. An
-  // unfinished call then shows its ordinary row again instead of being hidden
-  // by a page that is no longer there, and a remount starts unclaimed. The
-  // page's identity is the same pair its key is built from below.
-  const pageId = app?.id
-  const readEpoch = props.readEpoch
-  useEffect(() => {
-    if (pageId === undefined) return undefined
-    return () => { onReleaseClaims(pageId) }
-  }, [pageId, readEpoch, onReleaseClaims])
 
   return (
     <div className={css.surface} ref={surface} data-app-surface>
@@ -145,22 +127,17 @@ export function AppSurface(props: AppSurfaceProps): ReactNode {
               )
               : (
                 <>
-                  {app.status !== 'available' && (
-                    <div className={css.state} data-app-state={app.status} data-status={app.status}>
-                      <p>{t(STATUS_KEYS[app.status])}</p>
-                      {app.failure !== undefined && <p className={css.stateReason} role="alert">{app.failure}</p>}
+                  {statusOf(app) !== 'available' && (
+                    <div className={css.state} data-app-state={statusOf(app)} data-status={statusOf(app)}>
+                      <p>{app.reason === 'platform.health-failed' ? t('status.health-failed') : t(STATUS_KEYS[statusOf(app)])}</p>
+                      {app.detail !== undefined && <p className={css.stateReason} role="alert">{app.detail}</p>}
                       <Button size="sm" onClick={onRetry}>{t('state.retry')}</Button>
-                    </div>
-                  )}
-                  {app.status === 'available' && app.health === 'degraded' && (
-                    <div className={css.state} data-app-state="degraded" data-health="degraded">
-                      <p>{t('status.degraded')}</p>
-                      {app.reason !== undefined && <p className={css.stateReason} role="status">{app.reason}</p>}
                     </div>
                   )}
                   {view?.Component !== undefined
                     ? (
                       <>
+                        {!onboardingSuppressed && (
                         <PermissionOnboarding
                           app={app}
                           view={view}
@@ -177,7 +154,10 @@ export function AppSurface(props: AppSurfaceProps): ReactNode {
                           onManage={onManagePermissions}
                           t={t}
                         />
-                        <view.Component key={`${app.id}:${readEpoch}`} {...viewProps(app.id)} />
+                        )}
+                        <div className={css.viewHost} data-app-view-host data-readonly={statusOf(app) !== 'available' ? 'true' : undefined} aria-disabled={statusOf(app) !== 'available'}>
+                          <view.Component key={`${app.id}:${readEpoch}`} {...viewProps(app.id)} />
+                        </div>
                       </>
                     )
                     : (

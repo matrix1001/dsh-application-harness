@@ -98,7 +98,7 @@ describe('registration health and lifecycle', () => {
     const registration = runtime.list()[0]!
     expect(registration.health()).toBe('degraded')
     expect(registration.reason()).toBe('platform.start-failed')
-    expect(registration.failure()).toBe('no storage')
+    expect(registration.detail()).toBe('no storage')
     expect(seen).toContain('broken')
     off()
     const before = seen.length

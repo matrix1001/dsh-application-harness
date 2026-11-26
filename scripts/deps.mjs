@@ -16,7 +16,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { dirname, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { pnpmInstallArgs } from './pnpm-store.mjs'
 
@@ -35,4 +35,10 @@ const extra = process.argv.slice(2)
 const { cmd, prefix } = resolvePnpm()
 const result = spawnSync(cmd, [...prefix, ...pnpmInstallArgs(ROOT, extra)], { cwd: ROOT, stdio: 'inherit' })
 if (result.error !== undefined) throw result.error
-process.exit(result.status ?? 1)
+if (result.status !== 0) process.exit(result.status ?? 1)
+// The client test plane reads a source fixture generated from the installed
+// line (platform client entries are module-table bundles). Refresh it after
+// every install so the tests never run against a stale copy.
+const fixture = spawnSync(process.execPath, [join(ROOT, 'scripts', 'sync-platform-fixture.mjs'), '--ensure'], { cwd: ROOT, stdio: 'inherit' })
+if (fixture.error !== undefined) throw fixture.error
+process.exit(fixture.status ?? 1)

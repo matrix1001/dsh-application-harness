@@ -17,8 +17,9 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
+import { appHostDirs, appViewDirs } from '../package-areas.mjs'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -31,9 +32,9 @@ export function electedAppId(source) {
 /** Every view package: its name, declared row, and the appId its source elects. */
 function viewPackages() {
   const views = []
-  for (const dir of readdirSync(join(ROOT, 'packages/client')).sort()) {
-    const manifestPath = join(ROOT, 'packages/client', dir, 'package.json')
-    const sourcePath = join(ROOT, 'packages/client', dir, 'src/client/index.ts')
+  for (const dir of appViewDirs(ROOT)) {
+    const manifestPath = join(dir, 'package.json')
+    const sourcePath = join(dir, 'src/client/index.ts')
     if (!existsSync(manifestPath) || !existsSync(sourcePath)) continue
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
     const row = manifest.dsh?.appRow
@@ -43,13 +44,11 @@ function viewPackages() {
   return views
 }
 
-/** Every declared application id (`packages/examples/*`'s `dsh.appRow.id`). */
+/** Every declared application id (`apps/<app>/host`'s `dsh.appRow.id`). */
 function applicationIds() {
   const ids = new Set()
-  for (const dir of readdirSync(join(ROOT, 'packages/examples'))) {
-    const manifestPath = join(ROOT, 'packages/examples', dir, 'package.json')
-    if (!existsSync(manifestPath)) continue
-    const row = JSON.parse(readFileSync(manifestPath, 'utf8')).dsh?.appRow
+  for (const dir of appHostDirs(ROOT)) {
+    const row = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')).dsh?.appRow
     if (typeof row?.id === 'string') ids.add(row.id)
   }
   return ids

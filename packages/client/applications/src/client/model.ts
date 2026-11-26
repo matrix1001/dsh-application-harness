@@ -23,6 +23,17 @@ export const RUNTIME_KEYS: Record<import('@matrix1001/dsh-application-harness-ho
   stopping: 'runtime.stopping',
 }
 
+/** Derive the legacy lifecycle caption from the public runtime/activation/reason axis. */
+export function statusOf(app: Pick<AppInfo, 'runtime' | 'activation' | 'health' | 'reason'>): AppStatus {
+  if (app.reason === 'platform.stop-incomplete') return 'stop-incomplete'
+  if (app.reason === 'platform.start-failed' || app.reason === 'platform.health-failed') return 'failed'
+  if (app.activation === 'disabled') return 'stopped'
+  if (app.runtime === 'ready') return 'available'
+  if (app.runtime === 'starting') return 'starting'
+  if (app.runtime === 'stopping') return 'stopping'
+  return 'stopped'
+}
+
 export const STATUS_KEYS: Record<AppStatus, ApplicationsKey> = {
   starting: 'status.starting',
   available: 'status.available',
@@ -48,14 +59,143 @@ export function hasPage(view: ApplicationView | undefined): boolean {
  * @returns true when the first-run prompt should render.
  */
 export function onboardingPending(app: AppInfo | undefined, state: ApplicationsState): boolean {
-  if (app === undefined || app.status !== 'available') return false
+  if (app === undefined || statusOf(app) !== 'available') return false
   if (!state.grantsLoaded || !state.onboardingLoaded) return false
   const capabilities = capabilityNeeds(app)
   if (capabilities.length === 0) return false
   const caller = { kind: 'app', appId: app.id } as const
   if (capabilities.every(need => grantedTo(state.grants, caller, need))) return false
-  const fingerprint = [...capabilities].sort().join('|')
+  const process = app.process
+  const fingerprint = [
+    ...[...capabilities].sort(),
+    ...(process === undefined ? [] : [`process:${process.map(entry => `${entry.executable}:${[...entry.commands].sort().join(',')}:${entry.purpose}`).join(';')}`]),
+  ].join('|')
   return state.onboarding?.apps[app.id]?.fingerprint !== fingerprint
+}
+
+/**
+ * Whether any application-area conversation is waiting for a human answer.
+ *
+ * Session status is owned by the platform conversation UI; this projection is
+ * the shell's fallback when the dock is closed and its tab badge is not on
+ * screen. Normal Sessions outside the application area are intentionally not
+ * included.
+ * @param targets - the application-area conversation targets.
+ * @param statuses - the Session-status snapshot keyed by Session id.
+ * @returns true when one of those Sessions has a pending interaction.
+ */
+export function dockNeedsAnswer(
+  targets: readonly { readonly sessionId: string }[],
+  statuses: ReadonlyMap<string, { readonly pendingInteraction?: unknown }>,
+): boolean {
+  return targets.some(target => statuses.get(target.sessionId)?.pendingInteraction !== undefined)
+}
+
+/** The dock dot tone, in the order the platform's Session facts take precedence. */
+export type DockStatusTone = 'attention' | 'running' | 'failed' | 'unread'
+
+/** The locale key naming one dock dot tone. */
+export type DockStatusLabelKey =
+  | 'dock.statusAttention'
+  | 'dock.statusRunning'
+  | 'dock.statusFailed'
+  | 'dock.statusUnread'
+
+/** The Session facts the dock dot reads (the platform status shape it needs). */
+export interface DockSessionStatus {
+  readonly running?: boolean | undefined
+  readonly pendingInteraction?: unknown
+  readonly completionUnread?: boolean
+  readonly completionFailed?: boolean
+}
+
+/**
+ * Resolve the one dot a dock tab shows, or none.
+ *
+ * Precedence follows the platform status semantics: a pending interaction needs
+ * the human, a running turn is progress, a failed unread turn must not read as
+ * an ordinary new result, and only then does an unread completion show. The
+ * failed state is a separate field because `completionUnread` alone cannot say
+ * whether the turn succeeded.
+ * @param status - the platform status for one Session, when known.
+ * @returns the tone and its locale key, or undefined for an idle Session.
+ */
+export function dockStatusOf(status: DockSessionStatus | undefined): {
+  readonly tone: DockStatusTone
+  readonly labelKey: DockStatusLabelKey
+} | undefined {
+  if (status === undefined) return undefined
+  if (status.pendingInteraction !== undefined) return { tone: 'attention', labelKey: 'dock.statusAttention' }
+  if (status.running === true) return { tone: 'running', labelKey: 'dock.statusRunning' }
+  if (status.completionFailed === true) return { tone: 'failed', labelKey: 'dock.statusFailed' }
+  if (status.completionUnread === true) return { tone: 'unread', labelKey: 'dock.statusUnread' }
+  return undefined
+}
+
+/** The composer guidance this plugin contributes for one Session, by locale key. */
+export type ComposerPlaceholderKey = 'conversation.placeholderApp' | 'conversation.placeholderDevelopment'
+
+/** One composer guidance hint: the key and, for a development Session, its application name. */
+export interface ComposerPlaceholderHint {
+  readonly key: ComposerPlaceholderKey
+  readonly app?: string
+}
+
+/**
+ * Select the composer guidance for one Session.
+ *
+ * The application-area conversation and the development conversation are the
+ * two owner Sessions whose input means something different from an ordinary
+ * chat; every other Session returns undefined and keeps the platform prompt.
+ * @param sessionId - the Session the editor shows.
+ * @param appSessionIds - the remembered application-area Sessions.
+ * @param developmentSessions - the remembered development Session bindings.
+ * @param appName - resolves one application's display name.
+ * @returns the hint, or undefined for an ordinary Session.
+ */
+export function composerPlaceholder(
+  sessionId: string,
+  appSessionIds: readonly string[],
+  developmentSessions: readonly { readonly sessionId: string; readonly appId: string }[],
+  appName: (appId: string) => string,
+): ComposerPlaceholderHint | undefined {
+  if (appSessionIds.includes(sessionId)) return { key: 'conversation.placeholderApp' }
+  const development = developmentSessions.find(entry => entry.sessionId === sessionId)
+  return development === undefined
+    ? undefined
+    : { key: 'conversation.placeholderDevelopment', app: appName(development.appId) }
+}
+
+/** How one application's lifecycle and health read in a compact tab or menu row. */
+export interface AppStatusView {
+  /** The localized status; absent when the application is ready and healthy. */
+  readonly label: string | undefined
+  /** The dot tone the compact surfaces paint. */
+  readonly tone: 'ok' | 'warn' | 'error' | 'idle'
+}
+
+/**
+ * Derive the compact status presentation for one application.
+ * @param app - the application row.
+ * @param t - the applications dictionary.
+ * @returns the optional label and the dot tone.
+ */
+export function statusView(app: Pick<AppInfo, 'runtime' | 'activation' | 'health' | 'reason'>, t: TranslateNS<'applications'>, pendingApproval = false): AppStatusView {
+  // Before the human has answered the first-run capability card, "degraded"
+  // describes the not-yet-approved state in engineering terms and reads like a
+  // fault. The tab says "needs approval" until that decision is made.
+  if (pendingApproval && statusOf(app) === 'available') return { label: t('status.pending').trim(), tone: 'warn' }
+  const status = statusOf(app)
+  if (status === 'available') {
+    if (app.health === 'degraded') return { label: t('status.degraded').trim(), tone: 'warn' }
+    return { label: undefined, tone: 'ok' }
+  }
+  const tone = status === 'failed' || status === 'stop-incomplete'
+    ? 'error'
+    : status === 'stopped'
+      ? 'idle'
+      : 'warn'
+  return { label: t(STATUS_KEYS[status]).trim(), tone }
 }
 
 /**
@@ -67,19 +207,39 @@ export function onboardingPending(app: AppInfo | undefined, state: ApplicationsS
  * @param saved - the human's saved id order (empty = host order).
  * @returns the rows in the order the navigation renders them.
  */
-export function orderApplications(apps: readonly AppInfo[], saved: readonly string[]): readonly AppInfo[] {
+
+
+/**
+ * Split the page applications into the fixed tab strip and the unpinned menu.
+ * With no explicit list every page application is fixed; with one, only the
+ * named rows are fixed and the current application is kept as a temporary tab
+ * when it is not in that list.
+ * @param apps - page applications in host order.
+ * @param pinned - the human's fixed list, or undefined for "all fixed".
+ * @param activeId - the application whose page is showing.
+ * @returns the fixed rows, the unpinned rows and the tabs (fixed + temporary).
+ */
+export function splitPinnedTabs(
+  apps: readonly AppInfo[],
+  pinned: readonly string[] | undefined,
+  activeId: string | undefined,
+): { readonly pinned: readonly AppInfo[]; readonly unpinned: readonly AppInfo[]; readonly tabs: readonly AppInfo[]; readonly temporary: AppInfo | undefined } {
+  if (pinned === undefined) {
+    return { pinned: [...apps], unpinned: [], tabs: [...apps], temporary: undefined }
+  }
+  const fixed: AppInfo[] = []
+  const seen = new Set<string>()
   const byId = new Map(apps.map(app => [app.id, app]))
-  const ordered: AppInfo[] = []
-  for (const id of saved) {
+  for (const id of pinned) {
+    if (seen.has(id)) continue
     const app = byId.get(id)
     if (app === undefined) continue
-    ordered.push(app)
-    byId.delete(id)
+    seen.add(id)
+    fixed.push(app)
   }
-  for (const app of apps) {
-    if (byId.delete(app.id)) ordered.push(app)
-  }
-  return ordered
+  const unpinned = apps.filter(app => !seen.has(app.id))
+  const temporary = activeId === undefined ? undefined : unpinned.find(app => app.id === activeId)
+  return { pinned: fixed, unpinned, temporary, tabs: temporary === undefined ? fixed : [...fixed, temporary] }
 }
 
 /**
@@ -115,6 +275,23 @@ export function moveApplicationBy(ids: readonly string[], id: string, delta: num
   next.splice(from, 1)
   next.splice(to, 0, id)
   return next
+}
+
+/**
+ * The insertion slot under one pointer position: the first row whose midpoint
+ * is to the right of the pointer, or the end when every row is to its left.
+ * Rectangles are in viewport coordinates, exactly as a pointer event reports
+ * them; the caller owns the scroll container.
+ * @param rects - the visible rows, in render order.
+ * @param clientX - the pointer's viewport x.
+ * @returns the insertion index in `0..rects.length`.
+ */
+export function dropIndexAt(rects: readonly { readonly left: number; readonly width: number }[], clientX: number): number {
+  for (let index = 0; index < rects.length; index += 1) {
+    const rect = rects[index]!
+    if (clientX < rect.left + rect.width / 2) return index
+  }
+  return rects.length
 }
 
 /** Whether one registration draws a settings page. */
@@ -239,27 +416,6 @@ export function confirmationSentence(
 }
 
 /**
- * The grants that let OTHER callers reach one application: only the capabilities
- * that name this application (`<appId>#<op>`), never the caller's unrelated ones.
- * One entry per caller, with just the capabilities aimed here.
- */
-export function grantsInto(
-  grants: readonly CapabilityGrant[], appId: string,
-): readonly { readonly caller: Caller; readonly capabilities: readonly string[] }[] {
-  const prefix = `${appId}#`
-  const grouped = new Map<string, { caller: Caller; capabilities: string[] }>()
-  for (const grant of grants) {
-    const here = grant.capabilities.filter(capability => capability.startsWith(prefix))
-    if (here.length === 0) continue
-    const key = callerLabel(grant.caller)
-    const entry = grouped.get(key) ?? { caller: grant.caller, capabilities: [] }
-    entry.capabilities.push(...here.filter(capability => !entry.capabilities.includes(capability)))
-    grouped.set(key, entry)
-  }
-  return [...grouped.values()]
-}
-
-/**
  * Whether two callers are the same PRINCIPAL: an application and its own
  * background work are one (the runtime's own `samePrincipal` rule, so a grant
  * either of them holds counts for both), and anything else compares as itself.
@@ -289,6 +445,7 @@ const CAPABILITY_KEYS: Readonly<Record<string, ApplicationsKey>> = {
   network: 'cap.network',
   model: 'cap.model',
   process: 'cap.process',
+  delegate: 'cap.delegate',
 }
 
 /** The purpose line of one explained capability. */
@@ -297,6 +454,7 @@ const CAPABILITY_PURPOSE_KEYS: Readonly<Record<string, ApplicationsKey>> = {
   network: 'cap.networkPurpose',
   model: 'cap.modelPurpose',
   process: 'cap.processPurpose',
+  delegate: 'cap.delegatePurpose',
 }
 
 /** One declared need, in words a human can decide on. */

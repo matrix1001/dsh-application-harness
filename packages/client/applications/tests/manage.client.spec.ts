@@ -33,7 +33,7 @@ describe('the management request', () => {
     manage.subscribe(listener)
     manage.close()
     expect(listener).not.toHaveBeenCalled()
-    manage.open({ appId: 'workbook', tab: 'info' })
+    manage.open({ appId: 'workbook', tab: 'status' })
     manage.close()
     expect(manage.getSnapshot()).toBeUndefined()
     manage.close()
@@ -49,15 +49,15 @@ describe('the management request', () => {
     opener('permissions')
     // Bound: the page cannot name another application through this callback.
     expect(manage.getSnapshot()).toEqual({ appId: 'workbook', tab: 'permissions' })
-    manage.opener('git-read')('history')
-    expect(manage.getSnapshot()).toEqual({ appId: 'git-read', tab: 'history' })
+    manage.opener('git-read')('data')
+    expect(manage.getSnapshot()).toEqual({ appId: 'git-read', tab: 'data' })
   })
 
   it('keys a position per surface, and drops what the registry no longer has', () => {
     const manage = createManageService()
-    manage.scroll.set(manageScrollKey(undefined, 'permissions'), 40)
-    manage.scroll.set(manageScrollKey('workbook', 'history'), 120)
-    manage.scroll.set(manageScrollKey('git-read', 'info'), 7)
+    manage.scroll.set(manageScrollKey(undefined, 'status'), 40)
+    manage.scroll.set(manageScrollKey('workbook', 'data'), 120)
+    manage.scroll.set(manageScrollKey('git-read', 'status'), 7)
     // A key this vocabulary does not name (an old build's, a typo) has no
     // surface behind it: retaining drops it rather than letting it linger.
     manage.scroll.set('somebody-elses-key', 1)
@@ -66,9 +66,9 @@ describe('the management request', () => {
     // git-read is gone: its position goes with it, the list and the
     // applications still registered keep theirs.
     manage.scroll.retain(new Set(['workbook']))
-    expect(manage.scroll.get(manageScrollKey('git-read', 'info'))).toBeUndefined()
-    expect(manage.scroll.get(manageScrollKey('workbook', 'history'))).toBe(120)
-    expect(manage.scroll.get(manageScrollKey(undefined, 'permissions'))).toBe(40)
+    expect(manage.scroll.get(manageScrollKey('git-read', 'status'))).toBeUndefined()
+    expect(manage.scroll.get(manageScrollKey('workbook', 'data'))).toBe(120)
+    expect(manage.scroll.get(manageScrollKey(undefined, 'status'))).toBe(40)
     expect(manage.scroll.get('somebody-elses-key')).toBeUndefined()
   })
 
@@ -76,10 +76,10 @@ describe('the management request', () => {
     const manage = createManageService()
     const listener = vi.fn()
     const off = manage.subscribe(listener)
-    manage.open({ tab: 'history' })
+    manage.open({ tab: 'data' })
     expect(listener).toHaveBeenCalledTimes(1)
     off()
-    manage.open({ tab: 'info' })
+    manage.open({ tab: 'status' })
     expect(listener).toHaveBeenCalledTimes(1)
   })
 })

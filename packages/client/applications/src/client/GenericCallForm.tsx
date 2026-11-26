@@ -8,7 +8,7 @@
  * @module @matrix1001/dsh-application-harness-client-applications/client/GenericCallForm
  */
 import { useEffect, useState, type ReactNode } from 'react'
-import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button } from '@matrix1001/dsh-application-harness-client-chrome'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { AppInfo, CallOutcome, JsonValue, OpParamSchema } from '@matrix1001/dsh-application-harness-host-bridge/client'
 import { describeError } from './shell.ts'

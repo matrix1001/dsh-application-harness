@@ -15,13 +15,14 @@ import type { ApprovalAsk } from './harness.ts'
 /** The caller's session id; the fake registry resolves exactly this one. */
 const SESSION_ID = 'session-1'
 
-/** A session whose log reads as the given event types, oldest first. */
+/** A session whose platform turn projection reads as the given event types, oldest first. */
 function sessionOf(...events: string[]): Session {
-  return {
-    id: SESSION_ID,
-    seq: events.length,
-    eventAt: (seq: number) => ({ type: events[seq] }),
-  } as unknown as Session
+  let openTurnStartSeq: number | null = null
+  events.forEach((type, seq) => {
+    if (type === 'turn/start') openTurnStartSeq = seq
+    else if (type === 'turn/end') openTurnStartSeq = null
+  })
+  return { id: SESSION_ID, seq: events.length, openTurnStartSeq } as unknown as Session
 }
 
 /** The fake approval service: every ask is recorded, and the scripted outcome answers it. */
@@ -45,6 +46,7 @@ function agentsWith(session: Session | undefined) {
   return {
     currentInitiator: () => (session === undefined ? undefined : { session }),
     get: (id: unknown) => (session === undefined || String(id) !== SESSION_ID ? undefined : { session }),
+    turnBoundaryOf: () => ({ openTurnStartSeq: (session as unknown as { openTurnStartSeq?: number | null } | undefined)?.openTurnStartSeq ?? null }),
   }
 }
 

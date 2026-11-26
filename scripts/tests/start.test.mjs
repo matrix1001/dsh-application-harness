@@ -24,12 +24,18 @@ test('parses start flags and keeps the launcher/dsh arguments intact', () => {
   assert.deepEqual(parsed.forward, ['--profile', 'demo', '--no-open', '--', '--build'])
 })
 
-test('prints help without touching a profile or a checkout', () => {
+test('prints help without touching a profile or the installed line', () => {
   const result = run(['--help'])
   assert.equal(result.status, 0)
   assert.match(result.stdout, /pnpm start/)
   assert.match(result.stdout, /--build/)
   assert.equal(result.stderr, '')
+})
+
+test('refuses the removed platform-checkout flag with a clear message', () => {
+  const result = run(['--checkout', '/tmp/old-checkout'])
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /--checkout is no longer supported/)
 })
 
 test('refuses a missing profile with --no-setup and names the bootstrap command', () => {

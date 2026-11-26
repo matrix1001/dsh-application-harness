@@ -19,11 +19,12 @@
 import type { TypertRemoteNamespaceMap, RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
-  AppCredentialStatus,
-  AppDataExport, AppDataImportPreview, AppDataImportResult, AppDataInfo, AppDataPruneResult, AppInfo, CallOutcome, Caller, CapabilityGrant, ConfirmationDecision, HistoryRecord, JsonValue,
-  AppDataRestorePreview, AppDataRestoreResult, ModelCatalog, ModelLimits, ModelUsageSummary, ObjectRef, ObjectResolution, OnboardingState, PageCommand, OperationPolicy, OperationPolicyEntry, PendingConfirmation, ProgressNotice, TaskSnapshot, WatchEvent,
+  AppDataExport, AppDataImportPreview, AppDataImportResult, AppDataInfo, AppDataPruneResult, AppInfo, CallOutcome, Caller, CapabilityGrant, ConfirmationDecision, DelegationInfo, HistoryRecord, JsonValue,
+  AppDataRestorePreview, AppDataRestoreResult, ModelCatalog, ModelLimits, ModelUsageSummary, ObjectRef, ObjectResolutionResult, OnboardingState, PageCommand, OperationPolicy, OperationPolicyEntry, PendingConfirmation, ProgressNotice, TaskSnapshot, WatchEvent,
 } from '@matrix1001/dsh-application-harness-host-bridge/client'
 import type { ApplicationViewData } from './contract.ts'
+import type { DelegationSendResult } from './delegation.ts'
+import { statusOf } from './model.ts'
 
 /** What a page-command listener answers: boolean, or a result-bearing answer. */
 type PageCommandAnswer = boolean | undefined | { readonly accepted: boolean; readonly error?: string; readonly result?: import('@deepseek-ai/dsh-util-values').JsonValue }
@@ -53,8 +54,6 @@ export interface ApplicationsState {
   readonly apps: readonly AppInfo[] | undefined
   /** The application the panel shows; `undefined` until one is selected. */
   readonly activeAppId: string | undefined
-  /** In-flight calls per application (the count), so a view can disable interactions. */
-  readonly running: ReadonlyMap<string, number>
   /** In-flight calls in start order, the task view's own rows. */
   readonly runningCalls: readonly RunningCall[]
   /** The last settled outcome per application, for the panel's status line. */
@@ -72,14 +71,6 @@ export interface ApplicationsState {
   readonly refusals: ReadonlyMap<string, RefusalCode>
   /** Progress notices, newest first, bounded to {@link PROGRESS_LIMIT}. */
   readonly progress: readonly ProgressNotice[]
-  /**
-   * The ordinary progress rows one application has taken over, by appId: the
-   * call ids whose notices that application's page draws itself
-   * (`ApplicationViewData.claimProgress`). The raw notices stay in
-   * {@link ApplicationsState.progress} — the surface is what stops drawing the
-   * claimed ones, and only that list is ever filtered.
-   */
-  readonly claims: ReadonlyMap<string, ReadonlySet<string>>
   /** Recent call records, newest first; empty until read. */
   readonly history: readonly HistoryRecord[]
   /** Whether the history read has answered for {@link historyTarget}. */
@@ -168,20 +159,18 @@ interface ViewBindings {
   readonly call: ApplicationViewData['call']
   readonly cancel: ApplicationViewData['cancel']
   readonly onChanged: ApplicationViewData['onChanged']
-  readonly claimProgress: ApplicationViewData['claimProgress']
   readonly cancelTask: (taskId: string) => void
   readonly resolveObject: NonNullable<ApplicationViewData['resolveObject']>
+  readonly delegation: NonNullable<ApplicationViewData['delegation']>
 }
 
 const INITIAL: ApplicationsState = {
   apps: undefined,
   activeAppId: undefined,
-  running: new Map(),
   runningCalls: [],
   outcomes: new Map(),
   refusals: new Map(),
   progress: [],
-  claims: new Map(),
   history: [],
   historyLoaded: false,
   historyReading: false,
@@ -245,13 +234,6 @@ interface PendingCall {
 }
 
 /** In-flight counts per application, derived from the pending-call table. */
-function runningOf(pending: ReadonlyMap<string, PendingCall>): ReadonlyMap<string, number> {
-  const counts = new Map<string, number>()
-  for (const call of pending.values()) counts.set(call.appId, (counts.get(call.appId) ?? 0) + 1)
-  return counts
-}
-
-/** In-flight task rows in start order. */
 function runningCallsOf(pending: ReadonlyMap<string, PendingCall>): readonly RunningCall[] {
   return [...pending.entries()].map(([requestId, call]) => ({ requestId, ...call }))
 }
@@ -274,17 +256,10 @@ export class ApplicationsShell {
   /** Change listeners per application (registered views), fanned by `changed` frames and reconnect. */
   private readonly listeners = new Map<string, Set<() => void>>()
   private readonly pageCommandListeners = new Set<(command: PageCommand) => PageCommandAnswer | Promise<PageCommandAnswer>>()
+  private readonly pageClosedListeners = new Set<(notice: { readonly sessionId: string; readonly pageId: string }) => void>()
   private readonly stateListeners = new Set<() => void>()
   /** In-flight calls by requestId → the application they belong to. */
   private readonly pending = new Map<string, PendingCall>()
-  /**
-   * The progress take-overs behind {@link ApplicationsState.claims}: appId →
-   * requestId → the token that identifies that one claim. The token is what a
-   * release matches, so a claim that is already gone (the call settled, the
-   * page unmounted) leaves a late release without a match — it cannot reach a
-   * newer claim that reuses the id.
-   */
-  private readonly claims = new Map<string, Map<string, object>>()
   /** Per-application function bindings, so a view's effects keep their identity. */
   private readonly bindings = new Map<string, ViewBindings>()
   private readonly refusedOperations = new Map<string, Map<string, RefusalCode>>()
@@ -304,10 +279,20 @@ export class ApplicationsShell {
    */
   constructor(
     private readonly remote: ApplicationsRemote,
-    options: { readonly initialAppId?: string | undefined } = {},
+    options: {
+      readonly initialAppId?: string | undefined
+      /** Park one pending delegation for the human's send dialog. */
+      readonly delegationRequest?: (delegation: DelegationInfo) => Promise<DelegationSendResult>
+      /** Show one Session in the platform's main area (the openDelegation action). */
+      readonly openSession?: (sessionId: string) => void
+    } = {},
   ) {
     this.snapshot = { ...INITIAL, activeAppId: options.initialAppId }
+    this.delegationRequest = options.delegationRequest
+    this.openSession = options.openSession
   }
+  private readonly delegationRequest: ((delegation: DelegationInfo) => Promise<DelegationSendResult>) | undefined
+  private readonly openSession: ((sessionId: string) => void) | undefined
 
   // ---- lifecycle ------------------------------------------------------------
 
@@ -355,7 +340,6 @@ export class ApplicationsShell {
     this.listeners.clear()
     this.stateListeners.clear()
     this.pending.clear()
-    this.claims.clear()
     this.bindings.clear()
     this.refusedOperations.clear()
   }
@@ -385,8 +369,8 @@ export class ApplicationsShell {
   }
 
   /** Restore one application from a backup after a preview fingerprint check. */
-  async restoreData(appId: string, backupPath: string, previewFingerprint?: string, planId?: string, requestId?: string): Promise<AppDataRestoreResult> {
-    return await this.remoteValue(() => this.remote.dataRestore(appId, backupPath, previewFingerprint, planId, requestId))
+  async restoreData(appId: string, planId: string, requestId: string): Promise<AppDataRestoreResult> {
+    return await this.remoteValue(() => this.remote.dataRestore(appId, planId, requestId))
   }
 
   /** Export one application's unified-store namespace as JSON. */
@@ -400,8 +384,8 @@ export class ApplicationsShell {
   }
 
   /** Import one application's JSON after a pre-import backup. */
-  async importData(appId: string, json: string, planId?: string, requestId?: string): Promise<AppDataImportResult> {
-    return await this.remoteValue(() => this.remote.dataImport(appId, json, planId, requestId))
+  async importData(appId: string, planId: string, requestId: string): Promise<AppDataImportResult> {
+    return await this.remoteValue(() => this.remote.dataImport(appId, planId, requestId))
   }
 
   /** Retry the reload an import could not complete, and release the app. */
@@ -523,14 +507,18 @@ export class ApplicationsShell {
    *   (a broken carrier, an unmounted method) or when the confirming `list()`
    *   itself failed.
    */
-  async call(appId: string, op: string, args: JsonValue, requestId?: string): Promise<CallOutcome> {
+  async call(appId: string, op: string, args: JsonValue, requestId?: string, sourceAppId?: string): Promise<CallOutcome> {
     const callId = requestId ?? `applications-${crypto.randomUUID()}`
     try {
+      if (sourceAppId !== undefined && sourceAppId !== appId) {
+        return this.refuse(callId, 'cross-app-page', appId, 'is not callable from another application page')
+      }
       const row = (await this.list()).find(candidate => candidate.id === appId)
       if (row === undefined) return this.refuse(callId, 'unknown-app', appId, 'is not registered')
-      if (row.status !== 'available') {
-        const code = row.status === 'stopping' ? 'stopping' : 'unavailable'
-        return this.refuse(callId, code, appId, `is not available (status: ${row.status})`)
+      const status = statusOf(row)
+      if (status !== 'available') {
+        const code = status === 'stopping' ? 'stopping' : 'unavailable'
+        return this.refuse(callId, code, appId, `is not available (status: ${status})`)
       }
       this.begin(callId, appId, op)
       const result = await this.remote.call(appId, op, args, callId)
@@ -543,7 +531,7 @@ export class ApplicationsShell {
       // included (a refusal above, a confirming read that failed): a take-over
       // names one call, and nothing about it may outlive that call — a stale
       // claim would hide the rows of the next call that reuses the id.
-      this.end(callId, appId)
+      this.end(callId)
     }
   }
 
@@ -596,80 +584,6 @@ export class ApplicationsShell {
   }
 
   /**
-   * Take over the ordinary progress rows of one call an application started:
-   * the surface stops drawing that call's notices for as long as the claim
-   * lives (the raw notices stay in the state). The claim is stamped with the
-   * application, so no claim can hide another application's rows — and it is
-   * the PAGE's, so it dies with that page (see
-   * {@link ApplicationsShell.releaseClaims}) and with the call it named (see
-   * {@link ApplicationsShell.end}).
-   * @param appId - the application whose page is claiming.
-   * @param requestId - the id the call was (or is about to be) started with.
-   * @returns the idempotent release; a late one cannot touch a newer claim.
-   */
-  claimProgress(appId: string, requestId: string): () => void {
-    const claims = this.claims.get(appId) ?? new Map<string, object>()
-    this.claims.set(appId, claims)
-    const token = {}
-    claims.set(requestId, token)
-    this.publishClaims()
-    return () => { this.release(appId, requestId, token) }
-  }
-
-  /**
-   * Drop every take-over one application holds: its page is gone (the human
-   * left it, or a re-read re-keyed it), so nothing draws those rows any more —
-   * the ordinary rows come back for the calls that are still running.
-   * @param appId - the application whose page left.
-   */
-  releaseClaims(appId: string): void {
-    if (!this.claims.delete(appId)) return
-    this.publishClaims()
-  }
-
-  /**
-   * Hand one claim back. Only the claim that still holds `token` is dropped: a
-   * second release, or one that arrives after the call settled (or after
-   * {@link ApplicationsShell.releaseClaims}), is a no-op — it can never take
-   * the display away from a newer claim that reuses the id.
-   * @param appId - the application that made the claim.
-   * @param requestId - the call the claim named.
-   * @param token - the identity of that one claim.
-   */
-  private release(appId: string, requestId: string, token: object): void {
-    const claims = this.claims.get(appId)
-    if (claims?.get(requestId) !== token) return
-    this.forgetClaim(appId, requestId)
-    this.publishClaims()
-  }
-
-  /**
-   * Forget one claimed id, whatever token holds it: the call it was made for is
-   * over, so the take-over is over too.
-   * @param appId - the application the claim belongs to.
-   * @param requestId - the call the claim named.
-   * @returns whether the id was claimed.
-   */
-  private forgetClaim(appId: string, requestId: string): boolean {
-    const claims = this.claims.get(appId)
-    if (claims === undefined || !claims.delete(requestId)) return false
-    if (claims.size === 0) this.claims.delete(appId)
-    return true
-  }
-
-  /** The take-over table as the state publishes it (a fresh snapshot per change). */
-  private claimSnapshot(): ReadonlyMap<string, ReadonlySet<string>> {
-    const claims = new Map<string, ReadonlySet<string>>()
-    for (const [appId, ids] of this.claims) claims.set(appId, new Set(ids.keys()))
-    return claims
-  }
-
-  /** Publish the take-over table (a claim or a release changed it). */
-  private publishClaims(): void {
-    this.patch({ claims: this.claimSnapshot() })
-  }
-
-  /**
    * The shell's own half of the props one application's registered view is
    * rendered with: the data surface, and nothing about the page context — that
    * face is composed by the plugin that owns the store (index.ts).
@@ -685,7 +599,7 @@ export class ApplicationsShell {
    */
   viewProps(appId: string): ApplicationViewData {
     const bound = this.bindings.get(appId) ?? this.bind(appId)
-    return { ...bound, running: (this.snapshot.running.get(appId) ?? 0) > 0 }
+    return { ...bound, running: this.snapshot.runningCalls.some(call => call.appId === appId) }
   }
 
   /**
@@ -695,19 +609,118 @@ export class ApplicationsShell {
    */
   private bind(appId: string): ViewBindings {
     const bound: ViewBindings = {
-      call: (op, args, requestId) => this.call(appId, op, args, requestId),
-      resolveObject: async (ref: ObjectRef): Promise<ObjectResolution> => {
+      call: (op, args, requestId) => this.call(appId, op, args, requestId, appId),
+      delegation: {
+        requestSend: async (id) => { await this.offerDelegation(id, appId) },
+        cancel: async (id) => {
+          try {
+            const record = await this.cancelDelegation(id, appId)
+            return record.status === 'ended'
+          } catch (error) {
+            this.fail(error)
+            return false
+          }
+        },
+        open: async (id) => {
+          try {
+            return await this.openDelegation(id, appId)
+          } catch (error) {
+            this.fail(error)
+            return false
+          }
+        },
+      },
+      resolveObject: async (ref: ObjectRef): Promise<ObjectResolutionResult> => {
         const result = await this.remote.resolveObject(ref)
-        if (!result.ok) throw result.error
-        return result.value
+        // A carrier failure is still an answer about the reference: it could
+        // not be checked. Returning the gateway code keeps the page's branch
+        // total instead of turning a transport accident into a page crash.
+        return result.ok
+          ? result.value
+          : { ok: false, error: { code: result.error.code, message: result.error.message } }
       },
       cancel: (requestId) => { this.requestCancel(requestId) },
       onChanged: (listener) => this.onChanged(appId, listener),
-      claimProgress: (requestId) => this.claimProgress(appId, requestId),
       cancelTask: (taskId) => { this.cancelTask(appId, taskId) },
     }
     this.bindings.set(appId, bound)
     return bound
+  }
+
+  // ---- delegations ----------------------------------------------------------
+
+  /**
+   * Read one delegation record through the host (never from a page's copy).
+   * @param id - the delegation.
+   * @param appId - the owning application, when the caller is a page face.
+   */
+  async delegation(id: string, appId?: string): Promise<DelegationInfo> {
+    const record = await this.remoteValue(() => appId === undefined ? this.remote.delegation(id) : this.remote.delegation(id, appId))
+    if (appId !== undefined && record.appId !== appId) throw new Error(`no delegation ${id} for this application`)
+    return record
+  }
+
+  /** Read the host's delegation records, optionally for one application. */
+  async delegations(appId?: string): Promise<readonly DelegationInfo[]> {
+    return await this.remoteValue(() => this.remote.delegations(appId))
+  }
+
+  /**
+   * Send one PENDING delegation to an application-area Session. This is the
+   * human's own action from the send dialog; a page can only ask for the
+   * dialog. The host validates the target Session and the one-live-delegation
+   * rule, and the application page re-reads through its change listener.
+   * @param id - the pending delegation.
+   * @param sessionId - the target application-area Session.
+   * @param supplement - optional user context.
+   * @param appId - the owning application, when the caller is a page face.
+   * @returns the bound record.
+   * @throws when the host refuses (Remote failure), never faked as success.
+   */
+  async sendDelegation(id: string, sessionId: string, supplement?: string, appId?: string): Promise<DelegationInfo> {
+    const record = await this.remoteValue(() => appId === undefined
+      ? this.remote.sendDelegation(id, sessionId, supplement)
+      : this.remote.sendDelegation(id, sessionId, supplement, appId))
+    if (appId !== undefined && record.appId !== appId) throw new Error(`no delegation ${id} for this application`)
+    this.notify([record.appId])
+    return record
+  }
+
+  /**
+   * Cancel one delegation on the human's request (pending or live). The host
+   * records the truthful terminal state; the application page re-reads.
+   * @param id - the delegation.
+   * @param appId - the owning application, when the caller is a page face.
+   * @returns the ended record.
+   */
+  async cancelDelegation(id: string, appId?: string): Promise<DelegationInfo> {
+    const record = await this.remoteValue(() => appId === undefined ? this.remote.cancelDelegation(id) : this.remote.cancelDelegation(id, appId))
+    if (appId !== undefined && record.appId !== appId) throw new Error(`no delegation ${id} for this application`)
+    this.notify([record.appId])
+    return record
+  }
+
+  /**
+   * Show the Session that executes one delegation. The Session identity comes
+   * from the host's own record, so a page cannot ask the shell to open an
+   * arbitrary Session; a delegation with no bound Session answers false.
+   * @param id - the delegation.
+   * @param appId - the owning application, when the caller is a page face.
+   * @returns whether a bound Session was opened.
+   */
+  async openDelegation(id: string, appId?: string): Promise<boolean> {
+    const record = await this.delegation(id, appId)
+    if (record.sessionId === undefined) return false
+    if (this.openSession === undefined) return false
+    this.openSession(record.sessionId)
+    return true
+  }
+
+  /** Park one pending delegation for the human's send dialog. */
+  private async offerDelegation(id: string, appId?: string): Promise<void> {
+    const record = await this.delegation(id, appId)
+    if (record.status !== 'pending') throw new Error(`delegation ${id} is ${record.status}; only a pending delegation can be sent`)
+    await this.delegationRequest?.(record)
   }
 
   /**
@@ -720,6 +733,17 @@ export class ApplicationsShell {
   onPageCommand(listener: (command: PageCommand) => PageCommandAnswer | Promise<PageCommandAnswer>): () => void {
     this.pageCommandListeners.add(listener)
     return () => { this.pageCommandListeners.delete(listener) }
+  }
+
+  /**
+   * Subscribe to a host page instance going away. The notification carries no
+   * authority; it lets the owner client drop page-scoped UI state promptly.
+   * @param listener - the close handler.
+   * @returns the unsubscribe.
+   */
+  onPageClosed(listener: (notice: { readonly sessionId: string; readonly pageId: string }) => void): () => void {
+    this.pageClosedListeners.add(listener)
+    return () => { this.pageClosedListeners.delete(listener) }
   }
 
   /**
@@ -791,6 +815,30 @@ export class ApplicationsShell {
     )
   }
 
+  /**
+   * Run one application's declared health check now (the management page's
+   * explicit "check" action). The host answers the ROWS the check produced, so
+   * the panel paints the mapped runtime/health/reason/detail at once instead of
+   * waiting for the next lifecycle frame. A transport failure or the runtime's
+   * refusal (the application is not available, or held for an import) lands on
+   * the shell's error line and is reported to the caller as `false`.
+   * @param appId - the application to check.
+   * @returns whether the check really applied.
+   */
+  async checkHealth(appId: string): Promise<boolean> {
+    const epoch = this.rowsEpoch
+    let applied = false
+    await this.readAction(async () => {
+      const result = await this.remote.checkHealth(appId)
+      if (!result.ok) throw result.error
+      // A streamed lifecycle snapshot that arrived while the check ran is newer
+      // than the answer; it already superseded this read (the same rule `list` uses).
+      if (epoch === this.rowsEpoch) this.patch({ apps: result.value, error: undefined })
+      applied = true
+    })
+    return applied
+  }
+
   /** Read the live provider/model catalog. */
   async modelCatalog(): Promise<ModelCatalog> {
     const result = await this.remote.modelCatalog()
@@ -803,33 +851,6 @@ export class ApplicationsShell {
     const result = await this.remote.modelUsage(appId)
     if (!result.ok) throw result.error
     return result.value as ModelUsageSummary
-  }
-
-  /** Read the declared credentials' set status (values never cross). */
-  async credentials(appId: string): Promise<readonly AppCredentialStatus[]> {
-    const result = await this.remote.credentials(appId)
-    if (!result.ok) throw result.error
-    return result.value as readonly AppCredentialStatus[]
-  }
-
-  /** Set one declared credential. */
-  async setCredential(appId: string, name: string, value: string): Promise<boolean> {
-    try {
-      const result = await this.remote.setCredential(appId, name, value)
-      return result.ok && result.value
-    } catch {
-      return false
-    }
-  }
-
-  /** Delete one declared credential. */
-  async deleteCredential(appId: string, name: string): Promise<boolean> {
-    try {
-      const result = await this.remote.deleteCredential(appId, name)
-      return result.ok && result.value
-    } catch {
-      return false
-    }
   }
 
   /** Read one application's model limits. */
@@ -1010,7 +1031,7 @@ export class ApplicationsShell {
   }
 
   /** Refuse one call locally, with the runtime's own rejection vocabulary. */
-  private refuse(callId: string, code: 'unknown-app' | 'stopping' | 'unavailable', appId: string, because: string): CallOutcome {
+  private refuse(callId: string, code: 'unknown-app' | 'stopping' | 'unavailable' | 'cross-app-page', appId: string, because: string): CallOutcome {
     const message = `the application "${appId}" ${because} — refused by the shell, the operation was not run`
     const outcome: CallOutcome = { callId, status: 'rejected', error: { code: `platform.${code}`, message } }
     this.settle(appId, outcome)
@@ -1020,28 +1041,20 @@ export class ApplicationsShell {
   /** Mark a call in flight so every reader of `running` sees it. */
   private begin(requestId: string, appId: string, op: string): void {
     this.pending.set(requestId, { appId, op, startedAt: new Date().toISOString() })
-    this.patch({ running: runningOf(this.pending), runningCalls: runningCallsOf(this.pending) })
+    this.patch({ runningCalls: runningCallsOf(this.pending) })
   }
 
   /**
    * Drop one call from the in-flight table, and its progress notices with it:
    * a settled call's last notice is history, and a list of notices that keeps
-   * them would present finished work as still running. A take-over of that call
-   * ends here too — a claim names one call, and nothing about it may outlive the
-   * call for the next one that reuses the id. The application is named (rather
-   * than read off the in-flight table) because every ending runs this, the ones
-   * that never began included.
+   * them would present finished work as still running.
    * @param requestId - the call's id.
-   * @param appId - the application the call was made as.
    */
-  private end(requestId: string, appId: string): void {
+  private end(requestId: string): void {
     this.pending.delete(requestId)
-    const claimed = this.forgetClaim(appId, requestId)
     this.patch({
-      running: runningOf(this.pending),
       runningCalls: runningCallsOf(this.pending),
       progress: this.snapshot.progress.filter(notice => notice.callId !== requestId),
-      ...(claimed ? { claims: this.claimSnapshot() } : {}),
     })
   }
 
@@ -1152,7 +1165,7 @@ export class ApplicationsShell {
       case 'lifecycle':
         this.rowsEpoch += 1
         this.patch({ apps: event.apps })
-        if (event.apps.some(app => app.id === event.appId && app.status === 'available')) this.notify([event.appId])
+        if (event.apps.some(app => app.id === event.appId && statusOf(app) === 'available')) this.notify([event.appId])
         break
       case 'progress':
         this.patch({ progress: [event.notice, ...this.snapshot.progress].slice(0, PROGRESS_LIMIT) })
@@ -1167,6 +1180,9 @@ export class ApplicationsShell {
       }
       case 'page-command':
         void this.dispatchPageCommand(event.command)
+        break
+      case 'page-closed':
+        for (const listener of this.pageClosedListeners) listener({ sessionId: event.sessionId, pageId: event.pageId })
         break
       case 'confirmation':
         this.patch(event.action === 'asked'

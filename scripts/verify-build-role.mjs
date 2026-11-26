@@ -64,6 +64,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { childRowProblems, patchRowsOf } from './descriptor-rows.mjs'
+import { packageDirs } from './package-areas.mjs'
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const BUNDLE = path.join(root, 'packages/bundle/app-harness/package.json')
@@ -73,16 +74,10 @@ const CHILD_PREFIX = '@matrix1001/dsh-application-harness-'
 /** Map every package's `name` to its package.json path. */
 function scanPackageNames() {
   const names = new Map()
-  const groups = fs.readdirSync(path.join(root, 'packages'))
-  for (const group of groups) {
-    const groupDir = path.join(root, 'packages', group)
-    if (!fs.statSync(groupDir).isDirectory()) continue
-    for (const dir of fs.readdirSync(groupDir)) {
-      const pkgPath = path.join(groupDir, dir, 'package.json')
-      if (!fs.existsSync(pkgPath)) continue
-      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'))
-      if (pkg.name) names.set(pkg.name, pkgPath)
-    }
+  for (const dir of packageDirs(root)) {
+    const pkgPath = path.join(dir, 'package.json')
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'))
+    if (pkg.name) names.set(pkg.name, pkgPath)
   }
   return names
 }

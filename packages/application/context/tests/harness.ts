@@ -37,10 +37,10 @@ export interface Host {
  * @param declarations - the applications to register before the plugin mounts.
  * @returns the host.
  */
-export async function host(declarations: readonly AppDeclaration[] = [workbookApp()], appSession = true): Promise<Host> {
+export async function host(declarations: readonly AppDeclaration[] = [notesApp()], appSession = true, developmentApp?: string): Promise<Host> {
   const ctx = new Context()
   applyRuntime(ctx, {})
-  ctx.reflect.provide('appTools', { has: () => appSession } as never)
+  ctx.reflect.provide('appTools', { has: () => appSession, ...(developmentApp === undefined ? {} : { developmentApp: () => developmentApp }) } as never)
   const runtime = ctx.applications
   if (runtime === undefined) throw new Error('test host: the runtime did not mount')
   for (const declaration of declarations) await runtime.register(declaration)
@@ -83,40 +83,40 @@ export function userMessage(text: string): UserMessage {
 }
 
 /**
- * A workbook-shaped application: one AI-open `workbookState` operation
- * answering with the record collections the record table names. The shape is
- * the real application's (`notes`/`tasks`/`events`/`projects` with their own
- * fields), so a fixture exercises the same reading the deployment would.
- * @param state - the collections the operation answers with.
+ * A notes-shaped application using the production record table: one AI-open
+ * `contextState` operation answering `{ notes }`. Notes carry `title` and an
+ * optional `deletedAt`; the lightweight `text`/`deleted` test aliases are
+ * normalized here so existing prose fixtures stay readable.
+ * @param state - the notes collection the operation answers with.
  * @param over - declaration overrides (a failing start, a closed exposure, …).
  * @returns the declaration.
  */
-export function workbookApp(
-  state: {
-    readonly notes?: readonly JsonValue[]
-    readonly tasks?: readonly JsonValue[]
-    readonly events?: readonly JsonValue[]
-    readonly projects?: readonly JsonValue[]
-  } = {},
+export function notesApp(
+  state: { readonly notes?: readonly JsonValue[] } = {},
   over: Partial<AppDeclaration['ops']> = {},
 ): AppDeclaration {
   return {
-    id: 'workbook',
-    name: 'Workbook',
-    description: 'notes, tasks and calendar events over one document',
+    id: 'notes',
+    name: 'Notes',
+    description: 'notes over one document',
     version: '1.2.3',
     ops: {
-      workbookState: {
-        description: 'reads the whole workbook document',
+      contextState: {
+        description: 'reads the notes document',
         params: {},
         result: { type: 'json' },
         exposure: { ai: 'open' },
         effect: 'read',
         execute: () => ({
-          notes: [...(state.notes ?? [])],
-          tasks: [...(state.tasks ?? [])],
-          events: [...(state.events ?? [])],
-          projects: [...(state.projects ?? [])],
+          notes: (state.notes ?? []).map((note) => {
+            if (typeof note !== 'object' || note === null || Array.isArray(note)) return note
+            const record = note as Record<string, JsonValue>
+            return {
+              ...record,
+              ...(record['title'] === undefined && typeof record['text'] === 'string' ? { title: record['text'].split('\n')[0] } : {}),
+              ...(record['deleted'] === true && record['deletedAt'] === undefined ? { deletedAt: 1 } : {}),
+            }
+          }),
         }),
       },
       ...over,

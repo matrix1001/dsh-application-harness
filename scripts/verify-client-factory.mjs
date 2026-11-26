@@ -20,25 +20,13 @@
 import { readFileSync, existsSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, resolve } from 'node:path'
+import { packageDirs } from './package-areas.mjs'
 import vm from 'node:vm'
+import { parseLocalPlatformModules } from './platform-contract.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const PACKAGES_ROOT = join(ROOT, 'packages')
 
-/**
- * Platform seed entries — keep in lockstep with `PLATFORM_MODULES` in
- * `packages/client/tsdown.client.ts` (the loader module table the platform
- * shell shares into every bundle; a seam the table cannot answer is a
- * runtime throw).
- */
-const PLATFORM_MODULES = [
-  'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client', '@deepseek-ai/cordis',
-  'zod', '@tanstack/react-virtual',
-  '@deepseek-ai/dsh-client-store',
-  '@deepseek-ai/dsh-client-ui-slots',
-  '@deepseek-ai/dsh-client-ui-primitives',
-  '@deepseek-ai/dsh-client-ui-dockkit',
-]
+const PLATFORM_MODULES = parseLocalPlatformModules(join(ROOT, 'packages', 'client', 'tsdown.client.ts'))
 
 /** Per-bundle factory evaluation budget. */
 const TIMEOUT_MS = 10_000
@@ -224,15 +212,9 @@ function runNegativeSelfTests() {
 /** Enumerate the workspace client packages (manifest declares dsh.client). */
 function clientPackages() {
   const result = []
-  for (const group of ['application', 'client', 'examples', 'bundle']) {
-    const groupDir = join(PACKAGES_ROOT, group)
-    if (!existsSync(groupDir)) continue
-    for (const dir of readdirSync(groupDir)) {
-      const pkgFile = join(groupDir, dir, 'package.json')
-      if (!existsSync(pkgFile)) continue
-      const manifest = JSON.parse(readFileSync(pkgFile, 'utf8'))
-      if (manifest.dsh?.client !== undefined) result.push({ name: manifest.name, dir: join(groupDir, dir) })
-    }
+  for (const dir of packageDirs(ROOT)) {
+    const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
+    if (manifest.dsh?.client !== undefined) result.push({ name: manifest.name, dir })
   }
   return result
 }

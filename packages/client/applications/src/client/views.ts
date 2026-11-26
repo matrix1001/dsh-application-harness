@@ -12,7 +12,7 @@
  * @module @matrix1001/dsh-application-harness-client-applications/client/views
  */
 
-import { createSnapshotStore, type SnapshotStore } from '@deepseek-ai/dsh-client-store'
+import { createSnapshotStore, type SnapshotStore } from '@matrix1001/dsh-application-harness-client-chrome'
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
 import type { JsonValue } from '@matrix1001/dsh-application-harness-host-bridge/client'
 import type {

@@ -30,7 +30,7 @@ export class ActivationFileStore {
 
   /** Replace the disabled set atomically. */
   async save(disabled: readonly string[]): Promise<void> {
-    await writeVersionedJson(this.path, ACTIVATION_TABLE_VERSION, { disabled: [...disabled] })
+    await writeVersionedJson(this.path, ACTIVATION_TABLE_VERSION, { disabled: [...disabled] }, { allowAfterReadFailure: true })
   }
 }
 

@@ -20,6 +20,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
+import { packageDirs } from './package-areas.mjs'
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const BUNDLE = path.join(root, 'packages/bundle/app-harness/package.json')
@@ -34,19 +35,14 @@ if (typeof releaseVersion !== 'string' || releaseVersion === '') {
 
 const divergents = []
 let checked = 0
-for (const group of fs.readdirSync(path.join(root, 'packages'))) {
-  const groupDir = path.join(root, 'packages', group)
-  if (!fs.statSync(groupDir).isDirectory()) continue
-  for (const dir of fs.readdirSync(groupDir)) {
-    if (`packages/${group}/${dir}` === SHELL) continue
-    const pkgPath = path.join(groupDir, dir, 'package.json')
-    if (!fs.existsSync(pkgPath)) continue
-    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'))
-    if (pkg.private === true) continue // non-published dev-only packages version freely
-    checked += 1
-    if (pkg.version !== releaseVersion) {
-      divergents.push(`${pkg.name ?? pkgPath}: ${pkg.version} (expected ${releaseVersion})`)
-    }
+for (const dir of packageDirs(root)) {
+  const pkgPath = path.join(dir, 'package.json')
+  if (path.relative(root, dir).split(path.sep).join('/') === SHELL) continue
+  const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'))
+  if (pkg.private === true) continue // non-published dev-only packages version freely
+  checked += 1
+  if (pkg.version !== releaseVersion) {
+    divergents.push(`${pkg.name ?? pkgPath}: ${pkg.version} (expected ${releaseVersion})`)
   }
 }
 

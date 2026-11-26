@@ -68,16 +68,16 @@ test('a patch target is not an inserted row, and a named target keeps its disabl
 
 test('the application roster is derived from dsh.appRow declarations, not from a list', () => {
   withFixture((dir) => {
-    const area = join(dir, 'packages', 'examples')
+    const area = join(dir, 'apps')
     const write = (name, manifest) => {
-      mkdirSync(join(area, name), { recursive: true })
-      writeFileSync(join(area, name, 'package.json'), JSON.stringify(manifest))
+      mkdirSync(join(area, name, 'host'), { recursive: true })
+      writeFileSync(join(area, name, 'host', 'package.json'), JSON.stringify(manifest))
     }
     write('beta', { name: '@matrix1001/dsh-application-harness-beta', dsh: { appRow: { id: 'beta', name: '@matrix1001/dsh-application-harness-beta' } } })
     write('alpha', { name: '@matrix1001/dsh-application-harness-alpha', dsh: { appRow: { id: 'alpha', name: '@matrix1001/dsh-application-harness-alpha' } } })
     // A test-only fixture (no appRow) and a directory without a manifest are not applications.
     write('test-only', { name: '@matrix1001/dsh-application-harness-test-only' })
-    mkdirSync(join(area, 'empty'), { recursive: true })
+    mkdirSync(join(area, 'empty', 'host'), { recursive: true })
     assert.deepEqual(appPackagesOf(dir).map((app) => app.id), ['alpha', 'beta'])
     assert.equal(appPackagesOf(join(dir, 'nope')).length, 0)
   })
@@ -127,7 +127,8 @@ test('the generated rows are keyed by the declaring package, not by the row id (
     // id (`client-ui-demo`) names a different package (`…-demo-view`) — the
     // package is the only reliable key.
     write('client', 'demo-view', { name: '@matrix1001/dsh-application-harness-demo-view', dsh: { appRow: { id: 'client-ui-demo', name: '@matrix1001/dsh-application-harness-demo-view' } } })
-    write('examples', 'demo-app', { name: '@matrix1001/dsh-application-harness-demo', dsh: { appRow: { id: 'demo', name: '@matrix1001/dsh-application-harness-demo' } } })
+    mkdirSync(join(dir, 'apps', 'demo', 'host'), { recursive: true })
+    writeFileSync(join(dir, 'apps', 'demo', 'host', 'package.json'), JSON.stringify({ name: '@matrix1001/dsh-application-harness-demo', dsh: { appRow: { id: 'demo', name: '@matrix1001/dsh-application-harness-demo' } } }))
     write('application', 'plain', { name: '@matrix1001/dsh-application-harness-plain' })
     assert.deepEqual(appRowPackagesOf(dir), ['@matrix1001/dsh-application-harness-demo', '@matrix1001/dsh-application-harness-demo-view'])
     assert.deepEqual(appRowPackagesOf(join(dir, 'nope')), [])

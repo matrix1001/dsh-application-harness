@@ -46,6 +46,23 @@ const TOKEN = new RegExp(
 /** One application reference: the user is talking about the application itself. */
 const APP_TOKEN = /(?<![\w@])@app:([a-z][a-z0-9-]*)(?![\w:-])/gu
 
+/** One page token with the position needed to merge it with application tokens. */
+function scanPageTokens(text: string): Array<{ index: number; reference: PageReference }> {
+  const found: Array<{ index: number; reference: PageReference }> = []
+  for (const match of text.matchAll(TOKEN)) {
+    const appId = match[1] as string
+    const kind = match[2]
+    const id = match[3]
+    found.push({
+      index: match.index as number,
+      reference: kind === undefined || id === undefined
+        ? { appId }
+        : { appId, record: { appId, kind: kind as PageRecordKind, id } },
+    })
+  }
+  return found
+}
+
 /**
  * Every citation in one text value, in first-appearance order.
  *
@@ -55,22 +72,13 @@ const APP_TOKEN = /(?<![\w@])@app:([a-z][a-z0-9-]*)(?![\w:-])/gu
  * @returns the citations, deduplicated in first-appearance order.
  */
 export function parsePageTokens(text: string): PageReference[] {
-  const references: PageReference[] = []
   const seen = new Set<string>()
-  for (const match of text.matchAll(TOKEN)) {
-    // The pattern's first group is mandatory, so a match always carries an
-    // appId; the record half is present only when both its groups matched.
-    const appId = match[1] as string
-    const kind = match[2]
-    const id = match[3]
-    const reference: PageReference = kind === undefined || id === undefined
-      ? { appId }
-      // The kind group IS the kinds list the pattern was built from.
-      : { appId, record: { kind: kind as PageRecordKind, id } }
-    const key = citationKey(reference)
+  const references: PageReference[] = []
+  for (const match of scanPageTokens(text)) {
+    const key = citationKey(match.reference)
     if (seen.has(key)) continue
     seen.add(key)
-    references.push(reference)
+    references.push(match.reference)
   }
   return references
 }
@@ -113,16 +121,8 @@ export function parseAppTokens(text: string): AppReference[] {
  * @returns the references, deduplicated by kind and identity.
  */
 export function parseReferences(text: string): Reference[] {
-  const found: Array<{ index: number; reference: Reference }> = []
-  for (const match of text.matchAll(TOKEN)) {
-    const appId = match[1] as string
-    const kind = match[2]
-    const id = match[3]
-    const reference: Reference = kind === undefined || id === undefined
-      ? { source: 'page', appId }
-      : { source: 'page', appId, record: { kind: kind as PageRecordKind, id } }
-    found.push({ index: match.index as number, reference })
-  }
+  const found: Array<{ index: number; reference: Reference }> = scanPageTokens(text)
+    .map(({ index, reference }) => ({ index, reference: { source: 'page' as const, ...reference } }))
   for (const match of text.matchAll(APP_TOKEN)) {
     found.push({ index: match.index as number, reference: { source: 'app', appId: match[1] as string } })
   }

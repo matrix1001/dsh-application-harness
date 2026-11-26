@@ -12,6 +12,12 @@
 
 /** The retained Session reference the pane holds until it closes. */
 export interface ConversationSession {
+  /**
+   * The platform Session identity, when the retained reference exposes it (the
+   * real one does). The delegation send dialog needs the id of a NEW session
+   * exactly once, before the pane picks it up.
+   */
+  readonly sessionId?: string
   /** Release this pane's reference once. */
   release(): void
 }

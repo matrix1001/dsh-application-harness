@@ -10,13 +10,23 @@
  * @module @matrix1001/dsh-application-harness-client-applications/client/ApplicationsConversation
  */
 import type { PropsRenderFactories, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { ConversationViewsProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type { ConversationViewsProps, WorkspaceSelectedHandler } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { ReactNode } from 'react'
+
+/** The business face injected into the application page's Conversation seat. */
+export interface ApplicationsConversationInjected {
+  /** Handle a Workspace picked in the embedded hero through the platform navigation. */
+  openWorkspace: WorkspaceSelectedHandler
+}
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface SlotMap {
     /** Session-scoped Conversation hosted by the application page's right pane. */
-    'applications.conversation': { kind: 'single'; scope: 'session' }
+    'applications.conversation': {
+      kind: 'single'
+      scope: 'session'
+      inject: ApplicationsConversationInjected
+    }
   }
 }
 
@@ -34,10 +44,15 @@ export type ConversationPanelProps = PropsRuntime<'applications.conversation'> &
  * @returns the embedded Conversation content.
  */
 export function ConversationPanel({
-  sessionId, useSession, useConversation, useSessions, renderFactorySlot,
+  sessionId, useSession, useConversation, useSessions, renderFactorySlot, openWorkspace,
 }: ConversationPanelProps): ReactNode {
   const session = useSession(value => value)
-  const conversation = useConversation(value => value)
+  // Embedders and the slot test runtime may render this seat without the
+  // conversation hook; the panel then has no targets yet, which is the same
+  // state as a blank Session.
+  const conversation = typeof useConversation === 'function'
+    ? useConversation(value => value)
+    : { activeTargets: new Set<string>() }
   const active = conversation.activeTargets.size > 0
     || (!session.blank && !session.awaitingFirstTurn)
     || session.running
@@ -46,7 +61,9 @@ export function ConversationPanel({
   const settling = shellPhase === 'blank' && session.openState === 'loading' && summaryBlank !== true
   const hero = shellPhase === 'blank' && (session.openState === 'open' || summaryBlank === true)
   const phase = settling ? 'settling' : hero ? 'hero' : 'active'
-  return renderFactorySlot('conversation.content', { variant: 'embedded', phase, hero }, {
+  return renderFactorySlot('conversation.content', {
+    variant: 'embedded', phase, hero, onWorkspaceSelected: openWorkspace,
+  }, {
     slots: { views: FixedChatConversationView },
   })
 }

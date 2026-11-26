@@ -21,11 +21,11 @@ declare module '@deepseek-ai/dsh-llm' {
 }
 
 /** Stable model-call failure codes. */
-export type ModelCallCode = 'model-unavailable' | 'model-failed' | 'model-invalid-output' | 'model-limit-exceeded'
+export type ModelCallCode = 'platform.model-unavailable' | 'platform.model-failed' | 'platform.model-invalid-output' | 'platform.model-limit-exceeded'
 
 /** No model service or no configured model route. */
 export class ModelUnavailableError extends Error {
-  readonly code = 'model-unavailable' as const
+  readonly code = 'platform.model-unavailable' as const
   constructor(message: string) { super(message); this.name = 'ModelUnavailableError' }
 }
 
@@ -33,7 +33,7 @@ export class ModelUnavailableError extends Error {
 export class ModelCallError extends Error {
   constructor(
     /** Stable code the application can branch on. */
-    readonly code: Exclude<ModelCallCode, 'model-unavailable'>,
+    readonly code: Exclude<ModelCallCode, 'platform.model-unavailable'>,
     message: string,
   ) {
     super(message)
@@ -58,7 +58,7 @@ export interface ModelAskRequest<T = string> {
   /** Sampling temperature. */
   readonly temperature?: number
   /**
-   * Decode the text answer. A throw becomes `model-invalid-output`; without a
+   * Decode the text answer. A throw becomes `platform.model-invalid-output`; without a
    * decoder the result carries only text.
    */
   readonly parse?: (text: string) => T
@@ -115,7 +115,7 @@ export function createPlatformModelPort(ctx: Context, appId?: string): ModelPort
               try {
                 release = await gate.begin(appId, request.background === true)
               } catch (error) {
-                throw new ModelCallError('model-limit-exceeded', error instanceof Error ? error.message : String(error))
+                throw new ModelCallError('platform.model-limit-exceeded', error instanceof Error ? error.message : String(error))
               }
             }
           }
@@ -139,10 +139,10 @@ export function createPlatformModelPort(ctx: Context, appId?: string): ModelPort
           const assembler = new BlockAssembler()
           for await (const chunk of llm.stream(options)) assembler.push(chunk)
           const finish = assembler.finish
-          if (finish.kind === 'error') throw new ModelCallError('model-failed', `the model call failed (${finish.failure.code}): ${finish.failure.message}`)
+          if (finish.kind === 'error') throw new ModelCallError('platform.model-failed', `the model call failed (${finish.failure.code}): ${finish.failure.message}`)
           if (finish.kind === 'aborted') {
             if (request.signal?.aborted === true) throw cancelled('the model call was cancelled by the caller')
-            throw new ModelCallError('model-failed', `the model call was aborted (${finish.failure.code}): ${finish.failure.message}`)
+            throw new ModelCallError('platform.model-failed', `the model call was aborted (${finish.failure.code}): ${finish.failure.message}`)
           }
           const text = textBlocks(assembler.blocks())
           let structured: T | undefined
@@ -150,7 +150,7 @@ export function createPlatformModelPort(ctx: Context, appId?: string): ModelPort
             try {
               structured = request.parse(text)
             } catch (error) {
-              throw new ModelCallError('model-invalid-output', `the model answer did not validate: ${String((error as Error)?.message ?? error)}`)
+              throw new ModelCallError('platform.model-invalid-output', `the model answer did not validate: ${String((error as Error)?.message ?? error)}`)
             }
           }
           usageValue = usageOf(assembler.usage)

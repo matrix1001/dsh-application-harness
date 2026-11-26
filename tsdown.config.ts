@@ -20,15 +20,13 @@ function isBuildFaceClient(value: unknown): boolean {
  * environment into `env`, so the shell-prefixed second build pass must still
  * select the client face.
  *
- * The Typert generator follows the runtime line: a built platform checkout
- * (`$DSH_HARNESS_REPO` / `~/deepseek-harness`) supplies it, and the published
- * package is the no-checkout fallback CI rides; see
- * `scripts/platform-checkout.mjs` for the rule and why a silent fallback is
- * refused.
+ * The build reads the published `@deepseek-ai/dsh-typert-generator` from
+ * `node_modules` — the same generator CI and a release use. There is no
+ * checkout line to diverge from.
  */
 export const HOST_WORKSPACE = [
   'packages/application/*',
-  'packages/examples/*',
+  'apps/*/host',
   'packages/bundle/app-harness',
 ] as const
 
@@ -36,20 +34,17 @@ const CLIENT_WORKSPACE = [
   'packages/client/applications',
   'packages/client/chrome',
   'packages/client/object-reference',
-  'packages/client/notes-view',
-  'packages/client/tasks-view',
-  'packages/client/calendar-view',
-  'packages/client/inbox-view',
-  'packages/client/usage-view',
-  'packages/client/disk-space-view',
-  'packages/client/git-browser-view',
-  'packages/client/workspace-review-view',
+  'apps/*/view',
 ] as const
 
 export default defineConfig(({ env }) => {
   const client = isBuildFaceClient(env?.DSH_BUILD_FACE ?? process.env.DSH_BUILD_FACE)
   return {
     workspace: [...HOST_WORKSPACE, ...CLIENT_WORKSPACE],
+    // The typert protocol runtime package is a peer and must stay external
+    // rather than be inlined as a .d.ts.
+    deps: { neverBundle: [/^@deepseek-ai\/dsh-typert-protocol(?:\/.*)?$/] },
+    tsconfig: false,
     entry: client ? '' : ['lib/types/{index,atomic,sqlite-store}.js'],
     outDir: 'lib',
     format: ['esm'],

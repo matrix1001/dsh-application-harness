@@ -43,7 +43,7 @@ export type {
   AppContextEntry, AppContextSource, AppReadOp, AppReference, PageContextEntry, PageContextSource, PageRecordFacts,
   PageRecordKind, PageRecordReference, PageReference, Reference,
 } from './types.ts'
-export { PAGE_RECORD_SOURCES, EXCERPT_CHARS } from './records.ts'
+export { PAGE_RECORD_SOURCES } from './records.ts'
 export type { PageLookup, PageRecordSource } from './records.ts'
 export { parseAppTokens, parsePageTokens, parseReferences } from './token.ts'
 
@@ -101,6 +101,12 @@ export interface AppReadScopeService {
    * @param sessionId - the conversation Session.
    */
   clear(sessionId: string): void
+  /**
+   * Revoke the Session's current turn scope on the human's request. Later
+   * reads and calls in this turn are refused; the turn end still clears it.
+   * @param sessionId - the conversation Session.
+   */
+  revoke(sessionId: string): void
 }
 
 /** The host-side current-page store for application conversations. */
@@ -183,6 +189,7 @@ export function apply(ctx: Context, _config: Config = {}): void {
     allows: (sessionId, appId) => turnApps(sessionId).has(appId),
     list: (sessionId) => [...turnApps(sessionId)],
     clear: sessionId => { turnScopes.delete(sessionId); currentTurns.delete(sessionId) },
+    revoke: sessionId => { turnScopes.delete(sessionId); currentTurns.delete(sessionId) },
   }
   ctx.provide('appReadScope', readScope)
   const contextService: AppConversationContextService = {
@@ -198,18 +205,20 @@ export function apply(ctx: Context, _config: Config = {}): void {
     // A rejected step admits no messages: there is nothing to attach context to.
     if (decision.kind === 'reject') return decision
     const ambient = contextService.get(agent.session.id)
-    const referenced = referencedAppIds(decision.messages)
-    currentTurns.set(agent.session.id, turn)
-    for (const appId of referenced) readScope.allow(agent.session.id, turn, appId)
     // Page context belongs to application/development conversations only; an
     // ordinary conversation reaches applications through the turn's @ scope.
-    const appSession = (ctx.get('appTools') as { has?: (id: string) => boolean } | undefined)?.has?.(agent.session.id) === true
+    const appTools = ctx.get('appTools') as { has?: (id: string) => boolean; developmentApp?: (id: string) => string | undefined } | undefined
+    const appSession = appTools?.has?.(agent.session.id) === true
+    const developmentApp = appTools?.developmentApp?.(agent.session.id)
+    const referenced = referencedAppIds(decision.messages, appSession)
+    currentTurns.set(agent.session.id, turn)
+    for (const appId of referenced) readScope.allow(agent.session.id, turn, appId)
     // Only the application conversation and development sessions carry page
     // context. An ambient pointer alone is not enough: an ordinary session can
     // never opt into a page by writing one, and its turn `@` scope is the only
     // application access path.
     let messages = appSession
-      ? await preparePageContext(runtime, agent, decision.messages, signal, ambient)
+      ? await preparePageContext(runtime, agent, decision.messages, signal, ambient, developmentApp)
       : [...decision.messages]
     messages = await prepareAppContext(runtime, messages)
     return { ...decision, messages }
@@ -248,8 +257,9 @@ export async function preparePageContext(
   messages: readonly UserMessage[],
   signal: AbortSignal,
   ambient?: AppConversationPage | undefined,
+  developmentApp?: string | undefined,
 ): Promise<UserMessage[]> {
-  const caller: Caller = { kind: 'ai', sessionId: agent.session.id }
+  const caller: Caller = { kind: 'ai', sessionId: agent.session.id, ...(developmentApp === undefined ? {} : { developmentApp }) }
   const prepared = await Promise.all(messages.map(async (message): Promise<UserMessage[]> => {
     // Only the human's own messages carry citations. An injected context that
     // happens to name a page is not a new citation, and neither is a message
@@ -258,7 +268,11 @@ export async function preparePageContext(
     if (message.source.kind !== 'user') return [message]
     const citations = citationsOf(message.content)
     if (citations.length === 0) return [message]
-    const entries = await Promise.all(citations.map(async (citation) => await verify(runtime, caller, citation, signal)))
+    // A development Session is bound to ONE application; a citation for
+    // another application is not verified at all, not even as unavailable.
+    const inScope = citations.filter(citation => developmentApp === undefined || citation.appId === developmentApp)
+    if (inScope.length === 0) return [message]
+    const entries = await Promise.all(inScope.map(async (citation) => await verify(runtime, caller, citation, signal)))
     const verified = entries.filter((entry): entry is PageContextEntry => entry !== undefined)
     // Every citation was unverifiable: the message passes through untouched and
     // the model falls back to an ordinary query.
@@ -270,6 +284,7 @@ export async function preparePageContext(
   // on by default. It is still a verified, bounded snapshot, and the browser
   // chip is what the human sees; this only adds the model-facing section.
   if (ambient === undefined || !messages.some(message => message.source.kind === 'user')) return flat
+  if (developmentApp !== undefined && ambient.appId !== developmentApp) return flat
   const entry = await verify(runtime, caller, {
     appId: ambient.appId,
     ...(ambient.record === undefined ? {} : { record: ambient.record }),
@@ -294,7 +309,7 @@ export async function preparePageContext(
  * @param messages - the messages one admitted step carries.
  * @returns the referenced app ids, in first-appearance order.
  */
-function referencedAppIds(messages: readonly UserMessage[]): string[] {
+function referencedAppIds(messages: readonly UserMessage[], includePageReferences: boolean): string[] {
   const seen = new Set<string>()
   const appIds: string[] = []
   for (const message of messages) {
@@ -302,6 +317,7 @@ function referencedAppIds(messages: readonly UserMessage[]): string[] {
     for (const block of message.content) {
       if (block.type !== 'text') continue
       for (const reference of parseReferences(block.text)) {
+        if (reference.source !== 'app' && !includePageReferences) continue
         if (seen.has(reference.appId)) continue
         seen.add(reference.appId)
         appIds.push(reference.appId)
@@ -325,16 +341,7 @@ export async function prepareAppContext(
 ): Promise<UserMessage[]> {
   const prepared = await Promise.all(messages.map(async (message): Promise<UserMessage[]> => {
     if (message.source.kind !== 'user') return [message]
-    const appIds: string[] = []
-    const seen = new Set<string>()
-    for (const block of message.content) {
-      if (block.type !== 'text') continue
-      for (const reference of parseReferences(block.text)) {
-        if (reference.source !== 'app' || seen.has(reference.appId)) continue
-        seen.add(reference.appId)
-        appIds.push(reference.appId)
-      }
-    }
+    const appIds = referencedAppIds([message], false)
     if (appIds.length === 0) return [message]
     return [message, appContextMessage(appIds.map(appId => appEntryOf(runtime, appId)))]
   }))

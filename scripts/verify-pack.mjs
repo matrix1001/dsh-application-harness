@@ -20,9 +20,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { dirname, join, normalize, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { packageDirs } from './package-areas.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const PACKAGES_ROOT = join(ROOT, 'packages')
 
 /** Per-tarball size cap, tunable via env; never silently relaxed. */
 const MAX_BYTES = Number(process.env.DSH_PACK_MAX_BYTES ?? 10 * 1024 * 1024)
@@ -140,6 +140,13 @@ function checkPackage(dir) {
       for (const item of listing) {
         if (!item.endsWith('.js')) continue
         const source = readFileSync(join(extracted, 'package', item), 'utf8')
+        // Unix build roots only: a drive-letter match would also hit CSS
+        // escapes such as `content:"\f"` and report every stylesheet. The
+        // leading boundary matters: a repo-relative id such as
+        // `apps/home/view/...` contains `/home/` but is not an absolute path.
+        if (/(?:^|[\s"'`(=:,])\/(?:home|Users)\/[^/\s"'`]+\//u.test(source)) {
+          problems.push(`${item} contains a build-machine absolute path`)
+        }
         for (const specifier of relativeImportsOf(source)) {
           const resolved = normalize(join(dirname(item), specifier))
           if (!listing.includes(resolved)) {
@@ -169,6 +176,7 @@ function runNegativeSelfTests() {
     ['forbidden map ships', { exports: {}, files: ['lib'] }, ['lib/index.js', 'lib/index.js.map'], /forbidden artifact ships: lib\/index\.js\.map/],
     ['undeclared declaration map ships', { exports: {}, files: ['lib'] }, ['lib/types.d.ts', 'lib/types.d.ts.map'], /forbidden artifact ships: lib\/types\.d\.ts\.map/],
     ['unshipped relative import', { exports: {}, files: ['lib/index.js'] }, [{ file: 'lib/index.js', content: 'import { a } from "./types-abc123.js"\nexport { a }' }], /imports "\.\/types-abc123\.js", which the tarball does not ship/],
+    ['absolute build path', { exports: {}, files: ['lib/index.js'] }, [{ file: 'lib/index.js', content: 'const p = "/home/user/checkout/file"' }], /build-machine absolute path/],
   ]
   try {
     for (const [label, manifest, create, pattern] of cases) {
@@ -185,7 +193,18 @@ function runNegativeSelfTests() {
         throw new Error(`negative self-test "${label}" did not trip the checker (got: ${problems.join('; ') || 'no problems'})`)
       }
     }
-    console.log(`  ✓ ${cases.length} negative self-tests all trip the checker`)
+    // Positive guard: a repo-relative app id under apps/home/ is not a
+    // build-machine path and must not be flagged (the false positive this
+    // check shipped with).
+    const relativeDir = join(dest, 'relative-home-app')
+    mkdirSync(join(relativeDir, 'lib'), { recursive: true })
+    writeFileSync(join(relativeDir, 'package.json'), JSON.stringify({ name: 'selftest-relative', version: '0.0.0', exports: {}, files: ['lib'] }))
+    writeFileSync(join(relativeDir, 'lib', 'client.js'), 'const id = "apps/home/view/src/client/HomeView.module.css.mjs"\nexport { id }')
+    const relativeResult = checkPackage(relativeDir)
+    if (relativeResult.problems.some(problem => /build-machine absolute path/u.test(problem))) {
+      throw new Error(`positive self-test: a repo-relative apps/home path was flagged as absolute (${relativeResult.problems.join('; ')})`)
+    }
+    console.log(`  ✓ ${cases.length} negative self-tests all trip the checker; relative apps/home path is not absolute`)
   } finally {
     rmSync(dest, { recursive: true, force: true })
   }
@@ -194,18 +213,10 @@ function runNegativeSelfTests() {
 function main() {
   console.log('verify-pack: packing workspace packages and checking tarballs')
   runNegativeSelfTests()
-  const packages = []
-  for (const group of ['application', 'client', 'examples', 'bundle']) {
-    const groupDir = join(PACKAGES_ROOT, group)
-    if (!existsSync(groupDir)) continue
-    for (const dir of readdirSync(groupDir)) {
-      const pkgFile = join(groupDir, dir, 'package.json')
-      if (!existsSync(pkgFile)) continue
-      const manifest = JSON.parse(readFileSync(pkgFile, 'utf8'))
-      if (manifest.private === true) continue
-      packages.push(join(groupDir, dir))
-    }
-  }
+  const packages = packageDirs(ROOT).filter((dir) => {
+    const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
+    return manifest.private !== true
+  })
   if (packages.length === 0) {
     console.error('no publishable packages found')
     process.exit(1)

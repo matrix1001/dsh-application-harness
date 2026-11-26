@@ -16,6 +16,7 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { AppError, apply as applyRuntime } from '@matrix1001/dsh-application-harness-runtime'
 import type { ApplicationRuntime } from '@matrix1001/dsh-application-harness-runtime'
 import type { AppDeclaration } from '@matrix1001/dsh-application-harness-runtime/types'
+import AppStore from '@matrix1001/dsh-application-harness-store'
 import ApplicationBridge from '../src/index.ts'
 import type { Config } from '../src/index.ts'
 
@@ -43,14 +44,16 @@ export interface Host {
   readonly historyPath: string
   /** The durable task-projection file this host was mounted with. */
   readonly tasksPath: string
-  /** The secret store this host was mounted with. */
-  readonly secretsPath: string
   /** The unified store path this host's data page reads. */
   readonly dataPath: string
   /** The host-owned application-conversation record path. */
   readonly conversationPath: string
+  /** The durable delegation record this host was mounted with. */
+  readonly delegationsPath: string
   /** Unload the row: the bridge stops every application and closes its streams. */
   readonly dispose: () => Promise<void>
+  /** The single application-data owner this host mounted. */
+  readonly appStore: AppStore
 }
 
 /** The optional platform services the in-session confirmation route resolves through. */
@@ -67,6 +70,8 @@ export interface SessionServices {
   readonly agents?: {
     get?(id: unknown): unknown
     currentInitiator?(): unknown
+    /** The platform projection the confirmation route reads for the open-turn precondition. */
+    turnBoundaryOf?(session: unknown): { readonly openTurnStartSeq: unknown }
   }
 }
 
@@ -92,6 +97,8 @@ export interface HarnessOptions {
   readonly policiesPath?: string
   /** Mount the bridge over this disabled-application set. */
   readonly activationPath?: string
+  /** Register rows before the bridge's activation read settles (boot-race coverage). */
+  readonly preActivation?: boolean
   /** Mount the bridge over this development-session record. */
   readonly developmentPath?: string
   /** Mount the bridge over this model-selection table. */
@@ -110,12 +117,22 @@ export interface HarnessOptions {
   readonly historyPath?: string
   /** Mount the bridge over this task-projection file instead of a fresh temp file. */
   readonly tasksPath?: string
-  /** Mount the bridge over this secret store instead of a fresh temp file. */
-  readonly secretsPath?: string
   /** Mount the bridge over this unified-store database (null = omit the config and use the row default). */
   readonly dataPath?: string | null
   /** Mount the bridge over this application-conversation record. */
   readonly conversationPath?: string
+  /**
+   * Mount the bridge over this delegation record, or `null` to omit the config
+   * and use the row's own default under the harness home (only for the case
+   * that asserts that default, with `DSH_HOME` pointed at a temp home first).
+   */
+  readonly delegationsPath?: string | null
+  /**
+   * Receive the bridge's warning lines from the moment its own stores load, so
+   * a case can prove a startup recovery failure is reported rather than
+   * silently dropped.
+   */
+  readonly warn?: (line: string) => void
 }
 
 /**
@@ -129,6 +146,10 @@ export interface HarnessOptions {
  */
 export async function host(apps: readonly AppDeclaration[] = [], services: SessionServices = {}, options: HarnessOptions = {}): Promise<Host> {
   const ctx = new Context()
+  if (options.warn !== undefined) {
+    const warn = options.warn
+    ctx.logger.warn = ((...args: unknown[]) => { warn(args.map(String).join(' ')) }) as typeof ctx.logger.warn
+  }
   if (services.approval !== undefined) ctx.reflect.provide('approval', services.approval as never)
   if (services.agents !== undefined) ctx.reflect.provide('agents', services.agents as never)
   applyRuntime(ctx, {})
@@ -156,21 +177,33 @@ export async function host(apps: readonly AppDeclaration[] = [], services: Sessi
     ?? (home === undefined ? dshHomePath('application-harness/history.jsonl') : join(home, 'history.jsonl'))
   const tasksPath = options.tasksPath
     ?? (home === undefined ? dshHomePath('application-harness/tasks.jsonl') : join(home, 'tasks.jsonl'))
-  const secretsPath = options.secretsPath
-    ?? (home === undefined ? dshHomePath('application-harness/secrets.json') : join(home, 'secrets.json'))
-  const configuredDataPath = options.dataPath === null ? undefined : (options.dataPath ?? join(stateHome, 'app-data.sqlite'))
+  const configuredDataPath = options.dataPath === null
+    ? dshHomePath('application-harness/app-data.sqlite')
+    : (options.dataPath ?? join(stateHome, 'app-data.sqlite'))
   const conversationPath = options.conversationPath ?? join(stateHome, 'app-conversation.json')
+  const delegationsPath = options.delegationsPath === null
+    ? dshHomePath('application-harness/delegations.json')
+    : (options.delegationsPath ?? join(stateHome, 'delegations.json'))
+  const appStore = new AppStore(ctx, { dbPath: configuredDataPath })
   const config: Config = {
-    ...(options.grantsPath === null ? {} : { grantsPath, policiesPath, activationPath, developmentPath, modelSelectionsPath, modelUsagePath, modelLimitsPath, onboardingPath, historyPath, tasksPath, secretsPath }),
-    ...(configuredDataPath === undefined ? {} : { dataPath: configuredDataPath }),
+    ...(options.grantsPath === null ? {} : { grantsPath, policiesPath, activationPath, developmentPath, modelSelectionsPath, modelUsagePath, modelLimitsPath, onboardingPath, historyPath, tasksPath }),
     conversationPath,
+    ...(options.delegationsPath === null ? {} : { delegationsPath }),
   }
   const fiber = ctx.plugin(ApplicationBridge, config)
   await fiber
   const runtime = ctx.applications
   const bridge = ctx.applicationBridge
   if (runtime === undefined || bridge === undefined) throw new Error('host bridge test: the host did not mount')
+  // Read activation before registering rows, so every registration settles
+  // (including its health check) exactly as a normal boot's start does. The
+  // production ordering (rows mounted while the gate is closed) is covered by
+  // the corrupt-table test and the runtime's own start-gate tests.
+  const activationReady = (bridge as unknown as { activationReady: Promise<void> }).activationReady
+  if (options.preActivation !== true) await activationReady
   for (const declaration of apps) await runtime.register(declaration)
+  await activationReady
+  await waitFor(() => bridge.list().every(row => row.runtime !== 'stopped' || row.activation === 'disabled'))
   return {
     ctx,
     runtime,
@@ -182,11 +215,13 @@ export async function host(apps: readonly AppDeclaration[] = [], services: Sessi
     onboardingPath,
     historyPath,
     tasksPath,
-    secretsPath,
-    dataPath: configuredDataPath ?? dshHomePath('application-harness/app-data.sqlite'),
+    dataPath: configuredDataPath,
     conversationPath,
+    delegationsPath,
+    appStore,
     dispose: async () => {
       await ctx.fiber.dispose()
+      appStore.close()
       if (home !== undefined) rmSync(home, { recursive: true, force: true })
       rmSync(stateHome, { recursive: true, force: true })
     },
@@ -215,24 +250,28 @@ export function demoApp(id = 'demo', over: Partial<AppDeclaration> = {}): AppDec
     ops: {
       echo: {
         description: 'returns its arguments',
+        effect: 'read',
         params: { text: { type: 'string', required: true } },
         result: { type: 'json' },
         execute: (args) => args,
       },
       touch: {
         description: 'declares that the data changed',
+        effect: 'write',
         params: {},
         result: { type: 'json' },
         execute: (_args, ctx) => { ctx.notifyChanged(); return { touched: true } },
       },
       tick: {
         description: 'reports progress and returns',
+        effect: 'read',
         params: {},
         result: { type: 'json' },
         execute: (_args, ctx) => { ctx.reportProgress('halfway', { done: 1 }); return { ran: true } },
       },
       slow: {
         description: 'waits for its cancellation signal',
+        effect: 'read',
         params: {},
         result: { type: 'json' },
         execute: (_args, ctx) => new Promise((_resolve, reject) => {
@@ -243,6 +282,7 @@ export function demoApp(id = 'demo', over: Partial<AppDeclaration> = {}): AppDec
       },
       boom: {
         description: 'fails with a business code',
+        effect: 'read',
         params: {},
         result: { type: 'json' },
         execute: () => { throw new AppError('stale-version', 'the note changed') },

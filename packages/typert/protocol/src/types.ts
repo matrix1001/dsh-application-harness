@@ -948,8 +948,8 @@ export interface TypertRegistryContract {
 // Context with `typert` and `invocation`. Keeping that augmentation here makes
 // the Typert analyzer discover this shell as a service contributor; analyzing
 // its `TypertLookupMap` then merges the published dsh-session augmentation from
-// node_modules and fails the "declaration outside this face" check (rc.2).
+// node_modules and fails the "declaration outside this face" check.
 // This shell only supplies type-meta symbols to the build plane, our packages
 // do not read ctx.typert/ctx.invocation, and the published protocol package
-// (runtime/test plane) keeps the augmentation. `vendor-platform-src` normalizes
-// this block before comparing the shell with the checkout.
+// (runtime/test plane) keeps the augmentation. `platform-line --set` refreshes
+// this file from the installed line and cuts the augmentation.

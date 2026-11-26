@@ -20,8 +20,8 @@ export type PageRecordKind = string
 
 /** One record inside one application. */
 export interface PageRecordReference {
-  /** The application that owns the record; absent on legacy citations. */
-  readonly appId?: string
+  /** The application that owns the record. */
+  readonly appId: string
   /** Which family the record belongs to. */
   readonly kind: PageRecordKind
   /** The record's id inside that family. */

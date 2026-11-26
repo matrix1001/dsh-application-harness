@@ -232,6 +232,95 @@ describe('AppHttp: direct path', () => {
     expect(fetchImpl).not.toHaveBeenCalled()
   })
 
+  test('refuses a loopback/private target by default', async () => {
+    const fetchImpl = vi.fn(async () => new Response('{}', { status: 200 }))
+    vi.stubGlobal('fetch', fetchImpl)
+    await expect(mount().getJson('http://127.0.0.1/x')).rejects.toThrow(/private or loopback/u)
+    await expect(mount().getJson('http://localhost/x')).rejects.toThrow(/private or loopback/u)
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  test('refuses a loopback/private target when the caller disables private destinations', async () => {
+    const fetchImpl = vi.fn(async () => new Response('{}', { status: 200 }))
+    vi.stubGlobal('fetch', fetchImpl)
+    await expect(mount().getJson('http://127.0.0.1/x', { allowPrivate: false })).rejects.toThrow(/private or loopback/u)
+    await expect(mount().getJson('http://localhost/x', { allowPrivate: false })).rejects.toThrow(/private or loopback/u)
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  test('classifies loopback, link-local and private IPv4/IPv6 literals without a request', async () => {
+    const fetchImpl = vi.fn(async () => new Response('{}', { status: 200 }))
+    vi.stubGlobal('fetch', fetchImpl)
+    const service = mount()
+    for (const target of [
+      'http://0.0.0.0/', 'http://10.0.0.1/', 'http://127.0.0.1/', 'http://100.64.0.1/',
+      'http://169.254.1.1/', 'http://172.16.0.1/', 'http://192.0.0.1/', 'http://192.168.0.1/',
+      'http://198.18.0.1/', 'http://198.19.0.1/', 'http://224.0.0.1/', 'http://[::1]/', 'http://[::]/',
+      'http://[fe80::1]/', 'http://[fc00::1]/', 'http://[fd12::1]/', 'http://[::ffff:127.0.0.1]/', 'http://localhost./',
+    ]) {
+      await expect(service.getJson(target, { allowPrivate: false })).rejects.toThrow(/private or loopback/u)
+    }
+    expect(fetchImpl).not.toHaveBeenCalled()
+    for (const target of ['http://8.8.8.8/', 'http://[2001:4860:4860::8888]/']) {
+      await expect(service.getJson(target, { allowPrivate: false })).resolves.toMatchObject({ status: 200 })
+    }
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+  })
+
+  test('follows a public redirect and revalidates every hop', async () => {
+    const fetchImpl = vi.fn(async (url: unknown) => String(url).endsWith('/start')
+      ? new Response(null, { status: 302, headers: { location: 'https://8.8.8.8/final' } })
+      : new Response('{}', { status: 200 }))
+    vi.stubGlobal('fetch', fetchImpl)
+    await expect(mount().getJson('https://8.8.8.8/start', { allowPrivate: false })).resolves.toMatchObject({ status: 200 })
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(fetchImpl).toHaveBeenLastCalledWith('https://8.8.8.8/final', expect.objectContaining({ redirect: 'manual' }))
+  })
+
+  test('rejects a redirect that lands on a private target', async () => {
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 302, headers: { location: 'http://127.0.0.1/secret' } }))
+    vi.stubGlobal('fetch', fetchImpl)
+    await expect(mount().getJson('https://8.8.8.8/start', { allowPrivate: false })).rejects.toThrow(/private or loopback redirect target/u)
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
+  test('rejects malformed, missing and non-http redirect targets', async () => {
+    const make = (headers: Record<string, string> = {}) => vi.fn(async () => new Response(null, { status: 302, headers }))
+    for (const [headers, pattern] of [
+      [{}, /carries no Location/u],
+      [{ location: 'http://[bad' }, /unparseable redirect target/u],
+      [{ location: 'file:///etc/passwd' }, /unsupported redirect scheme/u],
+    ] as const) {
+      const fetchImpl = make(headers)
+      vi.stubGlobal('fetch', fetchImpl)
+      await expect(mount().getJson('https://8.8.8.8/start', { allowPrivate: false })).rejects.toThrow(pattern)
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+    }
+  })
+
+  test('allows a private redirect only when private destinations are enabled', async () => {
+    const fetchImpl = vi.fn(async (url: unknown) => String(url).endsWith('/start')
+      ? new Response(null, { status: 302, headers: { location: 'http://127.0.0.1/final' } })
+      : new Response('{}', { status: 200 }))
+    vi.stubGlobal('fetch', fetchImpl)
+    await expect(mount().getJson('http://127.0.0.1/start', { allowPrivate: true })).resolves.toMatchObject({ status: 200 })
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+  })
+
+  test('caps a redirect chain at five hops', async () => {
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 302, headers: { location: 'https://8.8.8.8/loop' } }))
+    vi.stubGlobal('fetch', fetchImpl)
+    await expect(mount().getJson('https://8.8.8.8/start', { allowPrivate: false })).rejects.toThrow(/too many redirects/u)
+    expect(fetchImpl).toHaveBeenCalledTimes(6)
+  })
+
+  test('refuses a redirect instead of following it when followRedirects is false', async () => {
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 302, headers: { location: 'https://example.com/next' } }))
+    vi.stubGlobal('fetch', fetchImpl)
+    await expect(mount().getJson('https://example.com/x', { followRedirects: false })).rejects.toThrow(/redirect .* refused/u)
+    expect(fetchImpl).toHaveBeenCalledWith('https://example.com/x', expect.objectContaining({ redirect: 'manual' }))
+  })
+
   test('refuses a non-http(s) or unparseable target at the seam exit', async () => {
     const fetchImpl = vi.fn(async () => new Response('{}', { status: 200 }))
     vi.stubGlobal('fetch', fetchImpl)

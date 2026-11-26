@@ -38,6 +38,9 @@ import { transform } from 'lightningcss'
 const CSS_VIRTUAL_PREFIX = '\0dsh-css:'
 const CSS_VIRTUAL_SUFFIX = '.mjs'
 
+/** The physical stylesheet behind each emitted virtual id (kept out of the id itself). */
+const cssAssetPaths = new Map<string, string>()
+
 /**
  * Wire/type layers a client bundle may inline: browser-safe contracts
  * with no runtime identity to share (no Symbol/instanceof/singleton state).
@@ -200,11 +203,17 @@ export function cssModulesPlugin(id: string) {
     resolveId(source: string, importer: string | undefined) {
       if (!source.endsWith('.module.css')) return null
       const abs = importer !== undefined ? sourceAssetPath(source, importer) : source
-      return CSS_VIRTUAL_PREFIX + abs + CSS_VIRTUAL_SUFFIX
+      // The virtual id is emitted into the bundle; a build-machine absolute
+      // path there would leak the checkout location and make builds
+      // irreproducible. Keep the physical path in this process-local map.
+      const key = relative(process.cwd(), abs) || basename(abs)
+      cssAssetPaths.set(key, abs)
+      return CSS_VIRTUAL_PREFIX + key + CSS_VIRTUAL_SUFFIX
     },
     async load(virtualId: string) {
       if (!virtualId.startsWith(CSS_VIRTUAL_PREFIX)) return null
-      const fileId = virtualId.slice(CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
+      const key = virtualId.slice(CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
+      const fileId = cssAssetPaths.get(key) ?? resolvePath(process.cwd(), key)
       // The virtual id otherwise hides the physical stylesheet from Rolldown's watch graph.
       this.addWatchFile(fileId)
       const source = await readFile(fileId)
@@ -305,7 +314,7 @@ const manifestCache = new Map<string, WorkspaceManifest>()
 
 /**
  * The workspace package's own manifest, by package name (the layout is fixed:
- * `packages/<group>/<dir>/package.json`, the platform preset's own lookup).
+ * `packages/<group>/<dir>/package.json` or `apps/<app>/{host,view}/package.json`).
  * @param id - the package name.
  * @returns its manifest.
  * @throws when no workspace manifest declares that name.
@@ -313,13 +322,16 @@ const manifestCache = new Map<string, WorkspaceManifest>()
 function workspaceManifest(id: string): WorkspaceManifest {
   const cached = manifestCache.get(id)
   if (cached !== undefined) return cached
-  for (const manifestPath of globSync('packages/*/*/package.json', { cwd: REPOSITORY_ROOT })) {
+  for (const manifestPath of [
+    ...globSync('packages/*/*/package.json', { cwd: REPOSITORY_ROOT }),
+    ...globSync('apps/*/*/package.json', { cwd: REPOSITORY_ROOT }),
+  ]) {
     const manifest = JSON.parse(readFileSync(resolvePath(REPOSITORY_ROOT, manifestPath), 'utf8')) as WorkspaceManifest
     if (manifest.name !== id) continue
     manifestCache.set(id, manifest)
     return manifest
   }
-  throw new Error(`tsdown: no packages/*/*/package.json declares the name ${id}`)
+  throw new Error(`tsdown: no workspace package manifest declares the name ${id}`)
 }
 
 /** Escape a package name for literal use inside a RegExp. */
@@ -439,17 +451,19 @@ function clientConfig(id: string, entry: string, clientExternal: readonly string
       // collaboration goes through cordis services instead.
       name: 'dsh-client-bundle-purity',
       resolveId(source: string) {
+        // Inline workspace libraries resolve to their source entry before the
+        // platform-package gate below: the consumer bundles the src (with its
+        // own externals), never the library's built lib — no stale-lib race,
+        // no duplicate baseline. These packages use the @matrix1001 scope, so
+        // the early `@deepseek-ai/` return must not swallow them.
+        const workspaceEntry = INLINE_WORKSPACE[source]
+        if (workspaceEntry !== undefined) return resolvePath(REPOSITORY_ROOT, workspaceEntry)
         if (!source.startsWith('@deepseek-ai/')) return null
         if (CLIENT_EXTERNALS.includes(source)) return null // platform module: external wins
         if (seam.includes(source)) return null // declared dsh.client.external edge: external, answered by the module table
         if (VENDORED_LIBRARY.test(source)) return null // vendored library: inline, no shared identity
         if (INLINE_SAFE.test(source) || GENERATED_REMOTE.has(source)) return null // wire contribution: inline is the point
         if (INLINE_PLATFORM_SUBPATHS.has(source)) return null // platform subpath that is constants + types only (an exact specifier, never a whole package)
-        // Inline workspace libraries resolve to their source entry: the
-        // consumer bundles the src (with its own externals), never the
-        // library's built lib — no stale-lib race, no duplicate baseline.
-        const workspaceEntry = INLINE_WORKSPACE[source]
-        if (workspaceEntry !== undefined) return resolvePath(REPOSITORY_ROOT, workspaceEntry)
         throw new Error(
           `client bundle purity: "${source}" is not a platform module (CLIENT_EXTERNALS), a declared dsh.client.external edge, an inline-safe wire layer, a generated /remote contribution, or an inline workspace library — `
           + 'a constants-and-types platform subpath, an inline workspace library, or a generated /remote contribution — '

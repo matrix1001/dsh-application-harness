@@ -1,48 +1,45 @@
 // @vitest-environment jsdom
 /**
- * How narrow the application AREA is: the hook measures the element it is given
- * — never the window — falls back to that element's own clientWidth where no
- * ResizeObserver exists (jsdom, and any host without one), and treats a box that
- * was never laid out as the wide desktop layout, which is what the components
- * render by default. Where an observer exists it is the measurement, and it is
- * disconnected when the element goes.
+ * How much width the application AREA has: the hook measures the element it is
+ * given — never the window — and answers two thresholds: COMPACT below 720 and
+ * WIDE at or above 1040. Between them the area is regular; a box that was never
+ * laid out is the wide desktop default, which is what the components render on
+ * their first pass.
  *
- * Besides the answer it reports whether the box HAS been measured: a caller
- * that must act on the narrowness (the entry request that opens the drawer on a
- * phone and the column on a desktop) waits for that flag, because before the
- * first measurement every box reads as the wide default.
+ * Besides the answers it reports whether the box HAS been measured: a caller
+ * that must act on the layout waits for that flag, because before the first
+ * measurement the wide default is a placeholder, not a fact.
  */
 import { act, cleanup, render, type RenderResult } from '@testing-library/react'
 import { useRef, type ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { NARROW_MAX_PX, useNarrow } from '../src/client/narrow.ts'
+import { NARROW_MAX_PX, WIDE_MIN_PX, useNarrow } from '../src/client/narrow.ts'
 
 /** One probe element: the hook measures the div it is handed. */
 function Probe(): ReactNode {
   const ref = useRef<HTMLDivElement>(null)
-  const { narrow, measured } = useNarrow(ref)
-  return <div ref={ref} data-testid="probe" data-narrow={narrow ? 'true' : 'false'} data-measured={measured ? 'true' : 'false'} />
+  const { compact, wide, measured } = useNarrow(ref)
+  return <div ref={ref} data-testid="probe" data-compact={compact ? 'true' : 'false'} data-wide={wide ? 'true' : 'false'} data-measured={measured ? 'true' : 'false'} />
 }
 
-/** The hook's answer, as the probe reports it. */
-function answer(view: RenderResult): string | null {
-  return view.getByTestId('probe').getAttribute('data-narrow')
+/** One answer, as the probe reports it. */
+function attr(view: RenderResult, name: string): string | null {
+  return view.getByTestId('probe').getAttribute(name)
 }
 
 /**
- * Render one probe whose box reports a laid-out width, and read the hook's
- * answer (jsdom computes no layout, so the width is stubbed on the prototype
- * for the case's duration).
+ * Render one probe whose box reports a laid-out width, and read both answers
+ * (jsdom computes no layout, so the width is stubbed on the prototype for the
+ * case's duration).
  */
-function answerAt(width: number): string | null {
+function answerAt(width: number): { readonly compact: string | null; readonly wide: string | null } {
   const original = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
   Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => width })
   try {
     const view = render(<Probe />)
-    const answer = view.getByTestId('probe').getAttribute('data-narrow')
-    view.unmount()
-    return answer
+    return { compact: attr(view, 'data-compact'), wide: attr(view, 'data-wide') }
   } finally {
+    cleanup()
     if (original === undefined) delete (HTMLElement.prototype as { clientWidth?: unknown }).clientWidth
     else Object.defineProperty(HTMLElement.prototype, 'clientWidth', original)
   }
@@ -51,8 +48,8 @@ function answerAt(width: number): string | null {
 /** A probe whose ref is never attached to an element (nothing to measure). */
 function Unattached(): ReactNode {
   const ref = useRef<HTMLDivElement>(null)
-  const { narrow } = useNarrow(ref)
-  return <p data-testid="probe" data-narrow={narrow ? 'true' : 'false'} />
+  const { compact, wide } = useNarrow(ref)
+  return <p data-testid="probe" data-compact={compact ? 'true' : 'false'} data-wide={wide ? 'true' : 'false'} />
 }
 
 /** A controllable stand-in for the browser's observer (jsdom has none). */
@@ -92,25 +89,28 @@ afterEach(() => {
 })
 
 describe('useNarrow', () => {
-  it('falls back to the box’s own width, and calls a box that was never laid out wide', () => {
+  it('falls back to the box’s own width and treats an unlaid-out box as wide', () => {
     expect(typeof ResizeObserver).toBe('undefined')
-    // jsdom's own clientWidth is 0: nothing was laid out, so the wide desktop
-    // layout — the one the components render by default — stays the baseline.
+    // jsdom's own clientWidth is 0: the wide desktop default stays the baseline.
     const view = render(<Probe />)
-    expect(answer(view)).toBe('false')
-    // The synchronous fallback HAS measured: a caller that acts on narrowness
-    // can act as soon as this render's effects have run.
-    expect(view.getByTestId('probe').getAttribute('data-measured')).toBe('true')
+    expect(attr(view, 'data-compact')).toBe('false')
+    expect(attr(view, 'data-wide')).toBe('true')
+    expect(attr(view, 'data-measured')).toBe('true')
     cleanup()
-    expect(answerAt(NARROW_MAX_PX - 1)).toBe('true')
-    // The threshold itself belongs to the wide side.
-    expect(answerAt(NARROW_MAX_PX)).toBe('false')
-    expect(answerAt(NARROW_MAX_PX + 400)).toBe('false')
-    expect(answerAt(0)).toBe('false')
+    expect(answerAt(NARROW_MAX_PX - 1)).toEqual({ compact: 'true', wide: 'false' })
+    // The compact threshold itself belongs to the regular side.
+    expect(answerAt(NARROW_MAX_PX)).toEqual({ compact: 'false', wide: 'false' })
+    expect(answerAt(WIDE_MIN_PX - 1)).toEqual({ compact: 'false', wide: 'false' })
+    // The wide threshold itself belongs to the wide side.
+    expect(answerAt(WIDE_MIN_PX)).toEqual({ compact: 'false', wide: 'true' })
+    expect(answerAt(WIDE_MIN_PX + 400)).toEqual({ compact: 'false', wide: 'true' })
+    expect(answerAt(0)).toEqual({ compact: 'false', wide: 'true' })
   })
 
-  it('answers wide when there is no element to measure', () => {
-    expect(answer(render(<Unattached />))).toBe('false')
+  it('answers the wide default when there is no element to measure', () => {
+    const view = render(<Unattached />)
+    expect(attr(view, 'data-compact')).toBe('false')
+    expect(attr(view, 'data-wide')).toBe('true')
   })
 
   it('follows the observer where the host has one, and stops observing on unmount', () => {
@@ -121,17 +121,22 @@ describe('useNarrow', () => {
     expect(observer?.observed).toHaveLength(1)
     // Until the observer answers, nothing has been measured: the wide default
     // is a placeholder, not a fact.
-    expect(view.getByTestId('probe').getAttribute('data-measured')).toBe('false')
+    expect(attr(view, 'data-measured')).toBe('false')
     observer?.measure(NARROW_MAX_PX - 1)
-    expect(answer(view)).toBe('true')
-    observer?.measure(NARROW_MAX_PX + 400)
-    expect(answer(view)).toBe('false')
+    expect(attr(view, 'data-compact')).toBe('true')
+    expect(attr(view, 'data-wide')).toBe('false')
+    observer?.measure(900)
+    expect(attr(view, 'data-compact')).toBe('false')
+    expect(attr(view, 'data-wide')).toBe('false')
+    observer?.measure(WIDE_MIN_PX)
+    expect(attr(view, 'data-compact')).toBe('false')
+    expect(attr(view, 'data-wide')).toBe('true')
     // A zero-width measurement is a box that was never laid out: wide, again.
     observer?.measure(0)
-    expect(answer(view)).toBe('false')
+    expect(attr(view, 'data-wide')).toBe('true')
     // An observer answering without an entry falls back to the box itself.
     observer?.measureNothing()
-    expect(answer(view)).toBe('false')
+    expect(attr(view, 'data-wide')).toBe('true')
     view.unmount()
     expect(observer?.disconnected).toBe(true)
   })

@@ -1,14 +1,14 @@
 /**
  * The management request: which application's management page is showing (or
- * the list), and on which tab.
+ * the list), and on which area.
  *
  * It belongs to the FRAMEWORK INSTANCE, not to the area component, for two
  * reasons the component cannot serve: a page is handed an `openManagement`
  * callback that binds its own application, and that callback must stay valid
  * (and stable, so a page can put it in an effect's dependencies) across the
  * area unmounting and remounting as the human moves between the conversation
- * and the applications panel; and the header's menu, the list's rows and the
- * pages all open the same one dialog, so there is exactly one place that says
+ * and the applications panel; and the header's menu, the list's rows and
+ * the pages all open the same one page, so there is exactly one place that says
  * what it shows.
  *
  * Opening is a plain request, never an action: nothing here approves a
@@ -44,7 +44,7 @@ export interface ManageService extends HostObservable<ManageRequest | undefined>
   /** Close the dialog (the area does this with itself when it leaves). */
   close(): void
   /**
-   * The `openManagement(tab)` one application's pages are handed: bound to that
+   * The `openManagement(area)` one application's pages are handed: bound to that
    * application, and the SAME function for its whole registration — a page may
    * depend on it without re-running an effect on every repaint. The cache is the
    * service's own and dies with the plugin instance.
@@ -61,6 +61,9 @@ export function manageScrollKey(appId: string | undefined, tab: ManageTab): stri
   return appId === undefined ? 'list' : `${appId}:${tab}`
 }
 
+/** The key the area-level settings page keeps its scroll position under. */
+export const NETWORK_SETTING_SCROLL_KEY = 'setting:network'
+
 /** The instance-owned memory: a plain map, pruned on registry changes. */
 function createScrollMemory(): ManageScrollMemory {
   const positions = new Map<string, number>()
@@ -71,9 +74,10 @@ function createScrollMemory(): ManageScrollMemory {
       for (const key of [...positions.keys()]) {
         const at = key.indexOf(':')
         if (at >= 0 && appIds.has(key.slice(0, at))) continue
-        // Everything else — an application that is gone, or any key this
-        // vocabulary does not name — is not a surface that exists.
-        if (at < 0 && key === 'list') continue
+        // The list, the fixed queues and the area-level settings pages are
+        // shared surfaces; everything else — an application that is gone, or
+        // any key this vocabulary does not name — is not a surface that exists.
+        if (at < 0 && (key === 'list' || key.startsWith('queue:') || key.startsWith('setting:'))) continue
         positions.delete(key)
       }
     },

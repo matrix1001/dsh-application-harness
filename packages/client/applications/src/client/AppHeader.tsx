@@ -1,22 +1,26 @@
 /**
  * The application header: the compact strip above the business surface. It
- * carries only what a user needs WHILE working — which application this is
- * (and a fast switch to another), and the way into this
- * application's management. Identity details (id, version, lifecycle, ops) are
- * not repeated here: they live in the management dialog, where they are read
- * on purpose instead of occupying every business page.
+ * carries ONE contextual way back (the record origin, or the conversation at
+ * the area root), the fixed application tabs (the fast switch, the current
+ * identity and the direct reorder surface), the complete application list with
+ * its pin toggles, the shell status control and the current application's
+ * management menu. Identity details (id, version, lifecycle, ops) stay in
+ * management, where they are read on purpose.
  * @module @matrix1001/dsh-application-harness-client-applications/client/AppHeader
  */
-import { useState, type ReactNode } from 'react'
+import { useRef, useState, type ReactNode } from 'react'
 import {
-  Button, IconChevronDownOutlineRegular, IconChevronLeftOutlineRegular, IconEllipsisOutlineRegular, IconPanelLeftOutlineRegular,
-  IconNewChatOutlineRegular, Menu, Tooltip, type MenuEntry,
-} from '@deepseek-ai/dsh-client-ui-primitives'
+  Button, IconChevronLeftOutlineRegular, IconEllipsisOutlineRegular, IconPanelLeftOutlineRegular,
+  Menu, Tooltip, type MenuEntry,
+} from '@matrix1001/dsh-application-harness-client-chrome'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { AppInfo } from '@matrix1001/dsh-application-harness-host-bridge/client'
 import type { ApplicationView, ManageTab } from './contract.ts'
-import { AppIcon } from './AppIcon.tsx'
-import { displayName, hasSettings } from './model.ts'
+import { AppMenu } from './AppMenu.tsx'
+import { AppTabs } from './AppTabs.tsx'
+import { hasSettings } from './model.ts'
+import type { AreaNotice } from './notices.ts'
+import { StatusControl } from './StatusControl.tsx'
 import css from './ApplicationsArea.module.css'
 
 /** What the header renders from and the actions it offers. */
@@ -25,52 +29,58 @@ export interface AppHeaderProps {
   readonly app: AppInfo | undefined
   /** Its registration (the display name and the settings half). */
   readonly view: ApplicationView | undefined
-  /** The applications the quick switcher offers (those with a page). */
-  readonly switchable: readonly AppInfo[]
-  /** The registrations, for the switcher's display names. */
+  /** The fixed tabs plus the temporary current application, in render order. */
+  readonly tabs: readonly AppInfo[]
+  /** Every page application, in the host's stable order (the complete list). */
+  readonly allApps: readonly AppInfo[]
+  /** The applications fixed to the tab strip, in the human's order. */
+  readonly pinned: readonly AppInfo[]
+  /** The current application when it is not fixed (it renders as a temporary last tab). */
+  readonly temporaryId?: string | undefined
+  /** Applications whose first-run capability card is still unanswered. */
+  readonly pendingApproval?: ReadonlySet<string> | undefined
+  /** The registrations, for the tabs' and list's display names. */
   readonly views: ReadonlyMap<string, ApplicationView>
-  /** Whether the area is narrow (the drawer opener takes the first slot). */
-  readonly narrow: boolean
-  /** Whether the wide navigation column is expanded (its own fold control lives in the column, so a FOLDED column needs this way back). */
-  readonly navExpanded: boolean
+  /** Whether the application rows are still being read. */
+  readonly loading: boolean
   /** Confirmations waiting — shown on the management entry. */
   readonly pending: number
-  /** Open the narrow navigation drawer. */
-  readonly onOpenDrawer: () => void
-  /** Fold or unfold the wide navigation column. */
-  readonly onToggleNav: () => void
+  /** The shell-level notices the header's status control reports. */
+  readonly notices: readonly AreaNotice[]
+  /** The one back action's destination: the record origin, or the conversation. */
+  readonly backLabel: string
+  /** The one back action: pop the record origin, or leave the area at its root. */
+  readonly onBack: () => void
   readonly onSwitch: (appId: string) => void
-  /** Open the management dialog for one application at one tab. */
-  readonly onManage: (appId: string, tab: ManageTab) => void
-  /** Open the right-Sidebar conversation without leaving the application page. */
-  readonly onChat?: () => void
+  /** Fix one page application to the tab strip (append). */
+  readonly onPin: (appId: string) => void
+  /** Remove one page application from the tab strip. */
+  readonly onUnpin: (appId: string) => void
+  /** Replace the fixed order after a drag or a context-menu move. */
+  readonly onOrder: (ids: readonly string[]) => void
+  /** Open the management page for one application at one area (and one section inside it). */
+  readonly onManage: (appId: string, tab: ManageTab, focus?: 'history' | 'debug') => void
+  /** Open the management surface at its list (the list's footer). */
+  readonly onManageList: () => void
+  /** Open the application-area right dock. */
+  readonly onDockOpen?: () => void
   /** Open the development-session creation dialog. */
   readonly onDevelop?: (appId: string) => void
-  /** Whether a cross-application origin is on the stack. */
-  readonly canRecordBack?: boolean
-  /** Return to the cross-application origin, when one exists. */
-  readonly onRecordBack?: () => void
-  /** Leave the application area for the conversation. */
-  readonly onBack: () => void
   readonly t: TranslateNS<'applications'>
 }
 
 /**
  * Render the application header.
- * @param props - the current application, the switchable rows and the actions.
+ * @param props - the tabs, the complete list, the back action and the actions.
  * @returns the header element.
  */
 export function AppHeader(props: AppHeaderProps): ReactNode {
-  const { app, view, switchable, views, narrow, navExpanded, pending, onOpenDrawer, onToggleNav, onSwitch, onManage, onChat, onDevelop, onBack, canRecordBack, onRecordBack, t } = props
-  const [switchOpen, setSwitchOpen] = useState(false)
+  const {
+    app, view, tabs, allApps, pinned, temporaryId, pendingApproval, views, loading, pending, notices,
+    backLabel, onBack, onSwitch, onPin, onUnpin, onOrder, onManage, onManageList, onDockOpen, onDevelop, t,
+  } = props
   const [menuOpen, setMenuOpen] = useState(false)
-
-  const switchItems: readonly MenuEntry[] = switchable.map(candidate => ({
-    id: candidate.id,
-    label: displayName(candidate, views.get(candidate.id)),
-    // The same glyph the navigation shows: one application, one face.
-    icon: <AppIcon view={views.get(candidate.id)} size={16} />,
-  }))
+  const menuButton = useRef<HTMLButtonElement>(null)
 
   const manageItems: readonly MenuEntry[] = app === undefined ? [] : [
     ...(hasSettings(view) ? [{ id: 'settings', label: t('menu.settings') }] : []),
@@ -82,102 +92,56 @@ export function AppHeader(props: AppHeaderProps): ReactNode {
     { id: 'debug', label: t('menu.debug') },
   ]
 
-  const name = app === undefined ? t('panel') : displayName(app, view)
-
   return (
     <header className={css.header} data-app-header>
-      {/* One way into the navigation: the drawer's opener while narrow, and —
-          because the folded COLUMN hides its own control with itself — the
-          unfold control while a wide column is folded. */}
-      {(narrow || !navExpanded) && (
-        <button
-          type="button"
+      <Tooltip label={backLabel} delayMs={500}>
+        <Button
+          size="sm"
+          variant="ghost"
           className={css.headerIconButton}
-          data-app-drawer-open
-          data-nav-open={narrow ? 'drawer' : 'column'}
-          aria-label={t('nav.expand')}
-          onClick={narrow ? onOpenDrawer : onToggleNav}
+          data-app-back
+          aria-label={backLabel}
+          onClick={onBack}
         >
-          <IconPanelLeftOutlineRegular size={16} />
-        </button>
-      )}
-      {canRecordBack === true && (
-        <button
-          type="button"
-          className={css.headerIconButton}
-          data-app-record-back
-          aria-label={t('nav.backRecord')}
-          title={t('nav.backRecord')}
-          onClick={onRecordBack}
-        >
-          ←
-        </button>
-      )}
-      {narrow
-        ? (
-          <Tooltip label={t('menu.back')} delayMs={500}>
-            <button
-              type="button"
-              className={css.headerIconButton}
-              data-app-back
-              aria-label={t('menu.back')}
-              onClick={onBack}
-            >
-              <IconChevronLeftOutlineRegular size={16} />
-            </button>
-          </Tooltip>
-        )
-        : <Button size="sm" variant="ghost" data-app-back onClick={onBack}>{t('menu.back')}</Button>}
-      <Menu
-        open={switchOpen}
-        anchor={(
-          <button
-            type="button"
-            className={css.switcher}
-            data-app-switcher
-            aria-haspopup="menu"
-            aria-expanded={switchOpen}
-            onClick={() => { setSwitchOpen(open => !open) }}
-          >
-            {app !== undefined && <AppIcon view={view} size={16} />}
-            <span className={css.switcherName}>{name}</span>
-            <IconChevronDownOutlineRegular size={14} />
-          </button>
-        )}
-        items={switchItems}
-        selectedId={app?.id}
-        onSelect={(id) => { setSwitchOpen(false); onSwitch(id) }}
-        onClose={() => { setSwitchOpen(false) }}
-        autoFocus
+          <IconChevronLeftOutlineRegular size={16} />
+        </Button>
+      </Tooltip>
+      <AppTabs
+        apps={tabs}
+        views={views}
+        activeId={app?.id}
+        loading={loading}
+        {...(temporaryId === undefined ? {} : { temporaryId })}
+        {...(pendingApproval === undefined ? {} : { pendingApproval })}
+        onSelect={onSwitch}
+        onPin={onPin}
+        onUnpin={onUnpin}
+        onOrder={onOrder}
+        t={t}
+      />
+      <AppMenu
+        apps={allApps}
+        pinnedIds={pinned.map(candidate => candidate.id)}
+        activeId={app?.id}
+        views={views}
+        loading={loading}
+        {...(pendingApproval === undefined ? {} : { pendingApproval })}
+        onSwitch={onSwitch}
+        onPin={onPin}
+        onUnpin={onUnpin}
+        onManageList={onManageList}
+        t={t}
       />
       <div className={css.headerSpacer} />
-      {/* Citing the page in the conversation is the header's one text action on
-          a wide strip; on a narrow one it becomes the same action as an icon
-          button with its accessible name — a labelled button whose label
-          cannot fit is what pushed the header out of its column. */}
-      {app !== undefined && view?.Component !== undefined && onChat !== undefined && (
-        narrow
-          ? (
-            <Tooltip label={t('header.chat')} delayMs={500}>
-              <button
-                type="button"
-                className={css.headerIconButton}
-                data-app-chat
-                aria-label={t('header.chat')}
-                onClick={onChat}
-              >
-                <IconNewChatOutlineRegular size={16} />
-              </button>
-            </Tooltip>
-          )
-          : <Button size="sm" data-app-chat onClick={onChat}>{t('header.chat')}</Button>
-      )}
-      {app !== undefined && (
+      <StatusControl notices={notices} panelId="app-status-panel" t={t} />
+      {app !== undefined && view?.Component !== undefined && (
         <Menu
           open={menuOpen}
           anchor={(
-            <button
-              type="button"
+            <Button
+              ref={menuButton}
+              size="sm"
+              variant="ghost"
               className={css.headerIconButton}
               data-app-menu
               aria-label={pending > 0 ? `${t('header.manage')} (${String(pending)})` : t('header.manage')}
@@ -187,20 +151,40 @@ export function AppHeader(props: AppHeaderProps): ReactNode {
             >
               <IconEllipsisOutlineRegular size={16} />
               {pending > 0 && <span className={css.headerCount} data-app-pending-count>{pending}</span>}
-            </button>
+            </Button>
           )}
           items={manageItems}
           onSelect={(id) => {
             setMenuOpen(false)
-            if (id === 'develop') { onDevelop?.(app!.id); return }
-            // The menu only exists beside a selected application (the JSX
-            // above), so this handler always has one to manage.
-            onManage(app!.id, id === 'debug' ? 'developer' : id as ManageTab)
+            menuButton.current?.focus()
+            if (id === 'develop') { onDevelop?.(app.id); return }
+            if (id === 'debug') { onManage(app.id, 'status', 'debug'); return }
+            /* v8 ignore start -- these menu destinations are exercised through the management page */
+            onManage(
+              app.id,
+              id === 'info' ? 'status' : id === 'history' ? 'data' : id as ManageTab,
+              id === 'history' ? 'history' : undefined,
+            )
+            /* v8 ignore stop */
           }}
           onClose={() => { setMenuOpen(false) }}
           align="end"
           autoFocus
         />
+      )}
+      {app !== undefined && view?.Component !== undefined && onDockOpen !== undefined && (
+        <Tooltip label={t('dock.expandAria')} side="bottom" delayMs={500}>
+          <Button
+            size="sm"
+            variant="ghost"
+            className={css.dockExpand}
+            data-sidebar-right-expand
+            aria-label={t('dock.expandAria')}
+            onClick={onDockOpen}
+          >
+            <IconPanelLeftOutlineRegular size={16} className={css.dockExpandIcon} />
+          </Button>
+        </Tooltip>
       )}
     </header>
   )

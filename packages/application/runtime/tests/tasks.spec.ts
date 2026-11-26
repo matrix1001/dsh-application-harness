@@ -275,7 +275,6 @@ describe('background task edges', () => {
         return { status: outcome.status, result: 'hello' }
       }) },
     }))
-    await runtime.grant({ caller: { kind: 'app', appId: 'tasks' }, capabilities: ['target#echo'], grantedAt: '2026-01-01T00:00:00.000Z' })
     await runtime.call(asUser, 'tasks', 'start', {})
     const task = await waitForState(runtime, 'tasks', 'task-1', 'succeeded')
     expect(task.resultSummary).toMatchObject({ status: 'success', result: 'hello' })

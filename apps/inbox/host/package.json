@@ -1,0 +1,52 @@
+{
+  "name": "@matrix1001/dsh-application-harness-inbox",
+  "description": "信息收件箱：GitHub Releases、RSS/Atom 与手动链接；条目转待办或存为笔记",
+  "version": "0.1.1",
+  "engines": {
+    "dsh": "0.2.3-alpha.2"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/matrix1001/dsh-application-harness.git",
+    "directory": "apps/inbox/host"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/types/**/*.d.ts"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@deepseek-ai/dsh-util-values": "0.2.3-alpha.2",
+    "@deepseek-ai/schemastery": "3.20.0-alpha.1"
+  },
+  "peerDependencies": {
+    "@matrix1001/dsh-application-harness-runtime": "workspace:*",
+    "@matrix1001/dsh-application-harness-store": "workspace:*",
+    "@deepseek-ai/cordis": "4.2.0-alpha.1"
+  },
+  "devDependencies": {
+    "@matrix1001/dsh-application-harness-runtime": "workspace:*",
+    "@matrix1001/dsh-application-harness-store": "workspace:*",
+    "@deepseek-ai/cordis": "4.2.0-alpha.1"
+  },
+  "dsh": {
+    "appRow": {
+      "id": "inbox",
+      "name": "@matrix1001/dsh-application-harness-inbox"
+    }
+  },
+  "author": "matrix1001"
+}
